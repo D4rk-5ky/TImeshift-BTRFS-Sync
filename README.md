@@ -1,4 +1,6 @@
-# timeshift-btrfs-sync
+# timeshift-btrfs-syncz
+
+!!! NOTE !!! THIS IS A WORK IN PROGRESS AND IS NOT READY FOR USE !!! NOTE !!!
 
 `timeshift-btrfs-sync` pulls Timeshift Btrfs snapshots from a source machine to a Btrfs backup destination over SSH.
 
