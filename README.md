@@ -1,5 +1,9 @@
 # timeshift-btrfs-sync
 
+!!! NOTE !!! THIS IS VERY MUCH A WORK IN PROCESS AND IS NOT READY YET IN ANY WAY:
+
+----
+
 `timeshift-btrfs-sync` is a first-version Python CLI app for pulling Timeshift Btrfs snapshots from a source machine to a Btrfs backup destination over SSH.
 
 It does **not** reimplement Btrfs send/receive. It safely orchestrates:
