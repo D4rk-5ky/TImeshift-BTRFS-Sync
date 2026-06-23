@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "timeshift-btrfs-sync"
-version = "0.3.2"
+version = "0.3.3"
 description = "Destination-pull Btrfs send/receive sync for Timeshift snapshots with minimal source sudo and Timeshift-like cache layout"
 readme = "README.md"
 requires-python = ">=3.11"

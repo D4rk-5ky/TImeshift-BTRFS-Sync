@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.3.2 minimal-source-sudo config
+# timeshift-btrfs-sync v0.3.3 minimal-source-sudo config
 # Run this app on the BACKUP/DESTINATION machine.
 
 # Human-readable job name. Used for your own identification.
@@ -19,11 +19,23 @@ host = "source-machine.example.lan"
 # for btrfs and timeshift, configured in sudoers.
 user = "btrbk-source"
 
-# Optional SSH port and private key.
+# Optional SSH port.
 # port = 22
+
+# Recommended unattended authentication: store the private key path in TOML.
+# The private key file itself should be protected, for example chmod 600.
 # identity_file = "/root/.ssh/timeshift-btrfs-sync"
 
+# Optional password authentication using sshpass on the DESTINATION machine.
+# This stores a clear-text password in TOML, so identity_file is safer.
+# Do NOT use BatchMode=yes when using password/password_file.
+# password = "your-ssh-password"
+
+# Slightly safer password auth: keep the password in a separate chmod 600 file.
+# password_file = "/root/.ssh/timeshift-btrfs-sync.password"
+
 # BatchMode=yes prevents SSH password/passphrase prompts from hanging timers.
+# Keep this for key-based auth. Remove it when using password/password_file.
 extra_args = ["-o", "BatchMode=yes"]
 
 [source]
