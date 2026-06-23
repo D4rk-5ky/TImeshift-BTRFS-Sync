@@ -1,8 +1,4 @@
-"""TOML configuration loading and validation.
-
-The config file is read once by each CLI command and converted into dataclasses.
-The rest of the project uses those typed objects instead of raw TOML dicts.
-"""
+"""TOML configuration loading and validation."""
 
 from __future__ import annotations
 
@@ -16,51 +12,59 @@ from .ssh import SSHConfig
 
 @dataclass(slots=True)
 class SourceConfig:
-    """Remote/source settings.
+    """Remote/source Timeshift and Btrfs settings."""
 
-    The source side intentionally needs no helper script. The only source-side
-    commands that should need passwordless sudo are `btrfs` and `timeshift`.
-    """
-
-    # Root where Timeshift stores snapshot folders.
     snapshot_root: str
-
-    # Subvolumes expected inside each snapshot folder, usually @ and @home.
     subvolumes: list[str] = field(default_factory=lambda: ["@", "@home"])
-
-    # Remote sudo prefix. `sudo -n` fails instead of asking for a password.
     sudo: str = "sudo -n"
-
-    # Command names or absolute paths used on the source.
     btrfs_command: str = "btrfs"
     timeshift_command: str = "timeshift"
-
-    # Optional source-side read-only cache root. This top-level directory must be
-    # created once by the admin. The app never runs source-side mkdir.
     cache_root: str | None = None
-
-    # If true, writable Timeshift snapshots are converted to read-only cache
-    # snapshots using `btrfs subvolume snapshot -r`.
     create_readonly_cache: bool = True
+    send_compressed_data: bool = False
+    send_proto: int | None = None
 
 
 @dataclass(slots=True)
 class DestinationConfig:
-    """Local backup/destination settings."""
+    """Local/destination receive settings."""
 
-    # Local Btrfs backup root on the destination machine.
     target_root: Path
-
-    # Local sudo prefix used for btrfs receive/delete/show.
     sudo: str = "sudo -n"
-
-    # Whether the app may create target_root if missing.
+    btrfs_command: str = "btrfs"
     create_target_root: bool = True
+    compression: str | None = None
+    set_compression_before_receive: bool = True
+    set_compression_after_receive: bool = True
+
+
+@dataclass(slots=True)
+class StreamConfig:
+    """Optional pipeline buffering settings."""
+
+    use_mbuffer: bool = False
+    mbuffer_command: str = "mbuffer"
+    mbuffer_size: str = "256M"
+    mbuffer_rate: str | None = None
+    mbuffer_extra_args: list[str] = field(default_factory=list)
+
+    def command(self) -> list[str] | None:
+        """Return mbuffer command argv or None when disabled."""
+
+        if not self.use_mbuffer:
+            return None
+        cmd = [self.mbuffer_command]
+        if self.mbuffer_size:
+            cmd += ["-m", self.mbuffer_size]
+        if self.mbuffer_rate:
+            cmd += ["-R", self.mbuffer_rate]
+        cmd += self.mbuffer_extra_args
+        return cmd
 
 
 @dataclass(slots=True)
 class RetentionConfig:
-    """Retention counts by Timeshift tag."""
+    """Destination retention counts by Timeshift tag."""
 
     hourly: int = 6
     daily: int = 7
@@ -76,25 +80,18 @@ class RetentionConfig:
     def counts_by_tag(self) -> dict[str, int]:
         """Return retention counts keyed by Timeshift tag letters."""
 
-        return {
-            "H": self.hourly,
-            "D": self.daily,
-            "W": self.weekly,
-            "M": self.monthly,
-            "B": self.boot,
-            "O": self.ondemand,
-            "Y": self.yearly,
-        }
+        return {"H": self.hourly, "D": self.daily, "W": self.weekly, "M": self.monthly, "B": self.boot, "O": self.ondemand, "Y": self.yearly}
 
 
 @dataclass(slots=True)
 class AppConfig:
-    """Complete validated config object used by all commands."""
+    """Complete validated app configuration."""
 
     name: str
     ssh: SSHConfig
     source: SourceConfig
     destination: DestinationConfig
+    stream: StreamConfig
     retention: RetentionConfig
     state_file: Path
     lock_file: Path
@@ -104,28 +101,20 @@ class AppConfig:
 
 
 class ConfigError(ValueError):
-    """Raised when the config is missing fields or has invalid types."""
+    """Raised when the TOML config is invalid."""
 
 
-# Validation helper functions. They keep load_config() readable and provide
-# clear error messages such as `source.snapshot_root must be a non-empty string`.
 def _as_str(value: Any, field_name: str) -> str:
-    """Validate a required string field."""
-
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field_name} must be a non-empty string")
     return value
 
 
 def _as_path(value: Any, field_name: str) -> Path:
-    """Validate a string field and convert it to pathlib.Path."""
-
     return Path(_as_str(value, field_name)).expanduser()
 
 
 def _as_bool(value: Any, field_name: str, default: bool) -> bool:
-    """Validate an optional boolean field."""
-
     if value is None:
         return default
     if not isinstance(value, bool):
@@ -133,9 +122,7 @@ def _as_bool(value: Any, field_name: str, default: bool) -> bool:
     return value
 
 
-def _as_int(value: Any, field_name: str, default: int) -> int:
-    """Validate an optional non-negative integer field."""
-
+def _as_int(value: Any, field_name: str, default: int | None) -> int | None:
     if value is None:
         return default
     if not isinstance(value, int) or value < 0:
@@ -144,8 +131,6 @@ def _as_int(value: Any, field_name: str, default: int) -> int:
 
 
 def _string_list(value: Any, field_name: str) -> list[str]:
-    """Validate an optional list of non-empty strings."""
-
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
@@ -153,8 +138,31 @@ def _string_list(value: Any, field_name: str) -> list[str]:
     return value
 
 
+def _compression_value(value: Any) -> str | None:
+    """Normalize destination compression property value.
+
+    btrfs property supports algorithm names, not levels. zstd:3 is accepted in
+    config for convenience but normalized to zstd.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError("destination.compression must be a string")
+    normalized = value.strip().lower()
+    if not normalized or normalized in {"off", "false"}:
+        return None
+    if ":" in normalized:
+        normalized = normalized.split(":", 1)[0]
+    aliases = {"no": "none", "disabled": "none"}
+    normalized = aliases.get(normalized, normalized)
+    if normalized not in {"zstd", "lzo", "zlib", "none"}:
+        raise ConfigError("destination.compression must be zstd, lzo, zlib, none, or blank")
+    return normalized
+
+
 def load_config(path: str | Path) -> AppConfig:
-    """Load, validate, and normalize a TOML config file."""
+    """Read and validate TOML config."""
 
     path = Path(path).expanduser()
     with path.open("rb") as fh:
@@ -164,54 +172,48 @@ def load_config(path: str | Path) -> AppConfig:
 
     name = str(raw.get("name") or "timeshift-btrfs-sync")
 
-    # --- [ssh] section: how the backup machine reaches the source machine. ---
     ssh_raw = raw.get("ssh", {})
     if not isinstance(ssh_raw, dict):
         raise ConfigError("[ssh] must be a TOML table")
     port = ssh_raw.get("port")
     if port is not None and (not isinstance(port, int) or port <= 0):
         raise ConfigError("ssh.port must be a positive integer")
-    # SSH authentication options. identity_file is preferred. password/password_file
-    # are supported through sshpass on the destination machine. The password is
-    # passed through the SSHPASS environment variable, not on the command line.
-    identity_file = ssh_raw.get("identity_file") if isinstance(ssh_raw.get("identity_file"), str) and ssh_raw.get("identity_file") else None
     password = ssh_raw.get("password") if isinstance(ssh_raw.get("password"), str) and ssh_raw.get("password") else None
     password_file = ssh_raw.get("password_file") if isinstance(ssh_raw.get("password_file"), str) and ssh_raw.get("password_file") else None
     if password and password_file:
         raise ConfigError("Use either ssh.password or ssh.password_file, not both")
     if password_file and not Path(password_file).expanduser().is_file():
         raise ConfigError(f"ssh.password_file does not exist or is not a file: {password_file}")
-
     extra_args = _string_list(ssh_raw.get("extra_args"), "ssh.extra_args")
     if (password or password_file) and any("BatchMode=yes" in arg for arg in extra_args):
         raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
-
     ssh = SSHConfig(
         host=_as_str(ssh_raw.get("host"), "ssh.host"),
         user=ssh_raw.get("user") if isinstance(ssh_raw.get("user"), str) and ssh_raw.get("user") else None,
         port=port,
-        identity_file=identity_file,
+        identity_file=ssh_raw.get("identity_file") if isinstance(ssh_raw.get("identity_file"), str) and ssh_raw.get("identity_file") else None,
         password=password,
         password_file=password_file,
+        compression=_as_bool(ssh_raw.get("compression"), "ssh.compression", False),
+        cipher=ssh_raw.get("cipher") if isinstance(ssh_raw.get("cipher"), str) and ssh_raw.get("cipher") else None,
         extra_args=extra_args,
     )
 
-    # --- [source] section: Timeshift/Btrfs settings on the source machine. ---
     source_raw = raw.get("source", {})
     if not isinstance(source_raw, dict):
         raise ConfigError("[source] must be a TOML table")
-    snapshot_root = _as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/")
     source = SourceConfig(
-        snapshot_root=snapshot_root,
+        snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
         sudo=str(source_raw.get("sudo", "sudo -n")),
         btrfs_command=str(source_raw.get("btrfs_command", "btrfs")),
         timeshift_command=str(source_raw.get("timeshift_command", "timeshift")),
         cache_root=(str(source_raw.get("cache_root")) if source_raw.get("cache_root") else None),
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
+        send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
+        send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),
     )
 
-    # --- [destination] section: local receive target and local sudo. ---
     destination_raw = raw.get("destination", {})
     if not isinstance(destination_raw, dict):
         raise ConfigError("[destination] must be a TOML table")
@@ -219,27 +221,40 @@ def load_config(path: str | Path) -> AppConfig:
     destination = DestinationConfig(
         target_root=target_root,
         sudo=str(destination_raw.get("sudo", "sudo -n")),
+        btrfs_command=str(destination_raw.get("btrfs_command", "btrfs")),
         create_target_root=_as_bool(destination_raw.get("create_target_root"), "destination.create_target_root", True),
+        compression=_compression_value(destination_raw.get("compression")),
+        set_compression_before_receive=_as_bool(destination_raw.get("set_compression_before_receive"), "destination.set_compression_before_receive", True),
+        set_compression_after_receive=_as_bool(destination_raw.get("set_compression_after_receive"), "destination.set_compression_after_receive", True),
     )
 
-    # --- [retention] section: tag-based pruning rules. ---
+    stream_raw = raw.get("stream", {})
+    if not isinstance(stream_raw, dict):
+        raise ConfigError("[stream] must be a TOML table")
+    stream = StreamConfig(
+        use_mbuffer=_as_bool(stream_raw.get("use_mbuffer"), "stream.use_mbuffer", False),
+        mbuffer_command=str(stream_raw.get("mbuffer_command", "mbuffer")),
+        mbuffer_size=str(stream_raw.get("mbuffer_size", "256M")),
+        mbuffer_rate=(str(stream_raw.get("mbuffer_rate")) if stream_raw.get("mbuffer_rate") else None),
+        mbuffer_extra_args=_string_list(stream_raw.get("mbuffer_extra_args"), "stream.mbuffer_extra_args"),
+    )
+
     retention_raw = raw.get("retention", {})
     if not isinstance(retention_raw, dict):
         raise ConfigError("[retention] must be a TOML table")
     retention = RetentionConfig(
-        hourly=_as_int(retention_raw.get("hourly"), "retention.hourly", 6),
-        daily=_as_int(retention_raw.get("daily"), "retention.daily", 7),
-        weekly=_as_int(retention_raw.get("weekly"), "retention.weekly", 4),
-        monthly=_as_int(retention_raw.get("monthly"), "retention.monthly", 6),
-        boot=_as_int(retention_raw.get("boot"), "retention.boot", 5),
-        ondemand=_as_int(retention_raw.get("ondemand"), "retention.ondemand", 10),
-        yearly=_as_int(retention_raw.get("yearly"), "retention.yearly", 0),
+        hourly=int(_as_int(retention_raw.get("hourly"), "retention.hourly", 6)),
+        daily=int(_as_int(retention_raw.get("daily"), "retention.daily", 7)),
+        weekly=int(_as_int(retention_raw.get("weekly"), "retention.weekly", 4)),
+        monthly=int(_as_int(retention_raw.get("monthly"), "retention.monthly", 6)),
+        boot=int(_as_int(retention_raw.get("boot"), "retention.boot", 5)),
+        ondemand=int(_as_int(retention_raw.get("ondemand"), "retention.ondemand", 10)),
+        yearly=int(_as_int(retention_raw.get("yearly"), "retention.yearly", 0)),
         keep_latest=_as_bool(retention_raw.get("keep_latest"), "retention.keep_latest", True),
         keep_latest_common_parent=_as_bool(retention_raw.get("keep_latest_common_parent"), "retention.keep_latest_common_parent", True),
         protected_snapshots=_string_list(retention_raw.get("protected_snapshots"), "retention.protected_snapshots"),
     )
 
-    # Internal app metadata defaults to a hidden folder under target_root.
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")
     lock_file = _as_path(raw.get("lock_file", str(target_root / ".ts-btrfs-sync" / "lock")), "lock_file")
     log_dir = _as_path(raw.get("log_dir", str(target_root / ".ts-btrfs-sync" / "logs")), "log_dir")
@@ -249,6 +264,7 @@ def load_config(path: str | Path) -> AppConfig:
         ssh=ssh,
         source=source,
         destination=destination,
+        stream=stream,
         retention=retention,
         state_file=state_file,
         lock_file=lock_file,

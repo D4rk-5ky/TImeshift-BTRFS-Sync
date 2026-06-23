@@ -1,6 +1,3 @@
-# Example systemd service for one timeshift-btrfs-sync job.
-# Install this on the BACKUP/DESTINATION machine and edit the config path.
-
 [Unit]
 Description=Pull Timeshift Btrfs snapshots to backup storage
 After=network-online.target
@@ -8,7 +5,4 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# --run makes the sync real. Without it, the default example config is dry-run.
-# --prune applies retention after sync.
-# --yes-delete is required before prune may delete destination snapshots.
 ExecStart=/usr/local/bin/ts-btrfs sync --config /etc/timeshift-btrfs-sync/kubuntu.toml --run --prune --yes-delete

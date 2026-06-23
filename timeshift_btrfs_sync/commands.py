@@ -1,8 +1,7 @@
-"""Shared command helpers.
+"""Shared subprocess helpers.
 
-Every external command goes through this module. Keeping subprocess handling in
-one place makes the rest of the project easier to read and makes failures from
-SSH, sudo, Btrfs, and Timeshift look consistent.
+This module centralizes local process execution and the streaming pipeline used
+for `ssh ... btrfs send | [mbuffer] | btrfs receive`.
 """
 
 from __future__ import annotations
@@ -16,28 +15,20 @@ import sys
 
 
 class CommandError(RuntimeError):
-    """Raised when a local command or SSH command exits with an error.
-
-    The exception keeps stdout and stderr because Btrfs/Timeshift error text is
-    usually the most useful troubleshooting information.
-    """
+    """Raised when an external command exits with a non-zero status."""
 
     def __init__(self, cmd: list[str] | str, returncode: int, stdout: str = "", stderr: str = ""):
         self.cmd = cmd
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-        # Convert argv lists into a readable shell-like string for error output.
-        # Passwords are never included in argv when ssh.password/password_file is
-        # used; sshpass receives the secret through the SSHPASS environment.
         printable = cmd if isinstance(cmd, str) else shlex.join(cmd)
         super().__init__(f"Command failed ({returncode}): {printable}\n{stderr.strip()}")
 
 
 @dataclass(slots=True)
 class Completed:
-    """Small result object returned by run_local() and SSHRunner.run()."""
+    """Small command result object."""
 
     cmd: list[str] | str
     returncode: int
@@ -46,15 +37,7 @@ class Completed:
 
 
 def sudo_prefix(sudo: str | None) -> list[str]:
-    """Split the configured sudo prefix into argv parts.
-
-    Examples:
-      "sudo -n" -> ["sudo", "-n"]
-      ""        -> []
-
-    Empty sudo is useful if a dedicated user can run the needed command without
-    privilege escalation.
-    """
+    """Split a configured sudo prefix into argv parts."""
 
     if not sudo:
         return []
@@ -62,22 +45,13 @@ def sudo_prefix(sudo: str | None) -> list[str]:
 
 
 def quote_join(parts: Iterable[str]) -> str:
-    """Quote argv parts into one safe remote-shell command string.
-
-    SSH usually receives one remote shell command string, not an argv list. This
-    function quotes every part so paths with spaces or special characters do not
-    get interpreted by the remote shell.
-    """
+    """Quote argv parts into one safe remote-shell command string."""
 
     return " ".join(shlex.quote(str(p)) for p in parts)
 
 
 def _merged_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
-    """Return an environment with extra variables added, or None for default.
-
-    This is mainly used for sshpass. The SSH password is passed as SSHPASS in
-    the child process environment rather than as a command-line argument.
-    """
+    """Merge optional child-process environment variables."""
 
     if not extra_env:
         return None
@@ -93,14 +67,10 @@ def run_local(
     input_text: str | None = None,
     env: dict[str, str] | None = None,
 ) -> Completed:
-    """Run a local process and capture stdout/stderr as text.
+    """Run a local command and capture stdout/stderr.
 
-    `check=True` turns non-zero exits into CommandError. `check=False` is used
-    for harmless probes where failure is expected, such as checking if a Btrfs
-    subvolume exists.
-
-    `env` is optional and is used for sshpass password auth. Do not put secrets
-    directly in `cmd`, because command lines are easier to see in process lists.
+    `env` is mainly used for sshpass. Passwords are passed through SSHPASS in
+    the child environment, not as command-line arguments.
     """
 
     proc = subprocess.run(
@@ -109,7 +79,7 @@ def run_local(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        check=False,  # We raise our own CommandError below for clearer messages.
+        check=False,
         env=_merged_env(env),
     )
     result = Completed(cmd=cmd, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
@@ -122,59 +92,71 @@ def stream_pipeline(
     left_cmd: list[str],
     right_cmd: list[str],
     *,
+    middle_cmd: list[str] | None = None,
     verbose: bool = True,
     left_env: dict[str, str] | None = None,
+    middle_env: dict[str, str] | None = None,
     right_env: dict[str, str] | None = None,
 ) -> None:
-    """Pipe one command into another without writing the stream to disk.
+    """Stream left command into optional middle command, then right command.
 
-    This is the critical transfer primitive:
+    Without mbuffer:
+      ssh source 'btrfs send ...' | btrfs receive ...
 
-        ssh source 'sudo -n btrfs send ...' | sudo -n btrfs receive ...
-
-    Btrfs send streams can be very large, so storing them as temporary files is
-    avoided. The left command's stdout is connected directly to the right
-    command's stdin.
-
-    `left_env` lets the SSH side receive SSHPASS when password auth is enabled.
+    With mbuffer:
+      ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
     """
 
     if verbose:
-        # These go to stderr so normal stdout can stay readable or scriptable.
         print("REMOTE SEND:", shlex.join(left_cmd), file=sys.stderr)
+        if middle_cmd:
+            print("STREAM BUFFER:", shlex.join(middle_cmd), file=sys.stderr)
         print("LOCAL RECEIVE:", shlex.join(right_cmd), file=sys.stderr)
 
-    # Start the producing side, normally SSH running remote `btrfs send`.
-    left = subprocess.Popen(
-        left_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=_merged_env(left_env),
-    )
+    left = subprocess.Popen(left_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_merged_env(left_env))
     assert left.stdout is not None
 
-    # Start the consuming side, normally local `btrfs receive`.
+    middle = None
+    receive_stdin = left.stdout
+    if middle_cmd:
+        middle = subprocess.Popen(
+            middle_cmd,
+            stdin=left.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=_merged_env(middle_env),
+        )
+        left.stdout.close()
+        assert middle.stdout is not None
+        receive_stdin = middle.stdout
+
     right = subprocess.Popen(
         right_cmd,
-        stdin=left.stdout,
+        stdin=receive_stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         env=_merged_env(right_env),
     )
+    receive_stdin.close()
 
-    # Close our extra copy of left.stdout so the receiver can see EOF correctly.
-    left.stdout.close()
-
-    # Wait for receive first, then collect the send side's stderr/exit code.
     right_out, right_err = right.communicate()
+
+    middle_err = b""
+    middle_return = 0
+    if middle:
+        middle_err = middle.stderr.read() if middle.stderr else b""
+        middle_return = middle.wait()
+
     left_err = left.stderr.read() if left.stderr else b""
     left_return = left.wait()
 
-    # Either side failing means the transfer is not trustworthy.
-    if left_return != 0 or right.returncode != 0:
-        raise CommandError(
-            cmd=f"{shlex.join(left_cmd)} | {shlex.join(right_cmd)}",
-            returncode=right.returncode if right.returncode != 0 else left_return,
-            stdout=(right_out or b"").decode(errors="replace"),
-            stderr=(left_err or b"").decode(errors="replace") + (right_err or b"").decode(errors="replace"),
-        )
+    if left_return != 0 or middle_return != 0 or right.returncode != 0:
+        returncode = right.returncode if right.returncode != 0 else middle_return if middle_return != 0 else left_return
+        stderr = (left_err or b"").decode(errors="replace")
+        stderr += (middle_err or b"").decode(errors="replace")
+        stderr += (right_err or b"").decode(errors="replace")
+        pipe_text = shlex.join(left_cmd)
+        if middle_cmd:
+            pipe_text += " | " + shlex.join(middle_cmd)
+        pipe_text += " | " + shlex.join(right_cmd)
+        raise CommandError(pipe_text, returncode, (right_out or b"").decode(errors="replace"), stderr)

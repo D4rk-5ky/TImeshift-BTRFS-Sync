@@ -1,12 +1,7 @@
-"""SSH wrapper for source-machine commands.
+"""SSH command construction.
 
-The app runs on the backup/destination machine. Source actions are performed by
-running carefully-built remote commands through SSH.
-
-SSH authentication supports:
-  - normal SSH agent/default config,
-  - an identity file configured in TOML,
-  - optional password/password_file through sshpass on the destination.
+Supports key-based auth, optional sshpass password auth, SSH compression, and a
+chosen SSH cipher.
 """
 
 from __future__ import annotations
@@ -18,51 +13,32 @@ from .commands import Completed, CommandError, run_local
 
 @dataclass(slots=True)
 class SSHConfig:
-    """Connection settings for the source machine."""
+    """Connection and SSH transport settings."""
 
-    # Hostname or IP address of the machine that has the Timeshift snapshots.
     host: str
-
-    # Optional SSH user. If omitted, SSH uses the current local user.
     user: str | None = None
-
-    # Optional non-standard SSH port.
     port: int | None = None
-
-    # Optional private key path. This is the recommended unattended auth method.
     identity_file: str | None = None
-
-    # Optional SSH password stored directly in TOML. This works, but is less
-    # secure than identity_file. It requires sshpass installed on the destination.
     password: str | None = None
-
-    # Optional file containing the SSH password. This is safer than putting the
-    # password directly in TOML, especially if the file is chmod 600.
     password_file: str | None = None
-
-    # Extra SSH arguments, for example ["-o", "StrictHostKeyChecking=accept-new"].
-    # Do not use BatchMode=yes with password/password_file, because BatchMode
-    # disables password prompts that sshpass needs to answer.
+    compression: bool = False
+    cipher: str | None = None
     extra_args: list[str] = field(default_factory=list)
 
     @property
     def target(self) -> str:
-        """Return the target as host or user@host."""
+        """Return host or user@host."""
 
         return f"{self.user}@{self.host}" if self.user else self.host
 
     @property
     def uses_password_auth(self) -> bool:
-        """Return True when sshpass should be used for SSH password auth."""
+        """Return True when sshpass is needed."""
 
         return bool(self.password or self.password_file)
 
     def _read_password(self) -> str | None:
-        """Return the SSH password from TOML or password_file.
-
-        The password is not printed and is not added to the command line. It is
-        passed to sshpass through the SSHPASS environment variable.
-        """
+        """Read password from TOML or password_file."""
 
         if self.password is not None:
             return self.password
@@ -71,11 +47,7 @@ class SSHConfig:
         return None
 
     def environment(self) -> dict[str, str] | None:
-        """Return environment variables needed by the SSH command.
-
-        sshpass with `-e` reads the password from SSHPASS. Returning None means
-        no special environment is needed.
-        """
+        """Return environment variables required by sshpass."""
 
         password = self._read_password()
         if password is None:
@@ -83,52 +55,48 @@ class SSHConfig:
         return {"SSHPASS": password}
 
     def base_command(self) -> list[str]:
-        """Build the base SSH argv list.
-
-        If password/password_file is configured, the command becomes:
-
-            sshpass -e ssh ...
-
-        The remote command string is appended by SSHRunner.command().
-        """
+        """Build base SSH argv; remote command is appended later."""
 
         cmd: list[str] = []
         if self.uses_password_auth:
             cmd += ["sshpass", "-e"]
-
         cmd.append("ssh")
         if self.port:
             cmd += ["-p", str(self.port)]
         if self.identity_file:
             cmd += ["-i", self.identity_file]
+        if self.compression:
+            cmd += ["-C"]
+        if self.cipher:
+            cmd += ["-c", self.cipher]
         cmd += self.extra_args
         cmd.append(self.target)
         return cmd
 
 
 class SSHRunner:
-    """Run remote commands on the configured source machine."""
+    """Run remote commands through SSH."""
 
     def __init__(self, config: SSHConfig):
         self.config = config
 
     def command(self, remote_command: str) -> list[str]:
-        """Return the local argv that runs one remote shell command."""
+        """Return argv for one SSH remote command."""
 
         return self.config.base_command() + [remote_command]
 
     def run(self, remote_command: str, *, check: bool = True) -> Completed:
-        """Run a remote command through SSH and capture stdout/stderr."""
+        """Run a remote command and capture stdout/stderr."""
 
         return run_local(self.command(remote_command), check=check, env=self.config.environment())
 
     def environment(self) -> dict[str, str] | None:
-        """Expose SSH environment for streaming pipelines."""
+        """Return SSH environment for streaming pipeline calls."""
 
         return self.config.environment()
 
     def test(self) -> None:
-        """Verify SSH connectivity and that stdout is not polluted by banners."""
+        """Verify SSH works and stdout is not polluted by banners."""
 
         result = self.run("printf connected", check=True)
         if result.stdout != "connected":

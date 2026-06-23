@@ -1,82 +1,132 @@
-# timeshift-btrfs-sync v0.3.3 minimal-source-sudo config
-# Run this app on the BACKUP/DESTINATION machine.
+# timeshift-btrfs-sync v0.0.9 config
+# Run this config on the BACKUP/DESTINATION machine.
+# The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
-# Human-readable job name. Used for your own identification.
+# Human-readable job name. This is only for identification.
 name = "kubuntu-timeshift"
 
-# Safe default. If true, commands preview actions unless you pass --run.
+# Safe default: commands preview changes unless --run is passed.
 default_dry_run = true
 
-# If true, `ts-btrfs sync` automatically runs retention pruning afterward.
+# If true, `sync` automatically runs retention pruning after a successful sync.
 # Keep false while testing.
 prune_after_sync = false
 
 [ssh]
-# Source machine that contains the Timeshift snapshots.
+# Source machine containing the Timeshift snapshots.
 host = "source-machine.example.lan"
 
-# Dedicated SSH user on the source. This user should only have passwordless sudo
-# for btrfs and timeshift, configured in sudoers.
+# Dedicated source SSH user.
 user = "btrbk-source"
 
 # Optional SSH port.
 # port = 22
 
-# Recommended unattended authentication: store the private key path in TOML.
-# The private key file itself should be protected, for example chmod 600.
+# Recommended authentication: SSH private key.
+# This adds: ssh -i /root/.ssh/timeshift-btrfs-sync ...
+# The key file itself should be protected with chmod 600.
 # identity_file = "/root/.ssh/timeshift-btrfs-sync"
 
-# Optional password authentication using sshpass on the DESTINATION machine.
-# This stores a clear-text password in TOML, so identity_file is safer.
-# Do NOT use BatchMode=yes when using password/password_file.
-# password = "your-ssh-password"
+# Optional SSH compression.
+# true adds: ssh -C
+# Useful over slow links; often unnecessary on fast LANs or already-compressed data.
+compression = false
 
-# Slightly safer password auth: keep the password in a separate chmod 600 file.
+# Optional SSH cipher choice.
+# This adds: ssh -c <cipher>
+# Leave unset/blank to use OpenSSH's default cipher negotiation.
+# cipher = "chacha20-poly1305@openssh.com"
+# cipher = "aes128-gcm@openssh.com"
+
+# Optional password authentication through sshpass on the DESTINATION machine.
+# Key-based auth is safer. If password/password_file is set, remove BatchMode=yes.
+# password = "your-ssh-password"
 # password_file = "/root/.ssh/timeshift-btrfs-sync.password"
 
-# BatchMode=yes prevents SSH password/passphrase prompts from hanging timers.
-# Keep this for key-based auth. Remove it when using password/password_file.
+# Extra SSH options.
+# BatchMode=yes makes SSH fail instead of hanging on prompts. Use it for key auth.
+# Do NOT use BatchMode=yes together with password/password_file.
 extra_args = ["-o", "BatchMode=yes"]
 
 [source]
-# Prefix used before source commands. sudo -n means "do not ask for a password;
-# fail immediately instead". This is important for unattended backups.
+# Source-side command prefix. sudo -n means sudo must not prompt for a password.
 sudo = "sudo -n"
 
-# Source commands. Using absolute paths is fine too, for example /usr/bin/btrfs.
+# Source-side commands. Absolute paths are also valid, for example /usr/bin/btrfs.
 btrfs_command = "btrfs"
 timeshift_command = "timeshift"
 
-# Snapshot names/tags are discovered from:
+# Snapshot discovery command:
 #   sudo -n timeshift --list
-# Then the app constructs subvolume paths as:
+# The app parses snapshot names from that output, then constructs paths as:
 #   snapshot_root/<snapshot-name>/<subvolume>
 snapshot_root = "/timeshift-btrfs/snapshots"
 
-# Subvolumes to look for inside each Timeshift snapshot.
+# Subvolumes expected inside each Timeshift snapshot.
 subvolumes = ["@", "@home"]
 
-# Read-only send cache for writable source snapshots.
-# The app does NOT run source-side mkdir. Create only this top-level directory
-# manually once on the source. Per-snapshot cache parents are created with:
+# Source-side read-only cache for writable Timeshift snapshots.
+# Create only the top-level cache_root manually once on the source.
+# Per-snapshot cache parents are created with btrfs, not mkdir:
 #   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
-# Actual read-only send sources are created with:
+# Read-only send snapshots are then created with:
 #   sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
+
+# Optional Btrfs send compressed-data mode.
+# true adds: btrfs send --compressed-data
+# This preserves already-compressed source extents when supported. It is not the
+# same thing as choosing destination compression.
+send_compressed_data = false
+
+# Optional Btrfs send protocol version.
+# Example: send_proto = 2 adds: btrfs send --proto 2
+# send_proto = 2
 
 [destination]
 # Local Btrfs backup root on the BACKUP/DESTINATION machine.
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 
-# Local sudo prefix for btrfs receive/delete/show on the destination.
+# Local sudo prefix for btrfs receive/delete/property commands.
 sudo = "sudo -n"
+btrfs_command = "btrfs"
 
 # Whether the app may create target_root and internal metadata directories.
 create_target_root = true
 
+# Destination Btrfs compression property.
+# Accepted: zstd, lzo, zlib, none, or blank.
+# zstd:3 is accepted but normalized to zstd because `btrfs property set` does
+# not set compression levels. Use mount options for exact levels.
+compression = "zstd"
+
+# Before receive, set compression on the destination snapshot parent directory.
+set_compression_before_receive = true
+
+# After receive, try to set compression property on the received subvolume too.
+set_compression_after_receive = true
+
+[stream]
+# Optional mbuffer between SSH send and local receive.
+# false pipeline:
+#   ssh source 'btrfs send ...' | btrfs receive ...
+# true pipeline:
+#   ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
+use_mbuffer = false
+
+# mbuffer command and memory buffer size.
+mbuffer_command = "mbuffer"
+mbuffer_size = "256M"
+
+# Optional mbuffer rate limit. Example: "100M" adds `mbuffer -R 100M`.
+# mbuffer_rate = "100M"
+
+# Optional extra mbuffer arguments as a TOML string list.
+mbuffer_extra_args = []
+
 [retention]
-# Keep newest N destination snapshots for each tag.
+# Destination retention counts by Timeshift tag.
 # H=hourly, D=daily, W=weekly, M=monthly, B=boot, O=on-demand/manual.
 hourly = 6
 daily = 7
@@ -88,7 +138,9 @@ ondemand = 10
 # Optional extension. Yearly is not native Timeshift behavior.
 yearly = 0
 
-# Extra safety rules.
+# Extra safety: always keep newest snapshot and latest likely incremental parent.
 keep_latest = true
 keep_latest_common_parent = true
+
+# Names listed here are never pruned.
 protected_snapshots = []
