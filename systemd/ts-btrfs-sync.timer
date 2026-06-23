@@ -1,9 +1,17 @@
+# Example systemd timer for the service above.
+# Install this on the BACKUP/DESTINATION machine.
+
 [Unit]
 Description=Hourly Timeshift Btrfs snapshot pull
 
 [Timer]
+# Run once per hour.
 OnCalendar=hourly
+
+# Add a small random delay so multiple jobs do not all start at the same second.
 RandomizedDelaySec=10m
+
+# If the machine was off at the scheduled time, run after next boot.
 Persistent=true
 
 [Install]

@@ -1,4 +1,8 @@
-"""TOML configuration loading and validation."""
+"""TOML configuration loading and validation.
+
+The config file is read once by each CLI command and converted into dataclasses.
+The rest of the project uses those typed objects instead of raw TOML dicts.
+"""
 
 from __future__ import annotations
 
@@ -14,28 +18,43 @@ from .ssh import SSHConfig
 class SourceConfig:
     """Remote/source settings.
 
-    v0.3.0 deliberately requires no source-side helper/script. The only source
-    commands that need passwordless sudo are `btrfs` and `timeshift`.
+    The source side intentionally needs no helper script. The only source-side
+    commands that should need passwordless sudo are `btrfs` and `timeshift`.
     """
 
+    # Root where Timeshift stores snapshot folders.
     snapshot_root: str
+
+    # Subvolumes expected inside each snapshot folder, usually @ and @home.
     subvolumes: list[str] = field(default_factory=lambda: ["@", "@home"])
+
+    # Remote sudo prefix. `sudo -n` fails instead of asking for a password.
     sudo: str = "sudo -n"
+
+    # Command names or absolute paths used on the source.
     btrfs_command: str = "btrfs"
     timeshift_command: str = "timeshift"
 
-    # Optional source-side read-only cache root. It must be pre-created manually
-    # by the admin. The app will not run source-side mkdir.
+    # Optional source-side read-only cache root. This top-level directory must be
+    # created once by the admin. The app never runs source-side mkdir.
     cache_root: str | None = None
+
+    # If true, writable Timeshift snapshots are converted to read-only cache
+    # snapshots using `btrfs subvolume snapshot -r`.
     create_readonly_cache: bool = True
 
 
 @dataclass(slots=True)
 class DestinationConfig:
-    """Local/destination settings."""
+    """Local backup/destination settings."""
 
+    # Local Btrfs backup root on the destination machine.
     target_root: Path
+
+    # Local sudo prefix used for btrfs receive/delete/show.
     sudo: str = "sudo -n"
+
+    # Whether the app may create target_root if missing.
     create_target_root: bool = True
 
 
@@ -55,6 +74,8 @@ class RetentionConfig:
     protected_snapshots: list[str] = field(default_factory=list)
 
     def counts_by_tag(self) -> dict[str, int]:
+        """Return retention counts keyed by Timeshift tag letters."""
+
         return {
             "H": self.hourly,
             "D": self.daily,
@@ -68,7 +89,7 @@ class RetentionConfig:
 
 @dataclass(slots=True)
 class AppConfig:
-    """Complete validated config."""
+    """Complete validated config object used by all commands."""
 
     name: str
     ssh: SSHConfig
@@ -83,20 +104,28 @@ class AppConfig:
 
 
 class ConfigError(ValueError):
-    """Raised when the config is invalid."""
+    """Raised when the config is missing fields or has invalid types."""
 
 
+# Validation helper functions. They keep load_config() readable and provide
+# clear error messages such as `source.snapshot_root must be a non-empty string`.
 def _as_str(value: Any, field_name: str) -> str:
+    """Validate a required string field."""
+
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field_name} must be a non-empty string")
     return value
 
 
 def _as_path(value: Any, field_name: str) -> Path:
+    """Validate a string field and convert it to pathlib.Path."""
+
     return Path(_as_str(value, field_name)).expanduser()
 
 
 def _as_bool(value: Any, field_name: str, default: bool) -> bool:
+    """Validate an optional boolean field."""
+
     if value is None:
         return default
     if not isinstance(value, bool):
@@ -105,6 +134,8 @@ def _as_bool(value: Any, field_name: str, default: bool) -> bool:
 
 
 def _as_int(value: Any, field_name: str, default: int) -> int:
+    """Validate an optional non-negative integer field."""
+
     if value is None:
         return default
     if not isinstance(value, int) or value < 0:
@@ -113,6 +144,8 @@ def _as_int(value: Any, field_name: str, default: int) -> int:
 
 
 def _string_list(value: Any, field_name: str) -> list[str]:
+    """Validate an optional list of non-empty strings."""
+
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
@@ -121,7 +154,7 @@ def _string_list(value: Any, field_name: str) -> list[str]:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    """Load and validate a TOML config file."""
+    """Load, validate, and normalize a TOML config file."""
 
     path = Path(path).expanduser()
     with path.open("rb") as fh:
@@ -131,6 +164,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     name = str(raw.get("name") or "timeshift-btrfs-sync")
 
+    # --- [ssh] section: how the backup machine reaches the source machine. ---
     ssh_raw = raw.get("ssh", {})
     if not isinstance(ssh_raw, dict):
         raise ConfigError("[ssh] must be a TOML table")
@@ -145,6 +179,7 @@ def load_config(path: str | Path) -> AppConfig:
         extra_args=_string_list(ssh_raw.get("extra_args"), "ssh.extra_args"),
     )
 
+    # --- [source] section: Timeshift/Btrfs settings on the source machine. ---
     source_raw = raw.get("source", {})
     if not isinstance(source_raw, dict):
         raise ConfigError("[source] must be a TOML table")
@@ -159,6 +194,7 @@ def load_config(path: str | Path) -> AppConfig:
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
     )
 
+    # --- [destination] section: local receive target and local sudo. ---
     destination_raw = raw.get("destination", {})
     if not isinstance(destination_raw, dict):
         raise ConfigError("[destination] must be a TOML table")
@@ -169,6 +205,7 @@ def load_config(path: str | Path) -> AppConfig:
         create_target_root=_as_bool(destination_raw.get("create_target_root"), "destination.create_target_root", True),
     )
 
+    # --- [retention] section: tag-based pruning rules. ---
     retention_raw = raw.get("retention", {})
     if not isinstance(retention_raw, dict):
         raise ConfigError("[retention] must be a TOML table")
@@ -185,6 +222,7 @@ def load_config(path: str | Path) -> AppConfig:
         protected_snapshots=_string_list(retention_raw.get("protected_snapshots"), "retention.protected_snapshots"),
     )
 
+    # Internal app metadata defaults to a hidden folder under target_root.
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")
     lock_file = _as_path(raw.get("lock_file", str(target_root / ".ts-btrfs-sync" / "lock")), "lock_file")
     log_dir = _as_path(raw.get("log_dir", str(target_root / ".ts-btrfs-sync" / "logs")), "log_dir")

@@ -1,55 +1,82 @@
-# timeshift-btrfs-sync v0.3.1 minimal-source-sudo config
+# timeshift-btrfs-sync v0.3.2 minimal-source-sudo config
 # Run this app on the BACKUP/DESTINATION machine.
 
+# Human-readable job name. Used for your own identification.
 name = "kubuntu-timeshift"
+
+# Safe default. If true, commands preview actions unless you pass --run.
 default_dry_run = true
+
+# If true, `ts-btrfs sync` automatically runs retention pruning afterward.
+# Keep false while testing.
 prune_after_sync = false
 
 [ssh]
+# Source machine that contains the Timeshift snapshots.
 host = "source-machine.example.lan"
+
+# Dedicated SSH user on the source. This user should only have passwordless sudo
+# for btrfs and timeshift, configured in sudoers.
 user = "btrbk-source"
+
+# Optional SSH port and private key.
 # port = 22
 # identity_file = "/root/.ssh/timeshift-btrfs-sync"
+
+# BatchMode=yes prevents SSH password/passphrase prompts from hanging timers.
 extra_args = ["-o", "BatchMode=yes"]
 
 [source]
-# Source-side passwordless sudo should be limited to these two commands only:
-#   sudo -n timeshift ...
-#   sudo -n btrfs ...
-# No source-side helper script is installed. The app does not use source-side
-# sudo mkdir, sudo cat, sudo python, sudo find, or sudo shell scripts.
+# Prefix used before source commands. sudo -n means "do not ask for a password;
+# fail immediately instead". This is important for unattended backups.
 sudo = "sudo -n"
+
+# Source commands. Using absolute paths is fine too, for example /usr/bin/btrfs.
 btrfs_command = "btrfs"
 timeshift_command = "timeshift"
 
-# The app discovers snapshot names/tags from `sudo -n timeshift --list`, then
-# constructs subvolume paths as: snapshot_root/<snapshot-name>/<subvolume>
+# Snapshot names/tags are discovered from:
+#   sudo -n timeshift --list
+# Then the app constructs subvolume paths as:
+#   snapshot_root/<snapshot-name>/<subvolume>
 snapshot_root = "/timeshift-btrfs/snapshots"
+
+# Subvolumes to look for inside each Timeshift snapshot.
 subvolumes = ["@", "@home"]
 
-# Optional read-only send cache for writable source snapshots.
-# Only this top-level cache_root must be created manually once on the source.
-# Per-snapshot cache folders are created with `btrfs subvolume create`, not mkdir,
-# so source-side sudo is still limited to btrfs/timeshift only.
-# Resulting layout:
-#   <cache_root>/2026-06-22_18-00-01/@
-#   <cache_root>/2026-06-22_18-00-01/@home
+# Read-only send cache for writable source snapshots.
+# The app does NOT run source-side mkdir. Create only this top-level directory
+# manually once on the source. Per-snapshot cache parents are created with:
+#   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
+# Actual read-only send sources are created with:
+#   sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 
 [destination]
+# Local Btrfs backup root on the BACKUP/DESTINATION machine.
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
+
+# Local sudo prefix for btrfs receive/delete/show on the destination.
 sudo = "sudo -n"
+
+# Whether the app may create target_root and internal metadata directories.
 create_target_root = true
 
 [retention]
+# Keep newest N destination snapshots for each tag.
+# H=hourly, D=daily, W=weekly, M=monthly, B=boot, O=on-demand/manual.
 hourly = 6
 daily = 7
 weekly = 4
 monthly = 6
 boot = 5
 ondemand = 10
+
+# Optional extension. Yearly is not native Timeshift behavior.
 yearly = 0
+
+# Extra safety rules.
 keep_latest = true
 keep_latest_common_parent = true
 protected_snapshots = []

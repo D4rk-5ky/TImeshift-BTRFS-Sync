@@ -1,4 +1,9 @@
-"""Persistent local state for completed transfers."""
+"""Persistent local state for completed transfers.
+
+The state file records what has already been received. This is what allows the
+next run to choose a valid incremental parent instead of always sending full
+snapshots.
+"""
 
 from __future__ import annotations
 
@@ -10,14 +15,19 @@ import tempfile
 
 from .models import SnapshotMeta, SubvolumeMeta
 
+
 STATE_VERSION = 1
 
 
 def empty_state() -> dict[str, Any]:
+    """Return a new empty state document."""
+
     return {"version": STATE_VERSION, "snapshots": {}}
 
 
 def load_state(path: Path) -> dict[str, Any]:
+    """Load state.json, or return an empty state if it does not exist."""
+
     if not path.exists():
         return empty_state()
     with path.open("r", encoding="utf-8") as fh:
@@ -30,6 +40,12 @@ def load_state(path: Path) -> dict[str, Any]:
 
 
 def save_state(path: Path, state: dict[str, Any]) -> None:
+    """Atomically write state.json.
+
+    A temporary file is written first and then renamed over the old state, so an
+    interrupted process is less likely to leave a half-written state file.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
@@ -45,6 +61,8 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
 
 
 def snapshot_is_synced(state: dict[str, Any], snapshot: str, required_subvolumes: list[str] | None = None) -> bool:
+    """Return True if the snapshot/subvolumes are recorded as successfully synced."""
+
     item = state.get("snapshots", {}).get(snapshot)
     if not item:
         return False
@@ -65,6 +83,8 @@ def mark_subvolume_synced(
     send_path: str,
     received_meta: SubvolumeMeta | None,
 ) -> None:
+    """Record one successful send/receive in state.json."""
+
     snapshots = state.setdefault("snapshots", {})
     snap_state = snapshots.setdefault(
         snapshot.name,
@@ -77,9 +97,14 @@ def mark_subvolume_synced(
             "subvolumes": {},
         },
     )
+
+    # Refresh snapshot-level metadata on every successful subvolume transfer.
     snap_state["tags"] = snapshot.tags
     snap_state["comment"] = snapshot.comment
     snap_state["created"] = snapshot.created
+
+    # Store both source and destination UUID data for troubleshooting and future
+    # validation improvements.
     snap_state.setdefault("subvolumes", {})[subvolume.name] = {
         "status": "ok",
         "name": subvolume.name,
@@ -98,10 +123,14 @@ def mark_subvolume_synced(
 
 
 def remove_snapshot_from_state(state: dict[str, Any], snapshot: str) -> None:
+    """Remove a snapshot from state after pruning deletes it from disk."""
+
     state.setdefault("snapshots", {}).pop(snapshot, None)
 
 
 def latest_synced_before(state: dict[str, Any], snapshot_name: str, subvolume_name: str, source_names: set[str]) -> tuple[str, dict[str, Any]] | None:
+    """Return the newest usable incremental parent before snapshot_name."""
+
     candidates: list[tuple[str, dict[str, Any]]] = []
     for name, item in state.get("snapshots", {}).items():
         if name >= snapshot_name or name not in source_names:

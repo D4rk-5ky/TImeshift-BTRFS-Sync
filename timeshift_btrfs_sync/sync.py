@@ -1,4 +1,12 @@
-"""Main destination-pull sync workflow."""
+"""Main destination-pull sync workflow.
+
+This module coordinates the backup process:
+  1. Prepare local destination paths.
+  2. Discover source Timeshift snapshots through SSH.
+  3. Choose full or incremental Btrfs send.
+  4. Stream remote `btrfs send` into local `btrfs receive`.
+  5. Save successful transfers to state.json.
+"""
 
 from __future__ import annotations
 
@@ -17,6 +25,8 @@ class SyncError(RuntimeError):
 
 
 def prepare_destination(config: AppConfig) -> None:
+    """Create/validate local destination folders before syncing."""
+
     root = config.destination.target_root
     if root.exists():
         if not root.is_dir():
@@ -25,12 +35,16 @@ def prepare_destination(config: AppConfig) -> None:
         root.mkdir(parents=True, exist_ok=True)
     else:
         raise SyncError(f"Destination target_root does not exist: {root}")
+
+    # Normal backup layout and hidden app metadata layout.
     (root / "snapshots").mkdir(parents=True, exist_ok=True)
     config.state_file.parent.mkdir(parents=True, exist_ok=True)
     config.log_dir.mkdir(parents=True, exist_ok=True)
 
 
 def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
+    """Discover snapshots from the source using Timeshift and Btrfs."""
+
     return timeshift.list_remote_snapshots(
         ssh,
         snapshot_root=config.source.snapshot_root,
@@ -43,6 +57,8 @@ def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_in
 
 
 def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
+    """Print source snapshots in a compact table."""
+
     if not snapshots:
         print("No source snapshots found.")
         return
@@ -52,14 +68,20 @@ def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
 
 
 def _dest_subvolume_path(config: AppConfig, snapshot_name: str, subvolume_name: str) -> Path:
+    """Return where one received destination subvolume should live."""
+
     return config.destination.target_root / "snapshots" / snapshot_name / subvolume_name
 
 
 def _target_snapshot_dir(config: AppConfig, snapshot_name: str) -> Path:
+    """Return the local destination snapshot directory."""
+
     return config.destination.target_root / "snapshots" / snapshot_name
 
 
 def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: SubvolumeMeta) -> str:
+    """Return the source path that would be used, without creating anything."""
+
     if subvolume.readonly is True:
         return subvolume.path
     if config.source.cache_root:
@@ -68,6 +90,8 @@ def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: Subvolu
 
 
 def _ensure_source_send_path(config: AppConfig, ssh: SSHRunner, snapshot_name: str, subvolume: SubvolumeMeta) -> str:
+    """Ensure and return a read-only source path for btrfs send."""
+
     return btrfs.remote_ensure_readonly_send_path(
         ssh,
         sudo=config.source.sudo,
@@ -90,6 +114,8 @@ def _select_parent(
     *,
     dry_run: bool,
 ) -> tuple[str | None, str | None]:
+    """Choose the newest valid incremental parent for one subvolume."""
+
     parent = latest_synced_before(state, snapshot.name, subvolume_name, set(source_by_name.keys()))
     if not parent:
         return None, None
@@ -114,14 +140,18 @@ def sync_once(
     only_snapshot: str | None = None,
     only_missing: bool = True,
 ) -> int:
+    """Run one sync pass and return the number of transferred subvolumes."""
+
     prepare_destination(config)
     ssh = SSHRunner(config.ssh)
     ssh.test()
 
+    # Discovery uses only sudo timeshift and sudo btrfs on the source.
     print("Reading source Timeshift snapshots with sudo timeshift --list...")
     snapshots = [snap for snap in list_source_snapshots(config, ssh, include_btrfs_info=True) if snap.subvolumes]
     source_by_name = {snap.name: snap for snap in snapshots}
 
+    # Optional test/debug filter for a single snapshot.
     if only_snapshot:
         snapshots = [snap for snap in snapshots if snap.name == only_snapshot]
         if not snapshots:
@@ -130,6 +160,8 @@ def sync_once(
     transferred = 0
     for snapshot in sorted(snapshots, key=lambda s: s.sort_key()):
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
+
+        # Skip if state already says this snapshot/subvolume set is complete.
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
             continue
         if limit is not None and transferred >= limit:
@@ -146,11 +178,15 @@ def sync_once(
             subvolume = snapshot.subvolumes.get(subvol_name)
             if not subvolume:
                 continue
+
             dest_path = _dest_subvolume_path(config, snapshot.name, subvol_name)
             already = state.get("snapshots", {}).get(snapshot.name, {}).get("subvolumes", {}).get(subvol_name)
             if already and already.get("status") == "ok" and dest_path.exists():
                 print(f"  {subvol_name}: already synced")
                 continue
+
+            # Do not overwrite unexpected local paths. This usually means an old
+            # failed run or manually-created data needs to be inspected.
             if dest_path.exists() and not dry_run:
                 raise SyncError(f"Destination path already exists but is not recorded as synced: {dest_path}")
 
@@ -176,6 +212,8 @@ def sync_once(
             receive_cmd = btrfs.local_receive_cmd(target_dir, config.destination.sudo)
             stream_pipeline(send_cmd, receive_cmd, verbose=True)
 
+            # Try to read destination metadata for state/debugging. If this read
+            # fails after successful receive, state is still recorded with None UUIDs.
             received_meta = None
             if dest_path.exists():
                 try:
@@ -183,6 +221,8 @@ def sync_once(
                     received_meta.readonly = btrfs.local_readonly(dest_path, config.destination.sudo)
                 except Exception:
                     received_meta = None
+
+            # State is updated only after the receive pipeline succeeded.
             mark_subvolume_synced(
                 state,
                 snapshot=snapshot,

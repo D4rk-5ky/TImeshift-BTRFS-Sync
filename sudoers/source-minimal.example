@@ -1,7 +1,31 @@
 # /etc/sudoers.d/ts-btrfs-source
-# Edit with: sudo visudo -f /etc/sudoers.d/ts-btrfs-source
-# Replace btrbk-source with your dedicated SSH backup user.
-# Adjust paths to match: command -v btrfs; command -v timeshift
+# Edit with:
+#   sudo visudo -f /etc/sudoers.d/ts-btrfs-source
+#
+# Purpose:
+#   Allow the dedicated SSH backup user to run ONLY the two source-side tools
+#   needed by this project: btrfs and timeshift.
+#
+# Replace btrbk-source with your real SSH backup user.
+# Check command paths with:
+#   command -v btrfs
+#   command -v timeshift
+#
+# What this allows:
+#   sudo -n /usr/bin/timeshift --list
+#   sudo -n /usr/bin/timeshift --create --scripted --tags O --comments ...
+#   sudo -n /usr/bin/btrfs subvolume show ...
+#   sudo -n /usr/bin/btrfs property get -ts ... ro
+#   sudo -n /usr/bin/btrfs subvolume create ...
+#   sudo -n /usr/bin/btrfs subvolume snapshot -r ...
+#   sudo -n /usr/bin/btrfs send ...
+#
+# What this does NOT allow directly:
+#   sudo mkdir
+#   sudo cat
+#   sudo find
+#   sudo python
+#   sudo shell scripts
 
 btrbk-source ALL=(root) NOPASSWD: /usr/bin/btrfs *
 btrbk-source ALL=(root) NOPASSWD: /usr/bin/timeshift *
