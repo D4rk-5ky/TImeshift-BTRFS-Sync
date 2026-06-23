@@ -1,0 +1,5 @@
+# Ignore all .config files
+*.config
+
+# But keep the example config tracked
+!config.example.config
