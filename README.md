@@ -1,6 +1,4 @@
-# timeshift-btrfs-syncz
-
-!!! NOTE !!! THIS IS A WORK IN PROGRESS AND IS NOT READY FOR USE !!! NOTE !!!
+# timeshift-btrfs-sync
 
 `timeshift-btrfs-sync` pulls Timeshift Btrfs snapshots from a source machine to a Btrfs backup destination over SSH.
 
@@ -176,7 +174,14 @@ Important fields:
 [ssh]
 host = "source-machine.example.lan"
 user = "btrbk-source"
+
+# Recommended: key-based auth. Store the key path in TOML.
 identity_file = "/root/.ssh/timeshift-btrfs-sync"
+
+# Optional: password auth through sshpass on the destination.
+# Use either password OR password_file, not both.
+# password = "your-ssh-password"
+# password_file = "/root/.ssh/timeshift-btrfs-sync.password"
 
 [source]
 sudo = "sudo -n"
@@ -190,6 +195,66 @@ create_readonly_cache = true
 [destination]
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 sudo = "sudo -n"
+```
+
+
+## SSH authentication options
+
+The `[ssh]` section supports both private keys and password authentication.
+
+Recommended key-based auth:
+
+```toml
+[ssh]
+host = "source-machine.example.lan"
+user = "btrbk-source"
+identity_file = "/root/.ssh/timeshift-btrfs-sync"
+extra_args = ["-o", "BatchMode=yes"]
+```
+
+What it does:
+
+- `identity_file` tells SSH which private key to use.
+- `BatchMode=yes` makes SSH fail instead of hanging on a prompt.
+- This is the best option for systemd timers and unattended backup jobs.
+
+Optional password stored directly in TOML:
+
+```toml
+[ssh]
+host = "source-machine.example.lan"
+user = "btrbk-source"
+password = "your-ssh-password"
+extra_args = ["-o", "StrictHostKeyChecking=accept-new"]
+```
+
+Slightly safer password stored in a separate file:
+
+```toml
+[ssh]
+host = "source-machine.example.lan"
+user = "btrbk-source"
+password_file = "/root/.ssh/timeshift-btrfs-sync.password"
+extra_args = ["-o", "StrictHostKeyChecking=accept-new"]
+```
+
+What password mode does:
+
+- Uses `sshpass -e ssh ...` on the destination machine.
+- Passes the password through the `SSHPASS` environment variable, not as a command-line argument.
+- Requires `sshpass` installed on the destination machine.
+- Must not be used with `BatchMode=yes`, because that disables password prompting.
+
+Install sshpass on Debian/Ubuntu/Kubuntu if you choose password mode:
+
+```bash
+sudo apt install sshpass
+```
+
+Password mode is convenient, but key-based auth is still safer. If you use `password_file`, protect it like this:
+
+```bash
+sudo chmod 600 /root/.ssh/timeshift-btrfs-sync.password
 ```
 
 ## Usage
@@ -305,6 +370,13 @@ If Timeshift's list output changes format, snapshot names should still parse as 
 You are responsible for any damage, data loss, broken backups, or restore failure caused by using this software. Review the code, test with throwaway data, and keep separate backups before relying on it.
 
 ## Changelog
+
+### 0.3.3
+
+- Added optional SSH password authentication using `sshpass -e`.
+- Added `ssh.password` and `ssh.password_file` TOML options.
+- Kept `ssh.identity_file` support and documented it as the recommended method.
+- Added environment handling so streamed `btrfs send` also works with password auth.
 
 ### 0.3.2
 

@@ -210,7 +210,7 @@ def sync_once(
                 parent_path=parent_send_path,
             )
             receive_cmd = btrfs.local_receive_cmd(target_dir, config.destination.sudo)
-            stream_pipeline(send_cmd, receive_cmd, verbose=True)
+            stream_pipeline(send_cmd, receive_cmd, verbose=True, left_env=ssh.environment())
 
             # Try to read destination metadata for state/debugging. If this read
             # fails after successful receive, state is still recorded with None UUIDs.

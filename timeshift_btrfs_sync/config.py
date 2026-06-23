@@ -171,12 +171,29 @@ def load_config(path: str | Path) -> AppConfig:
     port = ssh_raw.get("port")
     if port is not None and (not isinstance(port, int) or port <= 0):
         raise ConfigError("ssh.port must be a positive integer")
+    # SSH authentication options. identity_file is preferred. password/password_file
+    # are supported through sshpass on the destination machine. The password is
+    # passed through the SSHPASS environment variable, not on the command line.
+    identity_file = ssh_raw.get("identity_file") if isinstance(ssh_raw.get("identity_file"), str) and ssh_raw.get("identity_file") else None
+    password = ssh_raw.get("password") if isinstance(ssh_raw.get("password"), str) and ssh_raw.get("password") else None
+    password_file = ssh_raw.get("password_file") if isinstance(ssh_raw.get("password_file"), str) and ssh_raw.get("password_file") else None
+    if password and password_file:
+        raise ConfigError("Use either ssh.password or ssh.password_file, not both")
+    if password_file and not Path(password_file).expanduser().is_file():
+        raise ConfigError(f"ssh.password_file does not exist or is not a file: {password_file}")
+
+    extra_args = _string_list(ssh_raw.get("extra_args"), "ssh.extra_args")
+    if (password or password_file) and any("BatchMode=yes" in arg for arg in extra_args):
+        raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
+
     ssh = SSHConfig(
         host=_as_str(ssh_raw.get("host"), "ssh.host"),
         user=ssh_raw.get("user") if isinstance(ssh_raw.get("user"), str) and ssh_raw.get("user") else None,
         port=port,
-        identity_file=ssh_raw.get("identity_file") if isinstance(ssh_raw.get("identity_file"), str) and ssh_raw.get("identity_file") else None,
-        extra_args=_string_list(ssh_raw.get("extra_args"), "ssh.extra_args"),
+        identity_file=identity_file,
+        password=password,
+        password_file=password_file,
+        extra_args=extra_args,
     )
 
     # --- [source] section: Timeshift/Btrfs settings on the source machine. ---

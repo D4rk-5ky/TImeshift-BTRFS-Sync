@@ -24,7 +24,7 @@ from .timeshift import create_remote_manual_snapshot
 
 # The template written by `ts-btrfs init-config`. The normal config.example.toml
 # file has the same fields, but embedding this makes bootstrapping easy.
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.3.2 minimal-source-sudo config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.3.3 minimal-source-sudo config
 # Run this app on the BACKUP/DESTINATION machine.
 
 name = "kubuntu-timeshift"
@@ -35,7 +35,15 @@ prune_after_sync = false
 host = "source-machine.example.lan"
 user = "btrbk-source"
 # port = 22
+
+# Recommended: key-based auth. The key file should be chmod 600.
 # identity_file = "/root/.ssh/timeshift-btrfs-sync"
+
+# Optional password auth through sshpass on the destination.
+# password = "your-ssh-password"
+# password_file = "/root/.ssh/timeshift-btrfs-sync.password"
+
+# Keep BatchMode=yes for key-based auth. Remove it for password/password_file.
 extra_args = ["-o", "BatchMode=yes"]
 
 [source]
