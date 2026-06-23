@@ -1,0 +1,12 @@
+# Example systemd service for one timeshift-btrfs-sync job.
+# Install/edit path names before enabling the timer.
+[Unit]
+Description=Pull Timeshift Btrfs snapshots to backup storage
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Run the CLI with your real config path. --run is required because the example
+# config defaults to dry-run for safety.
+ExecStart=/usr/local/bin/ts-btrfs sync --config /etc/timeshift-btrfs-sync/kubuntu.toml --run --prune --yes-delete

@@ -1,0 +1,12 @@
+# Example systemd timer for the sync service above.
+# This runs once per hour with a small randomized delay.
+[Unit]
+Description=Hourly Timeshift Btrfs snapshot pull
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

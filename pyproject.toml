@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "timeshift-btrfs-sync"
+version = "0.1.1"
+description = "Destination-pull Btrfs send/receive sync for Timeshift Btrfs snapshots"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "timeshift-btrfs-sync contributors" }
+]
+keywords = ["btrfs", "timeshift", "backup", "snapshot", "ssh"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Environment :: Console",
+  "Operating System :: POSIX :: Linux",
+  "Topic :: System :: Archiving :: Backup",
+]
+
+[project.scripts]
+ts-btrfs = "timeshift_btrfs_sync.cli:main"
+
+[tool.setuptools]
+packages = ["timeshift_btrfs_sync"]
