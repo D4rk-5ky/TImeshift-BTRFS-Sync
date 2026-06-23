@@ -1,0 +1,7 @@
+# /etc/sudoers.d/ts-btrfs-source
+# Edit with: sudo visudo -f /etc/sudoers.d/ts-btrfs-source
+# Replace btrbk-source with your dedicated SSH backup user.
+# Adjust paths to match: command -v btrfs; command -v timeshift
+
+btrbk-source ALL=(root) NOPASSWD: /usr/bin/btrfs *
+btrbk-source ALL=(root) NOPASSWD: /usr/bin/timeshift *

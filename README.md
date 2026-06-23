@@ -1,63 +1,112 @@
 # timeshift-btrfs-sync
 
-!!! NOTE !!! THIS IS VERY MUCH A WORK IN PROCESS AND IS NOT READY YET IN ANY WAY:
+!!! NOTE !!! THIS IS A WORK IN PROGRESS AND IS NOT READY FOR USE !!! NOTE !!!
 
-----
+`timeshift-btrfs-sync` pulls Timeshift Btrfs snapshots from a source machine to a Btrfs backup destination over SSH.
 
-`timeshift-btrfs-sync` is a first-version Python CLI app for pulling Timeshift Btrfs snapshots from a source machine to a Btrfs backup destination over SSH.
+This version is rewritten so the **source machine only needs passwordless sudo for `timeshift` and `btrfs`**. v0.3.1 also keeps the source send-cache layout close to normal Timeshift snapshot layout.
 
-It does **not** reimplement Btrfs send/receive. It safely orchestrates:
+There is:
+
+- no source-side helper script
+- no source-side Python package
+- no source-side `sudo mkdir`
+- no source-side `sudo cat`
+- no source-side `sudo find`
+- no source-side root shell script
+
+The model is similar in spirit to tools like btrbk/syncoid: the backup side orchestrates commands over SSH, and the source-side sudoers policy is kept to the filesystem tool plus the snapshot tool.
+
+## Source sudoers
+
+On the source, create a dedicated SSH user, for example `btrbk-source`, then allow only Timeshift and Btrfs:
+
+```sudoers
+# edit with: sudo visudo -f /etc/sudoers.d/ts-btrfs-source
+btrbk-source ALL=(root) NOPASSWD: /usr/bin/btrfs *
+btrbk-source ALL=(root) NOPASSWD: /usr/bin/timeshift *
+```
+
+If your commands are in different paths, check with:
 
 ```bash
-btrfs send
-btrfs receive
-ssh
-btrfs subvolume show
-btrfs property get
-btrfs subvolume snapshot -r
-btrfs subvolume delete
-timeshift --create --tags O
+command -v btrfs
+command -v timeshift
 ```
 
-The first version is **destination-pull only**:
+The destination config can still use command names like `btrfs` and `timeshift`, but the safest sudoers rule uses absolute paths.
+
+## How source discovery works without helper scripts
+
+The destination runs:
+
+```bash
+ssh source 'sudo -n timeshift --list'
+```
+
+It parses snapshot names/tags from Timeshift output. Then it constructs snapshot paths from:
 
 ```text
-backup/destination machine -> SSH -> source machine -> btrfs send stream -> local btrfs receive
+source.snapshot_root + snapshot_name + configured subvolume name
 ```
 
-That means the source machine does not need write access to the backup location.
+Example:
 
-## Status
+```text
+/timeshift-btrfs/snapshots/2026-06-22_18-00-01/@
+/timeshift-btrfs/snapshots/2026-06-22_18-00-01/@home
+```
 
-This is an MVP/first version. Use `--dry-run` first. Test on non-critical snapshots before trusting it.
+Each configured subvolume is verified with:
 
-This commented build adds explanatory docstrings and inline comments throughout the Python source so the control flow is easier to follow and modify.
+```bash
+sudo -n btrfs subvolume show <path>
+sudo -n btrfs property get -ts <path> ro
+```
 
-Implemented:
+## Writable Timeshift snapshots and cache root
 
-- Destination-pull over SSH
-- Full Btrfs send/receive
-- Incremental Btrfs send/receive using the newest synced source snapshot still present on the source
-- Timeshift snapshot discovery
-- `@` and `@home` subvolume support, configurable
-- On-demand/manual Timeshift snapshot creation using tag `O`
-- Local sync state file
-- Dry-run mode
-- Retention pruning by Timeshift-like tags: `H`, `D`, `W`, `M`, `B`, `O`
-- Optional `Y` yearly retention extension
-- Local destination pruning with explicit `--yes-delete`
-- Lock file to prevent multiple simultaneous runs
+`btrfs send` needs read-only subvolumes. If a source Timeshift snapshot is already read-only, the app sends it directly.
 
-Not implemented yet:
+If it is writable, the app can create a read-only send-cache snapshot using **only `btrfs`**:
 
-- GUI
-- Push mode
-- Automatic SSH/sudo setup
-- Snapshot restore workflow
-- Full validation of every possible Timeshift `info.json` variant
-- Automatic detection of all nested subvolumes
+```bash
+sudo -n btrfs subvolume snapshot -r <original> <cache-path>
+```
 
-## Install
+The app does **not** create the top-level cache directory. Create it once manually on the source:
+
+```bash
+sudo mkdir -p /timeshift-btrfs/.ts-btrfs-sync/send-cache
+sudo chmod 700 /timeshift-btrfs/.ts-btrfs-sync/send-cache
+```
+
+After that, the app can keep a Timeshift-like cache layout without needing `mkdir`.
+It creates the per-snapshot parent with **btrfs itself**:
+
+```bash
+sudo -n btrfs subvolume create /timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01
+sudo -n btrfs subvolume snapshot -r /timeshift-btrfs/snapshots/2026-06-22_18-00-01/@ /timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01/@
+sudo -n btrfs subvolume snapshot -r /timeshift-btrfs/snapshots/2026-06-22_18-00-01/@home /timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01/@home
+```
+
+Resulting source cache layout:
+
+```text
+/timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01/@
+/timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01/@home
+```
+
+If you do not want the app to create cache snapshots, set:
+
+```toml
+[source]
+create_readonly_cache = false
+```
+
+Then source snapshots must already be read-only.
+
+## Install destination app
 
 On the backup/destination machine:
 
@@ -67,7 +116,7 @@ python3 -m venv .venv
 pip install -e .
 ```
 
-Then test:
+Test:
 
 ```bash
 ts-btrfs --version
@@ -77,11 +126,6 @@ ts-btrfs --version
 
 ```bash
 ts-btrfs init-config --path ./kubuntu.toml
-```
-
-Edit the file:
-
-```bash
 nano ./kubuntu.toml
 ```
 
@@ -94,73 +138,31 @@ user = "btrbk-source"
 identity_file = "/root/.ssh/timeshift-btrfs-sync"
 
 [source]
+sudo = "sudo -n"
+btrfs_command = "btrfs"
+timeshift_command = "timeshift"
 snapshot_root = "/timeshift-btrfs/snapshots"
 subvolumes = ["@", "@home"]
-sudo = "sudo -n"
+cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
+create_readonly_cache = true
 
 [destination]
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 sudo = "sudo -n"
 ```
 
-Common source snapshot roots:
+## Usage
 
-```text
-/timeshift-btrfs/snapshots
-/run/timeshift/backup/timeshift-btrfs/snapshots
-```
-
-## Required permissions
-
-The backup machine must be able to SSH into the source machine.
-
-The source SSH user needs passwordless sudo for commands like:
-
-```bash
-btrfs subvolume show
-btrfs property get
-btrfs subvolume snapshot -r
-btrfs send
-timeshift --create
-mkdir
-cat
-```
-
-The destination machine needs permission to run:
-
-```bash
-btrfs receive
-btrfs subvolume show
-btrfs property get
-btrfs subvolume delete
-```
-
-The example config uses:
-
-```toml
-sudo = "sudo -n"
-```
-
-`sudo -n` means sudo will fail instead of asking for a password. This is usually what you want for scheduled backup jobs.
-
-## Basic usage
-
-Test SSH:
+Test SSH and passwordless source sudo:
 
 ```bash
 ts-btrfs test-ssh --config ./kubuntu.toml
 ```
 
-List source Timeshift snapshots:
+List source snapshots:
 
 ```bash
 ts-btrfs list-source --config ./kubuntu.toml
-```
-
-Fast list without Btrfs metadata:
-
-```bash
-ts-btrfs list-source --config ./kubuntu.toml --fast
 ```
 
 Dry-run sync:
@@ -169,127 +171,58 @@ Dry-run sync:
 ts-btrfs sync --config ./kubuntu.toml --dry-run
 ```
 
-Actually sync:
-
-```bash
-ts-btrfs sync --config ./kubuntu.toml --run
-```
-
-Sync only one snapshot:
-
-```bash
-ts-btrfs sync --config ./kubuntu.toml --run --snapshot 2026-06-22_18-00-01
-```
-
-Limit the first test to one subvolume transfer:
+First real sync, limited to one subvolume:
 
 ```bash
 ts-btrfs sync --config ./kubuntu.toml --run --limit 1
 ```
 
-Show local sync state:
+Full real sync:
 
 ```bash
-ts-btrfs show-state --config ./kubuntu.toml
+ts-btrfs sync --config ./kubuntu.toml --run
 ```
 
-## Manual / On-demand Timeshift snapshots
-
-Create a Timeshift on-demand snapshot on the source machine:
+Create a Timeshift on-demand/manual snapshot on the source:
 
 ```bash
 ts-btrfs create-manual --config ./kubuntu.toml --comment "Before upgrade"
 ```
 
-This uses Timeshift tag `O`.
-
-## Retention / cleanup
-
-Dry-run pruning:
+Prune destination backups with dry-run first:
 
 ```bash
 ts-btrfs prune --config ./kubuntu.toml --dry-run
 ```
 
-Actually delete old backup snapshots:
+Real prune requires explicit delete confirmation:
 
 ```bash
 ts-btrfs prune --config ./kubuntu.toml --run --yes-delete
 ```
 
-Run sync and then prune:
-
-```bash
-ts-btrfs sync --config ./kubuntu.toml --run --prune --yes-delete
-```
-
-Retention config:
-
-```toml
-[retention]
-hourly = 6
-daily = 7
-weekly = 4
-monthly = 6
-boot = 5
-ondemand = 10
-yearly = 0
-keep_latest = true
-keep_latest_common_parent = true
-protected_snapshots = []
-```
-
-`yearly` is an optional extension. Timeshift itself normally uses `H`, `D`, `W`, `M`, `B`, and `O`.
-
 ## Destination layout
-
-The app writes to:
 
 ```text
 /Backups/Kubuntu/timeshift-btrfs/
 ├── snapshots/
 │   ├── 2026-06-22_18-00-01/
 │   │   ├── @
-│   │   ├── @home
-│   │   └── info.json
+│   │   └── @home
 │   └── 2026-06-22_19-00-01/
 │       ├── @
-│       ├── @home
-│       └── info.json
+│       └── @home
 └── .ts-btrfs-sync/
     ├── state.json
     ├── lock
     └── logs/
 ```
 
-## Read-only source snapshots
+## Limitations of minimal-sudo mode
 
-Btrfs send needs read-only snapshots.
+Because this version does not use `cat` or a source helper, it does not copy Timeshift's `info.json` from the source. Tags and comments come from `timeshift --list` parsing instead.
 
-If a source Timeshift snapshot subvolume is already read-only, the app sends it directly.
-
-If it is writable, the app creates a read-only source-side cache snapshot here by default:
-
-```text
-<parent-of-snapshot_root>/.ts-btrfs-sync/send-cache/<snapshot>/<subvolume>
-```
-
-Example:
-
-```text
-/timeshift-btrfs/.ts-btrfs-sync/send-cache/2026-06-22_18-00-01/@
-```
-
-The original Timeshift snapshot is not modified.
-
-## Safety notes
-
-- Always test with `--dry-run` first.
-- Do not run pruning until you have verified the destination paths.
-- Do not manually modify received destination subvolumes.
-- Do not delete source snapshots too aggressively, or the next run may need a full send instead of incremental send.
-- The destination must be Btrfs.
-- This software can delete backup snapshots when pruning is run with `--run --yes-delete`.
+If Timeshift's list output changes format, snapshot names should still parse as long as the normal timestamp folder name appears in the output.
 
 ## Disclaimer
 
@@ -298,8 +231,13 @@ You are responsible for any damage, data loss, broken backups, or restore failur
 
 ## Changelog
 
-### 0.1.1
+### 0.3.1
 
-- Added comments/docstrings throughout the Python source files.
-- Added more comments to the example config and systemd unit files.
-- No intended logic change from 0.1.0.
+- Changed the source read-only send-cache from a flat name layout to a Timeshift-like layout.
+- Per-snapshot cache parents are created with `btrfs subvolume create`, not `mkdir`.
+- Source-side sudo remains limited to `btrfs` and `timeshift`.
+
+### 0.3.0
+
+- Removed the source helper design.
+- Source-side passwordless sudo reduced to `btrfs` and `timeshift`.

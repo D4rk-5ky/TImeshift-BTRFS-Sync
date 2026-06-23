@@ -1,5 +1,3 @@
-# Example systemd timer for the sync service above.
-# This runs once per hour with a small randomized delay.
 [Unit]
 Description=Hourly Timeshift Btrfs snapshot pull
 
