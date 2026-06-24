@@ -1,3 +1,8 @@
+> [!WARNING]
+> **Work in progress — not ready for real use.**
+>
+> This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
+
 # timeshift-btrfs-sync v0.1.3
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
