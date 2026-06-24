@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.8 config
+# timeshift-btrfs-sync v0.2.4 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -8,9 +8,27 @@ name = "kubuntu-timeshift"
 # Safe default: commands preview changes unless --run is passed.
 default_dry_run = true
 
-# If true, `sync` automatically runs retention pruning after a successful sync.
-# Keep false while testing.
+# If true, `sync` automatically runs destination retention pruning after a successful sync.
+# Safety rule: pruning only deletes for real when the command is also run with
+# both --run and --yes-delete. Without --yes-delete, the app prints the prune
+# plan and refuses to delete. Keep false while testing.
 prune_after_sync = false
+
+# Optional split file logging. If blank or omitted, only terminal output is used.
+# When set, the directory is created automatically and each run writes:
+#   *.log = normal commands and captured command output
+#   *.mbuffer = mbuffer progress/summary and transfer command header
+#   *.btrfs-out = btrfs send/receive verbose output and send/receive commands
+#   *.err = stderr/error output
+log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
+
+# Optional internal metadata paths. Omit these to use defaults under target_root:
+#   <target_root>/.ts-btrfs-sync/state.json
+#   <target_root>/.ts-btrfs-sync/lock
+# state_file records successfully received snapshots and incremental parent data.
+# lock_file prevents two sync/prune jobs from running against the same target.
+# state_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/state.json"
+# lock_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/lock"
 
 [ssh]
 # Source machine containing the Timeshift snapshots.
@@ -163,9 +181,25 @@ mbuffer_size = "256M"
 # Optional extra mbuffer arguments as a TOML string list.
 mbuffer_extra_args = []
 
+# Optional Btrfs verbose output.
+# This adds -v to both:
+#   btrfs send -v ...
+#   btrfs receive -v ...
+# Btrfs verbose mode prints operation/details, not a clean percent progress bar.
+# mbuffer is still the useful throughput/total progress display.
+btrfs_verbose = false
+
 [retention]
 # Destination retention counts by Timeshift tag.
 # H=hourly, D=daily, W=weekly, M=monthly, B=boot, O=on-demand/manual.
+#
+# These rules are used by:
+#   ts-btrfs prune --config ./config.toml --dry-run
+#   ts-btrfs prune --config ./config.toml --run --yes-delete
+#   ts-btrfs sync  --config ./config.toml --run --prune --yes-delete
+#
+# Important: `prune_after_sync = true` or `--prune` only enables the prune step.
+# Real deletion still requires `--run --yes-delete`.
 hourly = 6
 daily = 7
 weekly = 4

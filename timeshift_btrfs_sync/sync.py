@@ -53,7 +53,8 @@ def prepare_destination(config: AppConfig) -> None:
     snapshots_root = root / "snapshots"
     snapshots_root.mkdir(parents=True, exist_ok=True)
     config.state_file.parent.mkdir(parents=True, exist_ok=True)
-    config.log_dir.mkdir(parents=True, exist_ok=True)
+    if config.log_dir is not None:
+        config.log_dir.mkdir(parents=True, exist_ok=True)
 
     # Best-effort compression property for future received writes.
     btrfs.set_local_compression(root, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
@@ -567,6 +568,9 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 if config.stream.use_mbuffer:
                     print()
                     print(f"    stream: would use {' '.join(config.stream.command() or [])}")
+                if config.stream.btrfs_verbose:
+                    print()
+                    print("    btrfs: would add -v to send/receive and show operation output live")
                 _human_rule("---")
                 continue
 
@@ -596,16 +600,34 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 parent_path=parent_send_path,
                 compressed_data=config.source.send_compressed_data,
                 proto=config.source.send_proto,
+                verbose=config.stream.btrfs_verbose,
             )
 
             # Build local receive command. Compression properties were set on
             # the target directory before receive if configured.
-            receive_cmd = btrfs.local_receive_cmd(target_dir, config.destination.sudo, config.destination.btrfs_command)
+            receive_cmd = btrfs.local_receive_cmd(
+                target_dir,
+                config.destination.sudo,
+                config.destination.btrfs_command,
+                verbose=config.stream.btrfs_verbose,
+            )
 
             # Optional mbuffer is inserted as the middle command. Password auth
             # environment is passed to the SSH side so streamed sends work with
             # sshpass too.
-            stream_pipeline(send_cmd, receive_cmd, middle_cmd=config.stream.command(), verbose=True, left_env=ssh.environment())
+            stream_pipeline(
+                send_cmd,
+                receive_cmd,
+                middle_cmd=config.stream.command(),
+                verbose=True,
+                left_env=ssh.environment(),
+                # If stream.btrfs_verbose is enabled, let Btrfs operation
+                # output appear live in the terminal. mbuffer remains the real
+                # byte/throughput progress display.
+                passthrough_left_stderr=config.stream.btrfs_verbose,
+                passthrough_right_stdout=config.stream.btrfs_verbose,
+                passthrough_right_stderr=config.stream.btrfs_verbose,
+            )
             _human_rule("---")
 
             received_meta = None

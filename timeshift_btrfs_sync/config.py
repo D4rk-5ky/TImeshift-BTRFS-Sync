@@ -69,13 +69,24 @@ class DestinationConfig:
 
 @dataclass(slots=True)
 class StreamConfig:
-    """Optional pipeline buffering settings."""
+    """Optional pipeline display/buffering settings.
+
+    mbuffer is the best progress display because it shows throughput, total
+    transferred data, elapsed time, and buffer fill. Btrfs itself has verbose
+    flags, but those print operation/details, not a clean percentage progress
+    bar.
+    """
 
     use_mbuffer: bool = False
     mbuffer_command: str = "mbuffer"
     mbuffer_size: str = "256M"
     mbuffer_rate: str | None = None
     mbuffer_extra_args: list[str] = field(default_factory=list)
+
+    # When true, add -v to both btrfs send and btrfs receive and let their
+    # stderr/stdout text pass through to the terminal during the transfer.
+    # This is not byte progress; it is Btrfs operation verbosity.
+    btrfs_verbose: bool = False
 
     def command(self) -> list[str] | None:
         """Return mbuffer command argv or None when disabled."""
@@ -124,7 +135,7 @@ class AppConfig:
     retention: RetentionConfig
     state_file: Path
     lock_file: Path
-    log_dir: Path
+    log_dir: Path | None
     default_dry_run: bool = True
     prune_after_sync: bool = False
 
@@ -271,6 +282,7 @@ def load_config(path: str | Path) -> AppConfig:
         mbuffer_size=str(stream_raw.get("mbuffer_size", "256M")),
         mbuffer_rate=(str(stream_raw.get("mbuffer_rate")) if stream_raw.get("mbuffer_rate") else None),
         mbuffer_extra_args=_string_list(stream_raw.get("mbuffer_extra_args"), "stream.mbuffer_extra_args"),
+        btrfs_verbose=_as_bool(stream_raw.get("btrfs_verbose"), "stream.btrfs_verbose", False),
     )
 
     retention_raw = raw.get("retention", {})
@@ -291,7 +303,12 @@ def load_config(path: str | Path) -> AppConfig:
 
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")
     lock_file = _as_path(raw.get("lock_file", str(target_root / ".ts-btrfs-sync" / "lock")), "lock_file")
-    log_dir = _as_path(raw.get("log_dir", str(target_root / ".ts-btrfs-sync" / "logs")), "log_dir")
+
+    # File logging is optional. If top-level log_dir is missing or blank, the app
+    # only prints to the terminal. If log_dir is set, log.py creates timestamped
+    # .log/.mbuffer/.btrfs-out/.err files in that directory.
+    raw_log_dir = raw.get("log_dir")
+    log_dir = Path(str(raw_log_dir)).expanduser() if isinstance(raw_log_dir, str) and raw_log_dir.strip() else None
 
     return AppConfig(
         name=name,

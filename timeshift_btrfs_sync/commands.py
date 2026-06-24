@@ -2,6 +2,9 @@
 
 This module centralizes local process execution and the streaming pipeline used
 for `ssh ... btrfs send | [mbuffer] | btrfs receive`.
+
+File logging is delegated to timeshift_btrfs_sync.log. This keeps naming,
+.log/.mbuffer/.btrfs-out/.err splitting, and stream tee logic in one module as requested.
 """
 
 from __future__ import annotations
@@ -12,6 +15,8 @@ import os
 import shlex
 import subprocess
 import sys
+
+from . import log as runlog
 
 
 class CommandError(RuntimeError):
@@ -69,8 +74,9 @@ def run_local(
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
-    `env` is mainly used for sshpass. Passwords are passed through SSHPASS in
-    the child environment, not as command-line arguments.
+    Normal commands are recorded in .log when logging is enabled. Their stderr
+    is also copied to .err. This intentionally does not include transfer stream
+    output; stream output goes to .mbuffer or .btrfs-out through stream_pipeline().
     """
 
     proc = subprocess.run(
@@ -83,9 +89,20 @@ def run_local(
         env=_merged_env(env),
     )
     result = Completed(cmd=cmd, returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+    logger = runlog.get_logger()
+    if logger:
+        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr)
+
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)
     return result
+
+
+def _join_text(parts: list[str]) -> str:
+    """Join captured stream text chunks into one string."""
+
+    return "".join(parts)
 
 
 def stream_pipeline(
@@ -97,6 +114,9 @@ def stream_pipeline(
     left_env: dict[str, str] | None = None,
     middle_env: dict[str, str] | None = None,
     right_env: dict[str, str] | None = None,
+    passthrough_left_stderr: bool = False,
+    passthrough_right_stdout: bool = False,
+    passthrough_right_stderr: bool = False,
 ) -> None:
     """Stream left command into optional middle command, then right command.
 
@@ -105,12 +125,21 @@ def stream_pipeline(
 
     With mbuffer:
       ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
+
+    Logging behavior when log_dir is set:
+      * command/control output goes to .log
+      * mbuffer progress/summary goes to .mbuffer and terminal
+      * btrfs verbose send/receive output goes to .btrfs-out and terminal
+      * stderr/error output goes to .err on failure
+      * .log is not flooded with mbuffer or verbose Btrfs output
     """
 
+    logger = runlog.get_logger()
+
     if verbose:
-        # Print each pipeline command as its own readable block.  The blank
-        # lines make it much easier to see when a transfer changes from one
-        # subvolume to the next.
+        # Print each pipeline command as its own readable block. The blank lines
+        # make it much easier to see when a transfer changes from one subvolume
+        # to the next.
         print(file=sys.stderr)
         print("REMOTE SEND:", shlex.join(left_cmd), file=sys.stderr)
         print(file=sys.stderr)
@@ -120,7 +149,18 @@ def stream_pipeline(
         print("LOCAL RECEIVE:", shlex.join(right_cmd), file=sys.stderr)
         print(file=sys.stderr)
 
-    left = subprocess.Popen(left_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_merged_env(left_env))
+    if logger:
+        logger.pipeline_commands(left_cmd, right_cmd, middle_cmd)
+
+    # Always pipe diagnostic output and consume it in reader threads. This avoids
+    # deadlocks caused by a long-running process filling stdout/stderr while the
+    # main thread waits for another process to finish.
+    left = subprocess.Popen(
+        left_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=_merged_env(left_env),
+    )
     assert left.stdout is not None
 
     middle = None
@@ -130,10 +170,7 @@ def stream_pipeline(
             middle_cmd,
             stdin=left.stdout,
             stdout=subprocess.PIPE,
-            # mbuffer writes its useful progress and summary lines to stderr.
-            # In verbose mode we let that stderr go directly to the terminal so
-            # the user can see live throughput and the final summary.
-            stderr=None if verbose else subprocess.PIPE,
+            stderr=subprocess.PIPE,
             env=_merged_env(middle_env),
         )
         left.stdout.close()
@@ -149,26 +186,77 @@ def stream_pipeline(
     )
     receive_stdin.close()
 
-    right_out, right_err = right.communicate()
+    threads = []
+    left_err_chunks: list[str] = []
+    middle_err_chunks: list[str] = []
+    right_out_chunks: list[str] = []
+    right_err_chunks: list[str] = []
 
-    middle_err = b""
-    middle_return = 0
-    if middle:
-        # When verbose=True, middle.stderr is inherited by the terminal and is
-        # therefore None here. When verbose=False, it is captured for errors.
-        middle_err = middle.stderr.read() if middle.stderr else b""
-        middle_return = middle.wait()
+    # Remote btrfs send stderr is shown live only when btrfs verbose is enabled.
+    # If not shown live, it is still captured for .err and CommandError.
+    threads.append(runlog.tee_pipe_to_log(
+        left.stderr,
+        stream_name="remote-send-stderr",
+        terminal=sys.stderr if passthrough_left_stderr else None,
+        to_mbuffer=False,
+        to_btrfs_out=bool(logger and passthrough_left_stderr),
+        to_err=False,
+        capture=left_err_chunks,
+    ))
 
-    left_err = left.stderr.read() if left.stderr else b""
+    # mbuffer writes normal progress to stderr. We want it on screen and in .mbuffer,
+    # but not in .log and not in .err unless the whole pipeline fails.
+    if middle and middle.stderr is not None:
+        threads.append(runlog.tee_pipe_to_log(
+            middle.stderr,
+            stream_name="mbuffer",
+            terminal=sys.stderr if verbose else None,
+            to_mbuffer=bool(logger),
+            to_btrfs_out=False,
+            to_err=False,
+            capture=middle_err_chunks,
+        ))
+
+    # btrfs receive stdout/stderr is shown live only in verbose mode. Otherwise
+    # it is captured quietly for error reporting.
+    threads.append(runlog.tee_pipe_to_log(
+        right.stdout,
+        stream_name="local-receive-stdout",
+        terminal=sys.stdout if passthrough_right_stdout else None,
+        to_mbuffer=False,
+        to_btrfs_out=bool(logger and passthrough_right_stdout),
+        to_err=False,
+        capture=right_out_chunks,
+    ))
+    threads.append(runlog.tee_pipe_to_log(
+        right.stderr,
+        stream_name="local-receive-stderr",
+        terminal=sys.stderr if passthrough_right_stderr else None,
+        to_mbuffer=False,
+        to_btrfs_out=bool(logger and passthrough_right_stderr),
+        to_err=False,
+        capture=right_err_chunks,
+    ))
+
+    right_return = right.wait()
+    middle_return = middle.wait() if middle else 0
     left_return = left.wait()
 
-    if left_return != 0 or middle_return != 0 or right.returncode != 0:
-        returncode = right.returncode if right.returncode != 0 else middle_return if middle_return != 0 else left_return
-        stderr = (left_err or b"").decode(errors="replace")
-        stderr += (middle_err or b"").decode(errors="replace")
-        stderr += (right_err or b"").decode(errors="replace")
+    for thread in threads:
+        thread.join()
+
+    returncode = right_return if right_return != 0 else middle_return if middle_return != 0 else left_return
+    if logger:
+        logger.pipeline_summary(returncode)
+
+    if left_return != 0 or middle_return != 0 or right_return != 0:
+        stderr = _join_text(left_err_chunks) + _join_text(middle_err_chunks) + _join_text(right_err_chunks)
+        stdout = _join_text(right_out_chunks)
+        if logger and stderr:
+            logger.err("PIPELINE STDERR:")
+            logger.err(stderr)
         pipe_text = shlex.join(left_cmd)
         if middle_cmd:
             pipe_text += " | " + shlex.join(middle_cmd)
         pipe_text += " | " + shlex.join(right_cmd)
-        raise CommandError(pipe_text, returncode, (right_out or b"").decode(errors="replace"), stderr)
+        raise CommandError(pipe_text, returncode, stdout, stderr)

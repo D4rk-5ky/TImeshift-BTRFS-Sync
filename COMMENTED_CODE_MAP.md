@@ -15,10 +15,30 @@ functions.
 | `timeshift_btrfs_sync/btrfs.py` | Builds Btrfs commands for metadata, send, receive, cache snapshots, delete, and compression property. |
 | `timeshift_btrfs_sync/sync.py` | Main sync loop: discover snapshots, choose parent, send/receive, update state. |
 | `timeshift_btrfs_sync/commands.py` | Runs subprocess commands and manages the streaming pipeline with optional mbuffer. |
+| `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files. |
 | `timeshift_btrfs_sync/state.py` | Reads/writes `state.json` and finds incremental parents. |
 | `timeshift_btrfs_sync/retention.py` | Plans and applies destination pruning. |
 | `timeshift_btrfs_sync/lock.py` | Prevents overlapping runs with a lock file. |
 | `timeshift_btrfs_sync/models.py` | Dataclasses for snapshots and subvolumes. |
+
+## Split logging logic
+
+All file logging logic lives in `timeshift_btrfs_sync/log.py`. When top-level
+`log_dir` is set, the CLI creates one `RunLogger` for the command and installs
+it as the active logger.
+
+Files created per run:
+
+```text
+*.log = normal commands, return codes, and captured command output
+*.mbuffer = transfer command header plus mbuffer progress/summary
+*.btrfs-out = send/receive command lines plus Btrfs verbose stream output
+*.err = stderr/error output
+```
+
+The streaming pipeline in `commands.py` calls `log.py` helper functions so
+mbuffer progress can be shown live on screen and written to `.mbuffer` without
+flooding `.log`. Btrfs verbose output is written separately to `.btrfs-out`.
 
 ## Source-side commands
 
@@ -155,3 +175,15 @@ Destination compression is best-effort:
 
 This should not break incremental sync because the incremental chain depends on
 snapshot parent relationships and the received parent staying unchanged.
+
+
+## Btrfs verbose output
+
+`stream.btrfs_verbose = true` adds `-v` to both generated Btrfs stream commands:
+
+```bash
+btrfs send -v ...
+btrfs receive -v ...
+```
+
+The pipeline lets that Btrfs verbose output pass through live to the terminal. This is operation/detail logging, not byte progress; mbuffer remains the main progress display for throughput and totals.

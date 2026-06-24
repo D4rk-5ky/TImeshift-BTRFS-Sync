@@ -3,7 +3,7 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.1.8
+# timeshift-btrfs-sync v0.2.4
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -12,10 +12,10 @@ does not accidentally use destination snapshots from another OS/source as parent
 
 ## Version
 
-This is the 18th zip build in the corrected sequence, so the version is:
+This is the 23rd zip build in the corrected sequence, so the version is:
 
 ```text
-0.1.8
+0.2.4
 ```
 
 See `VERSIONING.md` for the count.
@@ -24,11 +24,17 @@ See `VERSIONING.md` for the count.
 
 A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
 
+- Optional split logging controlled by top-level `log_dir`.
+- Adds `timeshift_btrfs_sync/log.py` so logging logic is kept in one file.
+- Creates per-run `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files when logging is enabled.
+- Keeps mbuffer progress out of `.log` and writes it to `.mbuffer`.
+- Writes Btrfs send/receive command blocks to `.log`, `.mbuffer`, and `.btrfs-out` so each stream log is readable by itself.
 - Source cache cleanup that deletes superseded read-only cache snapshots after a newer successful send.
 - Keeps the newest source cache snapshot per subvolume so future incremental sends still have a valid parent.
 - Human-readable transfer output with blank lines and separators between snapshots/subvolumes.
 - Prints `REMOTE SEND`, optional `STREAM BUFFER`, and `LOCAL RECEIVE` as separate blocks before each transfer.
 - Lets `mbuffer` progress/summary output display live during transfers.
+- Optional Btrfs verbose output with `btrfs send -v` and `btrfs receive -v`.
 - Optional `mbuffer` in the send/receive pipeline.
 - SSH compression choice with `ssh -C`.
 - SSH cipher choice with `ssh -c <cipher>`.
@@ -40,6 +46,7 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Faster state updates: after receive, update metadata from local destination `Received UUID` instead of remote source UUID checks for every current send.
 - Comments/docstrings explaining sections, functions, commands, and code paths.
 - Clear documentation that `target_root` creates both `snapshots/` and `.ts-btrfs-sync/`, and both must be cleaned when fully resetting a backup.
+- Clear documentation that pruning needs `--yes-delete` before any real deletion happens.
 
 ## Source sudo remains minimal
 
@@ -245,6 +252,45 @@ sudo -n btrfs subvolume delete <old-cache-subvolume>
 The app also tries to delete the now-empty per-snapshot cache parent folder. If `@home` or another cached subvolume still exists inside it, that parent delete fails harmlessly and is ignored until the remaining child cache is deleted later.
 
 
+## Optional split logging
+
+File logging is optional and controlled by top-level `log_dir` in `config.toml`:
+
+```toml
+log_dir = "/media/darkyere/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync/logs"
+```
+
+If `log_dir` is blank or omitted, the app only prints to the terminal. If it is
+set, the directory is created automatically and each run creates four files:
+
+```text
+YYYY-MM-DD_HH-MM-SS_<job-name>_<pid>.log
+YYYY-MM-DD_HH-MM-SS_<job-name>_<pid>.mbuffer
+YYYY-MM-DD_HH-MM-SS_<job-name>_<pid>.btrfs-out
+YYYY-MM-DD_HH-MM-SS_<job-name>_<pid>.err
+```
+
+The files are split like this:
+
+```text
+.log = normal app command logging, return codes, and captured normal command output
+.mbuffer = mbuffer progress/summary and the transfer command header
+.btrfs-out = Btrfs send/receive verbose output and send/receive command lines
+.err = stderr/error output
+```
+
+The send/receive command blocks are written to `.log`, `.mbuffer`, and `.btrfs-out`, so either stream log can be read by itself when debugging a transfer:
+
+```text
+REMOTE SEND: ssh ... 'sudo -n btrfs send ...'
+STREAM BUFFER: mbuffer -m 256M
+LOCAL RECEIVE: sudo -n btrfs receive ...
+```
+
+`mbuffer` progress is intentionally written to `.mbuffer`, not `.log`, so the normal
+log does not get flooded during large transfers. Btrfs verbose output is written to
+`.btrfs-out`, so it does not mix with mbuffer progress.
+
 ## Destination `target_root` layout and full reset cleanup
 
 The destination setting:
@@ -306,6 +352,77 @@ sudo rm -rf /media/darkyere/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync
 ```
 
 After that, the next real sync starts as a new backup chain and the first send is full.
+
+## Pruning and `--yes-delete` safety
+
+The app has two separate switches for pruning:
+
+```toml
+prune_after_sync = true
+```
+
+and:
+
+```bash
+ts-btrfs sync --config ./config.toml --run --prune
+```
+
+Both mean: **run the prune/retention step after sync**. They do **not** by
+themselves allow real deletion.
+
+Real destination deletion requires all of these to be true:
+
+```text
+1. the command is not dry-run
+2. prune is enabled with either prune_after_sync=true or --prune
+3. --yes-delete is passed
+```
+
+So if your config has:
+
+```toml
+prune_after_sync = true
+```
+
+this command will still refuse to delete old snapshots:
+
+```bash
+ts-btrfs sync --config ./config.toml --run
+```
+
+because it is missing:
+
+```bash
+--yes-delete
+```
+
+Use this for a real sync plus real prune:
+
+```bash
+ts-btrfs sync --config ./config.toml --run --yes-delete
+```
+
+Or, when `prune_after_sync = false`, explicitly enable pruning like this:
+
+```bash
+ts-btrfs sync --config ./config.toml --run --prune --yes-delete
+```
+
+To preview pruning without deleting anything:
+
+```bash
+ts-btrfs prune --config ./config.toml --dry-run
+```
+
+To run only pruning for real:
+
+```bash
+ts-btrfs prune --config ./config.toml --run --yes-delete
+```
+
+Why this extra flag exists: pruning deletes destination Btrfs subvolumes. The
+extra `--yes-delete` flag prevents a config mistake or forgotten
+`prune_after_sync = true` from deleting backups unexpectedly.
 
 ## SSH options
 
@@ -399,6 +516,31 @@ Install on the destination if enabled:
 sudo apt install mbuffer
 ```
 
+
+## Btrfs verbose output
+
+Btrfs send/receive do not provide a clean percentage progress bar like some copy tools. The useful throughput/total display still comes from `mbuffer`.
+
+The app can optionally add `-v` to both Btrfs commands:
+
+```toml
+[stream]
+btrfs_verbose = true
+```
+
+This changes the generated commands to include:
+
+```bash
+sudo -n btrfs send -v ...
+sudo -n btrfs receive -v ...
+```
+
+What it does:
+
+- Shows Btrfs operation/detail output live in the terminal when Btrfs prints it.
+- Does not replace `mbuffer` for byte progress, speed, totals, or elapsed time.
+- Can be noisy on large sends, so the default is `false`.
+
 ## Destination Btrfs compression
 
 Example:
@@ -463,7 +605,231 @@ What the commands do:
 - `sync --dry-run` prints the plan without writing data.
 - `sync --run --limit 1` performs one real subvolume transfer for safe testing.
 
+
+## Complete CLI command reference
+
+All command flags below are shown by the built-in help commands:
+
+```bash
+python3 -m timeshift_btrfs_sync --help
+python3 -m timeshift_btrfs_sync init-config --help
+python3 -m timeshift_btrfs_sync test-ssh --help
+python3 -m timeshift_btrfs_sync list-source --help
+python3 -m timeshift_btrfs_sync sync --help
+python3 -m timeshift_btrfs_sync prune --help
+python3 -m timeshift_btrfs_sync create-manual --help
+python3 -m timeshift_btrfs_sync show-state --help
+```
+
+### Global command
+
+| Flag | Meaning |
+|---|---|
+| `-h`, `--help` | Show help for the main command or a subcommand. |
+| `--version` | Print the program version and exit. |
+
+### `init-config`
+
+Writes a complete commented TOML config template.
+
+| Flag | Meaning |
+|---|---|
+| `--path PATH` | Where to write the example config. Default: `./ts-btrfs.toml`. |
+| `--force` | Overwrite the destination config if it already exists. |
+
+### `test-ssh`
+
+Tests SSH and the two required source sudo commands.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+
+### `list-source`
+
+Lists source Timeshift snapshots.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+| `--verify-btrfs` | Slow mode. Verify every configured source subvolume with Btrfs during listing. Without this, listing uses fast discovery. |
+
+### `sync`
+
+Pulls missing snapshot subvolumes from source to destination.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+| `--dry-run` | Preview planned sends/prunes. Does not receive or delete anything. |
+| `--run` | Perform real send/receive work. Required for actual changes. |
+| `--limit LIMIT` | Transfer at most this many subvolumes. Useful for first live testing. |
+| `--snapshot SNAPSHOT` | Sync only one Timeshift snapshot name, for example `2026-06-23_07-10-24`. |
+| `--resend` | Try even if `state.json` says the subvolume was already synced. Use carefully. |
+| `--prune` | Run destination retention pruning after sync. Real delete also requires `--run --yes-delete`. |
+| `--yes-delete` | Allow real pruning deletes when used with `--run` and `--prune`, or with `prune_after_sync = true`. |
+
+### `prune`
+
+Applies destination retention rules without syncing first.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+| `--dry-run` | Show what would be deleted. Does not delete anything. |
+| `--run` | Perform real pruning if `--yes-delete` is also present. |
+| `--yes-delete` | Explicit safety confirmation required before real prune deletes. |
+
+### `create-manual`
+
+Creates a source Timeshift on-demand/manual snapshot with tag `O`.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+| `--comment COMMENT` | Comment passed to `timeshift --create --comments`. |
+
+### `show-state`
+
+Shows the local `state.json` tracking file.
+
+| Flag | Meaning |
+|---|---|
+| `--config CONFIG`, `-c CONFIG` | Path to `config.toml`. |
+| `--json` | Print raw `state.json` instead of a short table. |
+
+## Complete config option reference
+
+Every option below is also present in `config.example.toml`. Options commented out there are optional but still documented.
+
+### Top-level options
+
+| Option | Meaning |
+|---|---|
+| `name` | Human-readable job name. Also used in log filenames. |
+| `default_dry_run` | If true, commands preview changes unless `--run` is passed. |
+| `prune_after_sync` | If true, `sync` runs pruning after sync. Real delete still requires `--run --yes-delete`. |
+| `log_dir` | Optional directory for per-run `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files. Blank/omitted disables file logging. |
+| `state_file` | Optional path to state tracking file. Default: `<target_root>/.ts-btrfs-sync/state.json`. |
+| `lock_file` | Optional path to lock file. Default: `<target_root>/.ts-btrfs-sync/lock`. |
+
+### `[ssh]`
+
+| Option | Meaning |
+|---|---|
+| `host` | Source hostname or IP address. Required. |
+| `user` | Source SSH user, normally `ts-btrfs-sync-user`. Optional; SSH default user is used if omitted. |
+| `port` | Optional SSH port. |
+| `identity_file` | Optional SSH private key path. Recommended for unattended jobs. |
+| `compression` | If true, adds `ssh -C`. |
+| `cipher` | Optional SSH cipher, adds `ssh -c <cipher>`. |
+| `password` | Optional SSH password for `sshpass -e`. Less safe than key auth. |
+| `password_file` | Optional file containing SSH password for `sshpass -e`. Use either `password` or `password_file`, not both. |
+| `extra_args` | Extra SSH arguments as a TOML string list. Do not use `BatchMode=yes` with password/password_file. |
+
+### `[source]`
+
+| Option | Meaning |
+|---|---|
+| `sudo` | Source sudo prefix, normally `sudo -n`. |
+| `btrfs_command` | Source Btrfs command name/path. |
+| `timeshift_command` | Source Timeshift command name/path. |
+| `snapshot_root` | Source Timeshift snapshot root. The app builds `<snapshot_root>/<snapshot>/<subvolume>`. Required. |
+| `subvolumes` | Subvolume names expected inside each snapshot, normally `@` and `@home`. |
+| `verify_subvolumes_at_discovery` | Slow discovery safety check. If true, list-source verifies every subvolume with Btrfs. Default false for speed. |
+| `verify_incremental_parent` | If true, verify selected incremental parent metadata before using it. Recommended true. |
+| `verify_incremental_parent_once_per_run` | If true, verify the first incremental parent per subvolume name per run, then trust the chain this run creates. |
+| `allow_incremental_without_parent_match` | Dangerous escape hatch. If true, may continue even when parent match cannot be proven. Keep false. |
+| `cache_root` | Source-side read-only cache root for writable Timeshift snapshots. |
+| `create_readonly_cache` | If true, create read-only cache snapshots when source snapshots are writable. |
+| `cleanup_superseded_cache` | If true, delete older source cache snapshots after a newer successful send supersedes them. |
+| `send_compressed_data` | If true, add `btrfs send --compressed-data`. |
+| `send_proto` | Optional Btrfs send protocol version, for example `2` adds `--proto 2`. |
+
+### `[destination]`
+
+| Option | Meaning |
+|---|---|
+| `target_root` | Local backup root. The app uses/creates `snapshots/` and `.ts-btrfs-sync/` inside it. Required. |
+| `sudo` | Destination sudo prefix for Btrfs receive/delete/property commands. |
+| `btrfs_command` | Destination Btrfs command name/path. |
+| `create_target_root` | If true, create `target_root` and app metadata folders if missing. |
+| `compression` | Destination Btrfs compression property: `zstd`, `lzo`, `zlib`, `none`, or blank. `zstd:3` is normalized to `zstd`. |
+| `set_compression_before_receive` | If true, set compression on the receive parent before `btrfs receive`. |
+| `set_compression_after_receive` | If true, set compression on the received subvolume after receive. |
+
+### `[stream]`
+
+| Option | Meaning |
+|---|---|
+| `use_mbuffer` | If true, insert `mbuffer` between SSH send and local receive. |
+| `mbuffer_command` | mbuffer command name/path. |
+| `mbuffer_size` | mbuffer memory buffer size, for example `256M`. |
+| `mbuffer_rate` | Optional mbuffer rate limit, for example `100M`. |
+| `mbuffer_extra_args` | Extra mbuffer arguments as a TOML string list. |
+| `btrfs_verbose` | If true, add `-v` to `btrfs send` and `btrfs receive`. This is verbose operation output, not progress. |
+
+### `[retention]`
+
+| Option | Meaning |
+|---|---|
+| `hourly` | Number of newest `H` snapshots to keep. |
+| `daily` | Number of newest `D` snapshots to keep. |
+| `weekly` | Number of newest `W` snapshots to keep. |
+| `monthly` | Number of newest `M` snapshots to keep. |
+| `boot` | Number of newest `B` snapshots to keep. |
+| `ondemand` | Number of newest `O` snapshots to keep. |
+| `yearly` | Optional non-native `Y` retention count. |
+| `keep_latest` | Always keep newest synced snapshot. |
+| `keep_latest_common_parent` | Keep newest likely common parent for incremental safety. |
+| `protected_snapshots` | Snapshot names that are never pruned. |
+
 ## Changelog
+
+### 0.2.4
+
+- Audited all CLI flags, config options, README coverage, and `config.example.toml`.
+- Expanded `python3 -m timeshift_btrfs_sync --help` and all subcommand help text.
+- Added complete CLI and config reference sections to the README.
+- Added `state_file` and `lock_file` to `config.example.toml`.
+- Added `CONFIG_AND_CLI_AUDIT.md`.
+
+### 0.2.3
+
+- Documentation-only update.
+- Added a dedicated README section explaining pruning, `prune_after_sync`, `--prune`, `--run`, and `--yes-delete`.
+- Updated `config.example.toml` comments so it is clear that prune settings do not delete without `--yes-delete`.
+
+### 0.2.2
+
+- Split the old combined `.out` transfer log into `.mbuffer` and `.btrfs-out`.
+- `.mbuffer` stores mbuffer progress/summary plus the transfer command header.
+- `.btrfs-out` stores Btrfs send/receive verbose output plus send/receive command lines.
+- `.log` remains for normal command/control output and `.err` remains for stderr/error output.
+
+### 0.2.1
+
+- Fixed mbuffer live progress output after adding Btrfs verbose/logging support.
+- Changed the stream reader from `readline()` to chunked `os.read()` so carriage-return progress lines from mbuffer are shown immediately.
+- `stream.btrfs_verbose` now controls only Btrfs send/receive verbose passthrough, not whether mbuffer progress is visible.
+- No config change needed.
+
+### 0.2.0
+
+- Added optional split logging controlled by top-level `log_dir`.
+- Added `timeshift_btrfs_sync/log.py` for all file logging logic.
+- Added timestamped per-run `.log`, `.out`, and `.err` files.
+- Normal captured command output goes to `.log`.
+- Transfer/mbuffer output goes to `.out` so `.log` is not flooded.
+- Errors/stderr are copied to `.err`.
+- Send/receive command blocks are included in both `.log` and `.out`.
+
+### 0.1.9
+
+- Added optional `stream.btrfs_verbose = true`.
+- Adds `-v` to `btrfs send` and `btrfs receive` when enabled.
+- Lets Btrfs verbose output pass through live to the terminal during transfers.
+- Documents that Btrfs verbose output is operation/detail logging, while `mbuffer` remains the useful throughput/total progress display.
 
 ### 0.1.8
 

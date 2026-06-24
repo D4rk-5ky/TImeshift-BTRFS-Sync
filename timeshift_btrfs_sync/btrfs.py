@@ -289,10 +289,18 @@ def remote_send_cmd(
     parent_path: str | None = None,
     compressed_data: bool = False,
     proto: int | None = None,
+    verbose: bool = False,
 ) -> list[str]:
-    """Build SSH command that runs remote `btrfs send`."""
+    """Build SSH command that runs remote `btrfs send`.
+
+    verbose=True adds `-v`. Btrfs send verbose output is operation/detail
+    logging, not a percentage progress bar. Throughput/total progress is still
+    best provided by mbuffer.
+    """
 
     args = ["send"]
+    if verbose:
+        args += ["-v"]
     if proto is not None:
         args += ["--proto", str(proto)]
     if compressed_data:
@@ -303,10 +311,17 @@ def remote_send_cmd(
     return ssh.command(remote_btrfs_cmd(sudo, btrfs_command, args))
 
 
-def local_receive_cmd(destination_dir: Path, sudo: str, btrfs_command: str = "btrfs") -> list[str]:
-    """Build local `btrfs receive` command."""
+def local_receive_cmd(destination_dir: Path, sudo: str, btrfs_command: str = "btrfs", *, verbose: bool = False) -> list[str]:
+    """Build local `btrfs receive` command.
 
-    return local_btrfs_cmd(sudo, btrfs_command, ["receive", str(destination_dir)])
+    verbose=True adds `-v` so Btrfs receive can print operation details.
+    """
+
+    args = ["receive"]
+    if verbose:
+        args += ["-v"]
+    args.append(str(destination_dir))
+    return local_btrfs_cmd(sudo, btrfs_command, args)
 
 
 def delete_local_subvolume(path: Path, sudo: str, btrfs_command: str = "btrfs") -> None:
