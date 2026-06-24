@@ -22,6 +22,12 @@ class SourceConfig:
     cache_root: str | None = None
     create_readonly_cache: bool = True
 
+    # Cleanup option. When true, temporary source-side cache snapshots are
+    # deleted after they are superseded by a newer successful send. The newest
+    # cache snapshot per subvolume is kept because it is needed as the parent
+    # for the next incremental send, including the next program run.
+    cleanup_superseded_cache: bool = True
+
     # Speed option. False means discovery does not run btrfs property/show for
     # every snapshot. The app assumes configured subvolume names exist and only
     # runs Btrfs checks for snapshots that are actually going to be sent.
@@ -233,6 +239,7 @@ def load_config(path: str | Path) -> AppConfig:
         timeshift_command=str(source_raw.get("timeshift_command", "timeshift")),
         cache_root=(str(source_raw.get("cache_root")) if source_raw.get("cache_root") else None),
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
+        cleanup_superseded_cache=_as_bool(source_raw.get("cleanup_superseded_cache"), "source.cleanup_superseded_cache", True),
         verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
         verify_incremental_parent=_as_bool(source_raw.get("verify_incremental_parent"), "source.verify_incremental_parent", True),
         verify_incremental_parent_once_per_run=_as_bool(source_raw.get("verify_incremental_parent_once_per_run"), "source.verify_incremental_parent_once_per_run", True),

@@ -3,7 +3,7 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.1.5
+# timeshift-btrfs-sync v0.1.8
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -12,10 +12,10 @@ does not accidentally use destination snapshots from another OS/source as parent
 
 ## Version
 
-This is the 14th zip build in the corrected sequence, so the version is:
+This is the 18th zip build in the corrected sequence, so the version is:
 
 ```text
-0.1.5
+0.1.8
 ```
 
 See `VERSIONING.md` for the count.
@@ -24,6 +24,11 @@ See `VERSIONING.md` for the count.
 
 A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
 
+- Source cache cleanup that deletes superseded read-only cache snapshots after a newer successful send.
+- Keeps the newest source cache snapshot per subvolume so future incremental sends still have a valid parent.
+- Human-readable transfer output with blank lines and separators between snapshots/subvolumes.
+- Prints `REMOTE SEND`, optional `STREAM BUFFER`, and `LOCAL RECEIVE` as separate blocks before each transfer.
+- Lets `mbuffer` progress/summary output display live during transfers.
 - Optional `mbuffer` in the send/receive pipeline.
 - SSH compression choice with `ssh -C`.
 - SSH cipher choice with `ssh -c <cipher>`.
@@ -34,6 +39,7 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Parent-guard cache: verify the first incremental parent per subvolume in a run, then trust the chain created by this process.
 - Faster state updates: after receive, update metadata from local destination `Received UUID` instead of remote source UUID checks for every current send.
 - Comments/docstrings explaining sections, functions, commands, and code paths.
+- Clear documentation that `target_root` creates both `snapshots/` and `.ts-btrfs-sync/`, and both must be cleaned when fully resetting a backup.
 
 ## Source sudo remains minimal
 
@@ -52,6 +58,7 @@ What those lines allow:
 - `sudo -n btrfs property get -ts ... ro` for read-only checks when a subvolume is actually going to be sent.
 - `sudo -n btrfs subvolume create ...` for send-cache snapshot parents.
 - `sudo -n btrfs subvolume snapshot -r ...` for read-only send-cache snapshots.
+- `sudo -n btrfs subvolume delete ...` for deleting superseded send-cache snapshots after successful sends.
 - `sudo -n btrfs send ...` for full/incremental streams.
 
 What those lines do **not** directly allow:
@@ -187,6 +194,118 @@ After every receive, the app still reads local destination metadata and updates
 `state.json`. The source UUID for the just-received snapshot is inferred from the
 local destination `Received UUID`, so the app no longer needs a remote
 `btrfs subvolume show` for every current snapshot merely to refresh state.
+
+
+## Source cache cleanup
+
+When source Timeshift snapshots are writable (`ro=false`), the app creates temporary read-only cache snapshots under:
+
+```toml
+[source]
+cache_root = "/media/darkyere/OS-Root/timeshift-btrfs/.ts-btrfs-sync/send-cache"
+create_readonly_cache = true
+cleanup_superseded_cache = true
+```
+
+The cache is needed because `btrfs send` requires a read-only source. But those cache snapshots should not pile up forever.
+
+The important rule is:
+
+```text
+Do not delete the current/latest cache snapshot immediately.
+Delete the previous cache snapshot only after a newer snapshot has been sent successfully.
+```
+
+Why: the latest cache snapshot is the parent for the next incremental send. If it is deleted immediately after sending, the next run may have no valid read-only parent and may be forced into a full send or fail the parent guard.
+
+So the app now does this after a successful incremental send:
+
+```text
+old parent cache    -> safe to delete
+current cache       -> keep as next incremental parent
+```
+
+Example with `@`:
+
+```text
+2026-06-23_07-10-24/@ sent successfully
+  keep its cache, because it is needed as parent
+
+2026-06-23_09-00-01/@ sent incrementally from 07-10-24/@
+  now delete 07-10-24/@ cache
+  keep 09-00-01/@ cache as the newest parent
+```
+
+Cleanup uses only source-side Btrfs:
+
+```bash
+sudo -n btrfs subvolume delete <old-cache-subvolume>
+```
+
+The app also tries to delete the now-empty per-snapshot cache parent folder. If `@home` or another cached subvolume still exists inside it, that parent delete fails harmlessly and is ignored until the remaining child cache is deleted later.
+
+
+## Destination `target_root` layout and full reset cleanup
+
+The destination setting:
+
+```toml
+[destination]
+target_root = "/media/darkyere/btrbk/KubuntuBTRFSRAID0/"
+```
+
+means the app owns this backup job folder:
+
+```text
+/media/darkyere/btrbk/KubuntuBTRFSRAID0/
+```
+
+Inside that folder, the app creates **two important folders**:
+
+```text
+/media/darkyere/btrbk/KubuntuBTRFSRAID0/
+├── snapshots/
+└── .ts-btrfs-sync/
+```
+
+What they are:
+
+- `snapshots/` contains the received Btrfs backup snapshots, for example `snapshots/2026-06-23_07-10-24/@` and `snapshots/2026-06-23_07-10-24/@home`.
+- `.ts-btrfs-sync/` contains the app metadata, especially `state.json`, the lock file, and logs.
+
+If you want to completely start over with a new full sync, you must clean **both**:
+
+```text
+snapshots/
+.ts-btrfs-sync/
+```
+
+Do **not** delete only `.ts-btrfs-sync/state.json` while leaving old received snapshots in `snapshots/`. That makes the destination contain real backup snapshots but no matching state file, so the safety guard may refuse to continue because it cannot prove those snapshots belong to the same source OS.
+
+Also do **not** delete only `snapshots/` while leaving `.ts-btrfs-sync/state.json`. Then the state file may claim snapshots exist even though they were removed.
+
+A full reset means the destination backup folder should look empty again, except for the parent `target_root` itself.
+
+Important: received `@` and `@home` are Btrfs subvolumes, so they should be deleted with `btrfs subvolume delete`, not plain `rm -rf`.
+
+Example reset shape, adjust paths before using:
+
+```bash
+# 1. Inspect what is there first.
+sudo btrfs subvolume list /media/darkyere/btrbk/KubuntuBTRFSRAID0
+
+# 2. Delete received subvolumes under snapshots/.
+# Example only. Delete the exact paths that exist on your destination.
+sudo btrfs subvolume delete /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@home
+sudo btrfs subvolume delete /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@
+
+# 3. After all Btrfs subvolumes below snapshots/ are gone,
+# remove the ordinary folders and app metadata.
+sudo rm -rf /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots
+sudo rm -rf /media/darkyere/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync
+```
+
+After that, the next real sync starts as a new backup chain and the first send is full.
 
 ## SSH options
 
@@ -345,6 +464,27 @@ What the commands do:
 - `sync --run --limit 1` performs one real subvolume transfer for safe testing.
 
 ## Changelog
+
+### 0.1.8
+
+- Added source-side cleanup for superseded read-only cache snapshots.
+- Keeps the newest cache snapshot per subvolume so future incremental sends still have a valid parent.
+- Cleanup uses only `sudo -n btrfs subvolume delete ...` on the source.
+- Added `source.cleanup_superseded_cache = true` config option.
+
+### 0.1.7
+
+- Made transfer output more human-readable.
+- Added blank lines between status messages, send commands, mbuffer commands, receive commands, and transfer blocks.
+- Added visual separators after each send/receive block.
+- Allowed mbuffer progress and summary lines to be shown live on the terminal during real transfers.
+
+### 0.1.6
+
+- Documented that `destination.target_root` creates both `snapshots/` and `.ts-btrfs-sync/`.
+- Added full reset cleanup notes explaining that both folders must be removed before starting a new full sync.
+- Clarified that received snapshots are Btrfs subvolumes and should be deleted with `btrfs subvolume delete`, not plain `rm -rf`.
+- No intended code behavior change.
 
 ### 0.1.5
 

@@ -232,6 +232,54 @@ def remote_ensure_readonly_send_path(
     return cache_path
 
 
+def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
+    """Return True when path points inside the configured source cache root.
+
+    This is used before deleting any source-side cache subvolume. The check is
+    intentionally simple and conservative: only absolute-looking paths below the
+    configured cache_root are treated as deletable cache paths.
+    """
+
+    if not path or not cache_root:
+        return False
+    normalized_root = str(Path(cache_root)).rstrip("/")
+    normalized_path = str(Path(path)).rstrip("/")
+    return normalized_path.startswith(normalized_root + "/")
+
+
+def remote_delete_subvolume(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str, *, check: bool = False):
+    """Delete a source-side Btrfs subvolume with `btrfs subvolume delete`.
+
+    This is used for temporary read-only cache snapshots after they are no
+    longer needed as incremental parents. It still only requires passwordless
+    source-side `btrfs`; no rm/mkdir/cat/helper command is introduced.
+    """
+
+    return ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]), check=check)
+
+
+def remote_try_delete_cache_subvolume(
+    ssh: SSHRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str | None,
+    path: str | None,
+) -> bool:
+    """Best-effort delete for one source cache subvolume.
+
+    Returns True only when the delete command succeeded. Paths outside
+    cache_root are refused so this cleanup can never delete original Timeshift
+    snapshots by accident.
+    """
+
+    if not path_is_under_cache(path, cache_root):
+        return False
+    assert path is not None
+    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False)
+    return result.returncode == 0
+
+
 def remote_send_cmd(
     ssh: SSHRunner,
     *,

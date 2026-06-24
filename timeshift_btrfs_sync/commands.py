@@ -108,10 +108,17 @@ def stream_pipeline(
     """
 
     if verbose:
+        # Print each pipeline command as its own readable block.  The blank
+        # lines make it much easier to see when a transfer changes from one
+        # subvolume to the next.
+        print(file=sys.stderr)
         print("REMOTE SEND:", shlex.join(left_cmd), file=sys.stderr)
+        print(file=sys.stderr)
         if middle_cmd:
             print("STREAM BUFFER:", shlex.join(middle_cmd), file=sys.stderr)
+            print(file=sys.stderr)
         print("LOCAL RECEIVE:", shlex.join(right_cmd), file=sys.stderr)
+        print(file=sys.stderr)
 
     left = subprocess.Popen(left_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=_merged_env(left_env))
     assert left.stdout is not None
@@ -123,7 +130,10 @@ def stream_pipeline(
             middle_cmd,
             stdin=left.stdout,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # mbuffer writes its useful progress and summary lines to stderr.
+            # In verbose mode we let that stderr go directly to the terminal so
+            # the user can see live throughput and the final summary.
+            stderr=None if verbose else subprocess.PIPE,
             env=_merged_env(middle_env),
         )
         left.stdout.close()
@@ -144,6 +154,8 @@ def stream_pipeline(
     middle_err = b""
     middle_return = 0
     if middle:
+        # When verbose=True, middle.stderr is inherited by the terminal and is
+        # therefore None here. When verbose=False, it is captured for errors.
         middle_err = middle.stderr.read() if middle.stderr else b""
         middle_return = middle.wait()
 

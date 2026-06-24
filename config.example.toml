@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.3 config
+# timeshift-btrfs-sync v0.1.8 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -96,6 +96,13 @@ allow_incremental_without_parent_match = false
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 
+# Source cache cleanup. Keep true. After a successful incremental send, the
+# previous source cache snapshot is no longer needed and is deleted with:
+#   sudo -n btrfs subvolume delete <old-cache-subvolume>
+# The newest/current cache snapshot is kept because it is needed as the parent
+# for the next incremental send, including the next program run.
+cleanup_superseded_cache = true
+
 # Optional Btrfs send compressed-data mode.
 # true adds: btrfs send --compressed-data
 # This preserves already-compressed source extents when supported. It is not the
@@ -108,6 +115,15 @@ send_compressed_data = false
 
 [destination]
 # Local Btrfs backup root on the BACKUP/DESTINATION machine.
+#
+# The app creates two folders inside this target_root:
+#   snapshots/       = received Btrfs backup snapshots
+#   .ts-btrfs-sync/ = app state.json, lock file, logs
+#
+# If you completely reset/start over with a new full sync, clean both folders.
+# Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.
+# Received @ and @home entries are Btrfs subvolumes, so delete those with
+# `btrfs subvolume delete` before removing the ordinary folders.
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 
 # Local sudo prefix for btrfs receive/delete/property commands.

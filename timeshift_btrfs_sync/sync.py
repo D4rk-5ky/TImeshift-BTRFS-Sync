@@ -26,6 +26,19 @@ class SyncError(RuntimeError):
     """Raised for sync safety errors."""
 
 
+def _human_blank() -> None:
+    """Print one blank line to separate human-readable status blocks."""
+
+    print()
+
+
+def _human_rule(text: str = "----") -> None:
+    """Print a visual separator with blank lines around it."""
+
+    print()
+    print(text)
+    print()
+
 def prepare_destination(config: AppConfig) -> None:
     """Create/validate destination directories and set compression property."""
 
@@ -152,6 +165,80 @@ def _ensure_source_send_path(config: AppConfig, ssh: SSHRunner, snapshot_name: s
     )
 
 
+def _cleanup_superseded_source_cache(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    parent_send_path: str | None,
+    current_send_path: str,
+    subvolume_name: str,
+    parent_name: str | None,
+) -> None:
+    """Delete source cache snapshots that are no longer needed.
+
+    Btrfs incremental send needs the previous source parent to exist while the
+    next snapshot is being sent. Therefore the app must NOT delete the current
+    newest cache snapshot immediately after sending it; that snapshot becomes
+    the parent for the next incremental send, including the next run.
+
+    What is safe to delete after a successful incremental send is the *old*
+    parent cache snapshot. Once current_send_path has been received and saved to
+    state.json, current_send_path is the new parent and parent_send_path is
+    superseded.
+    """
+
+    if not config.source.cleanup_superseded_cache:
+        return
+    if not parent_send_path:
+        # A full send has no old parent to clean up.
+        return
+    if parent_send_path == current_send_path:
+        # Defensive guard; never delete the cache snapshot that was just sent.
+        return
+    if not btrfs.path_is_under_cache(parent_send_path, config.source.cache_root):
+        # The parent was an original read-only Timeshift snapshot, not a cache.
+        return
+
+    _human_blank()
+    print(f"  {subvolume_name}: cleaning superseded source cache parent from {parent_name}")
+    print()
+    print(f"SOURCE CACHE DELETE: {parent_send_path}")
+
+    result = btrfs.remote_delete_subvolume(
+        ssh,
+        config.source.sudo,
+        config.source.btrfs_command,
+        parent_send_path,
+        check=False,
+    )
+    if result.returncode != 0:
+        print()
+        print("WARNING: source cache subvolume cleanup failed; leaving it in place")
+        if result.stderr.strip():
+            print(result.stderr.strip())
+        _human_blank()
+        return
+
+    # The cache layout is <cache_root>/<snapshot-name>/<subvolume>. The
+    # per-snapshot parent was created with `btrfs subvolume create`. After @ and
+    # @home have both been deleted, deleting the parent succeeds. If another
+    # cached subvolume still exists, Btrfs refuses the delete; that is expected
+    # and safely ignored.
+    parent_cache_dir = str(Path(parent_send_path).parent)
+    if btrfs.path_is_under_cache(parent_cache_dir, config.source.cache_root):
+        parent_result = btrfs.remote_delete_subvolume(
+            ssh,
+            config.source.sudo,
+            config.source.btrfs_command,
+            parent_cache_dir,
+            check=False,
+        )
+        if parent_result.returncode == 0:
+            print()
+            print(f"SOURCE CACHE PARENT DELETE: {parent_cache_dir}")
+    _human_blank()
+
+
 def _read_remote_send_metadata(config: AppConfig, ssh: SSHRunner, path: str, subvolume_name: str) -> SubvolumeMeta:
     """Read Btrfs metadata for the exact source path that will be sent.
 
@@ -235,7 +322,9 @@ def _verify_incremental_parent(
 
     ok, reason = _parent_metadata_matches(remote_parent, local_parent, state_parent)
     if ok:
+        _human_blank()
         print(f"  {subvolume_name}: parent guard ok for {parent_name} ({reason})")
+        _human_blank()
         return
 
     message = (
@@ -245,7 +334,9 @@ def _verify_incremental_parent(
         f"Use a separate destination target_root or an empty destination for this source."
     )
     if config.source.allow_incremental_without_parent_match:
+        _human_blank()
         print("WARNING: " + message.replace("\n", " "))
+        _human_blank()
         return
     raise SyncError(message)
 
@@ -339,7 +430,9 @@ def _select_parent(
                 and subvolume_name in verified_parent_subvolumes
             )
             if already_verified:
+                _human_blank()
                 print(f"  {subvolume_name}: parent guard already verified earlier in this run; trusting incremental chain")
+                _human_blank()
             else:
                 _verify_incremental_parent(
                     config,
@@ -386,10 +479,12 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     # wants the old verification behavior, they can set
     # source.verify_subvolumes_at_discovery = true.
     print("Reading source Timeshift snapshots with sudo timeshift --list...")
+    _human_blank()
     if config.source.verify_subvolumes_at_discovery:
         print("Discovery verification: enabled, checking every configured subvolume with btrfs.")
     else:
         print("Discovery verification: fast mode, delaying btrfs checks until send time.")
+    _human_rule("----")
     snapshots = [
         snap
         for snap in list_source_snapshots(
@@ -423,10 +518,12 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
         target_dir = _target_snapshot_dir(config, snapshot.name)
         print(f"Snapshot {snapshot.name} tags={''.join(snapshot.tags) or '-'}")
+        _human_blank()
         if dry_run:
             print(f"  would ensure local directory: {target_dir}")
             if config.destination.compression:
                 print(f"  would set destination compression property: {config.destination.compression}")
+            _human_blank()
 
         for subvol_name in config.source.subvolumes:
             subvolume = snapshot.subvolumes.get(subvol_name)
@@ -436,6 +533,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             already = state.get("snapshots", {}).get(snapshot.name, {}).get("subvolumes", {}).get(subvol_name)
             if already and already.get("status") == "ok" and dest_path.exists():
                 print(f"  {subvol_name}: already synced")
+                _human_blank()
                 continue
             if dest_path.exists() and not dry_run:
                 raise SyncError(f"Destination path already exists but is not recorded as synced: {dest_path}")
@@ -456,15 +554,20 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             if dry_run:
                 parent_text = f" parent={parent_name}" if parent_name else ""
                 print(f"  {subvol_name}: would {mode} send{parent_text}")
+                print()
                 print(f"    source: {current_send_path}")
+                print()
                 print(f"    dest:   {dest_path}")
                 if parent_name and config.source.verify_incremental_parent:
+                    print()
                     if config.source.verify_incremental_parent_once_per_run:
                         print("    safety: real run verifies the first incremental parent per subvolume, then trusts the chain")
                     else:
                         print("    safety: real run verifies every incremental parent source UUID against destination received_uuid")
                 if config.stream.use_mbuffer:
+                    print()
                     print(f"    stream: would use {' '.join(config.stream.command() or [])}")
+                _human_rule("---")
                 continue
 
             # Do not run remote `btrfs subvolume show` for every current send.
@@ -481,6 +584,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             if config.destination.set_compression_before_receive:
                 btrfs.set_local_compression(target_dir, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
 
+            _human_blank()
             print(f"  {subvol_name}: {mode} send/receive")
             # Build remote send command. If parent_send_path is set, btrfs send
             # receives `-p <parent>` and sends an incremental stream.
@@ -502,6 +606,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # environment is passed to the SSH side so streamed sends work with
             # sshpass too.
             stream_pipeline(send_cmd, receive_cmd, middle_cmd=config.stream.command(), verbose=True, left_env=ssh.environment())
+            _human_rule("---")
 
             received_meta = None
             if dest_path.exists():
@@ -517,7 +622,22 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                     received_meta = None
             mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta)
             save_state(config.state_file, state)
+
+            # Source-side read-only cache snapshots are temporary. After a
+            # successful incremental receive, the old parent cache is no longer
+            # needed because the current send path becomes the new parent. The
+            # current/latest cache is kept for future incremental sends.
+            _cleanup_superseded_source_cache(
+                config,
+                ssh,
+                parent_send_path=parent_send_path,
+                current_send_path=current_send_path,
+                subvolume_name=subvol_name,
+                parent_name=parent_name,
+            )
+
             transferred += 1
 
+    _human_rule("----")
     print("No missing subvolumes to sync." if transferred == 0 else f"Synced {transferred} subvolume(s).")
     return transferred

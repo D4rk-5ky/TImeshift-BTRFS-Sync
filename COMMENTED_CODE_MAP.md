@@ -33,6 +33,7 @@ sudo -n btrfs subvolume show <path>
 sudo -n btrfs property get -ts <path> ro
 sudo -n btrfs subvolume create <cache_root>/<snapshot>
 sudo -n btrfs subvolume snapshot -r <source> <cache>
+sudo -n btrfs subvolume delete <superseded-cache>
 sudo -n btrfs send [-p <parent>] [--compressed-data] [--proto N] <snapshot>
 ```
 
@@ -88,6 +89,25 @@ sudo -n btrfs subvolume show <destination-parent-subvolume>
 
 This is what prevents accidentally using a destination snapshot from another OS
 or source as the parent for the current source.
+
+
+## Source cache cleanup logic
+
+Writable Timeshift snapshots (`ro=false`) need temporary read-only cache
+snapshots before `btrfs send`. The app keeps the newest cache snapshot for each
+subvolume because it is the parent for the next incremental send. After a newer
+snapshot has been received successfully, the older parent cache is superseded
+and can be deleted safely.
+
+Cleanup command built by `btrfs.py` and called from `sync.py`:
+
+```bash
+sudo -n btrfs subvolume delete <old-cache-subvolume>
+```
+
+The app also attempts to delete the empty per-snapshot cache parent. If another
+child cache such as `@home` still exists, Btrfs refuses the parent delete and the
+app ignores that expected failure.
 
 ## Destination-side commands
 
