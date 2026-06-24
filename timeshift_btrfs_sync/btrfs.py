@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from .commands import quote_join, run_local, sudo_prefix
 from .models import SubvolumeMeta
 from .ssh import SSHRunner
 
 UUID_KEYS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Received UUID": "received_uuid"}
+RO_RE = re.compile(r"^ro\s*(?:=|:)\s*(true|false)\s*$", re.IGNORECASE)
+
 
 
 def _clean_uuid(value: str) -> str | None:
@@ -18,28 +21,57 @@ def _clean_uuid(value: str) -> str | None:
 
 
 def parse_subvolume_show(output: str, name: str, path: str) -> SubvolumeMeta:
-    """Parse selected fields from `btrfs subvolume show`."""
+    """Parse selected fields from `btrfs subvolume show`.
+
+    Besides UUID fields, this also reads the `Flags:` line when present. Many
+    btrfs-progs versions print read-only state here as `Flags: readonly`. That
+    gives us a second read-only detector in addition to `btrfs property get`.
+    """
 
     meta = SubvolumeMeta(name=name, path=path)
     for line in output.splitlines():
         if ":" not in line:
             continue
         key, value = line.split(":", 1)
-        attr = UUID_KEYS.get(key.strip())
+        key = key.strip()
+        value = value.strip()
+        attr = UUID_KEYS.get(key)
         if attr:
             setattr(meta, attr, _clean_uuid(value))
+            continue
+
+        # Example outputs seen across btrfs-progs versions:
+        #   Flags: readonly
+        #   Flags: -
+        #   Flags: readonly|something-else
+        # A read-only source can be sent directly, so detecting this avoids
+        # creating an unnecessary send-cache snapshot.
+        if key.lower() == "flags":
+            lower_value = value.lower()
+            if "readonly" in lower_value or "read-only" in lower_value:
+                meta.readonly = True
+            elif lower_value in {"-", "none", ""}:
+                meta.readonly = False
     return meta
 
 
 def parse_property_ro(output: str) -> bool | None:
-    """Parse `ro=true` or `ro=false`."""
+    """Parse Btrfs read-only property output robustly.
+
+    Normally btrfs prints `ro=true` or `ro=false`. This parser also accepts
+    small formatting variations such as `ro: true` so a harmless output change
+    does not make the app assume the state is unknown.
+    """
 
     for line in output.splitlines():
-        line = line.strip().lower()
-        if line == "ro=true":
+        compact = line.strip().lower().replace(" ", "")
+        if compact == "ro=true":
             return True
-        if line == "ro=false":
+        if compact == "ro=false":
             return False
+        match = RO_RE.match(line.strip())
+        if match:
+            return match.group(1).lower() == "true"
     return None
 
 
@@ -140,11 +172,44 @@ def remote_ensure_readonly_send_path(
     subvolume_name: str,
     create_readonly_cache: bool,
 ) -> str:
-    """Return a source path safe for `btrfs send`."""
+    """Return a source path safe for `btrfs send`.
+
+    Read-only detection is intentionally conservative but not wasteful:
+
+    1. Read `btrfs subvolume show` for the selected path only. If it says
+       `Flags: readonly`, use the original Timeshift snapshot directly.
+    2. Read `btrfs property get ... ro`. If it says `ro=true`, use the original
+       snapshot directly.
+    3. Only when one of those checks says the source is writable do we create a
+       read-only cache snapshot.
+
+    This avoids caching already-read-only manual Timeshift snapshots.
+    """
+
+    original_meta = remote_try_subvolume_show(ssh, sudo, btrfs_command, original_path, subvolume_name)
+    if not original_meta:
+        raise RuntimeError(f"Source path is not a Btrfs subvolume or cannot be read: {original_path}")
+    if original_meta.readonly is True:
+        return original_path
 
     ro = remote_readonly(ssh, sudo, btrfs_command, original_path)
     if ro is True:
         return original_path
+
+    # If neither command could determine the read-only state, do not silently
+    # create another cache snapshot. Report the exact situation so the user can
+    # run the two diagnostic commands manually.
+    if ro is None and original_meta.readonly is None:
+        raise RuntimeError(
+            "Could not determine whether source subvolume is read-only. Refusing to guess.\n"
+            f"Path: {original_path}\n"
+            "Try these on the source:\n"
+            f"  {btrfs_command} subvolume show {original_path}\n"
+            f"  {btrfs_command} property get -ts {original_path} ro"
+        )
+
+    # At this point at least one detector says the source is writable, so a
+    # read-only cache snapshot is required before btrfs send.
     if not create_readonly_cache:
         raise RuntimeError(f"Source subvolume is not read-only and cache creation is disabled: {original_path}")
     if not cache_root:

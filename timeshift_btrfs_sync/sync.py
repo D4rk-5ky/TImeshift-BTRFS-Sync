@@ -1,4 +1,14 @@
-"""Main destination-pull sync workflow."""
+"""Main destination-pull sync workflow.
+
+The important performance/safety rule in this version is:
+
+* Discovery is fast and only uses Timeshift names plus configured subvolume
+  names. It does not run `btrfs subvolume show` and `btrfs property get` for
+  every snapshot.
+* Before a real incremental send, the selected parent is verified with Btrfs
+  metadata on both sides. This keeps the protection against accidentally mixing
+  snapshots from different operating systems or different sources.
+"""
 
 from __future__ import annotations
 
@@ -37,7 +47,13 @@ def prepare_destination(config: AppConfig) -> None:
 
 
 def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
-    """Discover source Timeshift snapshots."""
+    """Discover source Timeshift snapshots.
+
+    `include_btrfs_info=False` is the fast path: it parses Timeshift snapshot
+    names/tags and constructs @/@home paths without running btrfs show/property
+    for every snapshot. Btrfs checks are then delayed until an actual send or a
+    selected incremental-parent verification.
+    """
 
     return timeshift.list_remote_snapshots(
         ssh,
@@ -80,6 +96,28 @@ def _target_snapshot_dir(config: AppConfig, snapshot_name: str) -> Path:
     return config.destination.target_root / "snapshots" / snapshot_name
 
 
+def _destination_has_existing_snapshots(config: AppConfig) -> bool:
+    """Return True when the destination has real received snapshot content.
+
+    Important bug fix: an earlier version created the empty destination snapshot
+    directory before selecting a parent. That empty directory made the guard
+    think the destination already contained backups and it refused the first full
+    send. Here we only count folders that contain at least one configured
+    subvolume name, for example @ or @home.
+    """
+
+    snapshots_root = config.destination.target_root / "snapshots"
+    if not snapshots_root.exists():
+        return False
+    for child in snapshots_root.iterdir():
+        if not child.is_dir():
+            continue
+        for subvol_name in config.source.subvolumes:
+            if (child / subvol_name).exists():
+                return True
+    return False
+
+
 def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: SubvolumeMeta) -> str:
     """Return the send path that would be used, without creating cache snapshots.
 
@@ -113,22 +151,187 @@ def _ensure_source_send_path(config: AppConfig, ssh: SSHRunner, snapshot_name: s
     )
 
 
-def _select_parent(config: AppConfig, ssh: SSHRunner, state: dict, source_by_name: dict[str, SnapshotMeta], snapshot: SnapshotMeta, subvolume_name: str, *, dry_run: bool) -> tuple[str | None, str | None]:
-    """Choose newest valid incremental parent for one subvolume."""
+def _read_remote_send_metadata(config: AppConfig, ssh: SSHRunner, path: str, subvolume_name: str) -> SubvolumeMeta:
+    """Read Btrfs metadata for the exact source path that will be sent.
 
-    parent = latest_synced_before(state, snapshot.name, subvolume_name, set(source_by_name.keys()))
-    if not parent:
-        return None, None
-    parent_name, _parent_state = parent
-    parent_snapshot = source_by_name.get(parent_name)
-    if not parent_snapshot:
-        return None, None
-    parent_subvol = parent_snapshot.subvolumes.get(subvolume_name)
-    if not parent_subvol:
-        return None, None
-    if dry_run:
-        return parent_name, _preview_send_path(config, parent_name, parent_subvol)
-    return parent_name, _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
+    This is intentionally called only for selected send paths, not for every
+    snapshot during discovery.
+    """
+
+    meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, path, subvolume_name)
+    if not meta:
+        raise SyncError(f"Source send path is not a Btrfs subvolume or cannot be read: {path}")
+    # Keep readonly=True if `subvolume show` already detected `Flags: readonly`.
+    # Do not overwrite a known value with None from a failed/unsupported property read.
+    prop_ro = btrfs.remote_readonly(ssh, config.source.sudo, config.source.btrfs_command, path)
+    if prop_ro is not None:
+        meta.readonly = prop_ro
+    return meta
+
+
+def _parent_metadata_matches(remote_parent: SubvolumeMeta, local_parent: SubvolumeMeta, state_parent: dict | None = None) -> tuple[bool, str]:
+    """Compare source parent metadata with destination parent metadata.
+
+    For a received Btrfs subvolume, `Received UUID` should match the UUID of the
+    source snapshot that was sent. That is the strongest cheap check that the
+    local destination parent actually belongs to the current source parent.
+    """
+
+    if remote_parent.uuid and local_parent.received_uuid and remote_parent.uuid == local_parent.received_uuid:
+        return True, "destination received_uuid matches current source parent uuid"
+
+    # Fallback for state created by previous versions. This is weaker than the
+    # local received_uuid comparison, but it can still help explain/validate old
+    # state if destination metadata is incomplete.
+    if state_parent:
+        old_source_uuid = state_parent.get("source_uuid")
+        old_destination_uuid = state_parent.get("destination_uuid")
+        if remote_parent.uuid and old_source_uuid and remote_parent.uuid == old_source_uuid:
+            if not old_destination_uuid or old_destination_uuid == local_parent.uuid:
+                return True, "state source_uuid matches current source parent uuid"
+
+    details = (
+        f"source uuid={remote_parent.uuid}, "
+        f"destination uuid={local_parent.uuid}, "
+        f"destination received_uuid={local_parent.received_uuid}"
+    )
+    return False, details
+
+
+def _verify_incremental_parent(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    parent_name: str,
+    parent_subvol: SubvolumeMeta,
+    parent_send_path: str,
+    subvolume_name: str,
+    state_parent: dict | None,
+) -> None:
+    """Verify that the selected incremental parent is safe to use.
+
+    This prevents this dangerous situation:
+
+      * destination already contains snapshots from OS-A,
+      * config now points at OS-B,
+      * snapshot names happen to overlap,
+      * app tries to use OS-A destination snapshot as parent for OS-B source.
+
+    The check costs only two Btrfs metadata reads for the selected parent:
+      * remote/source `btrfs subvolume show <parent_send_path>`
+      * local/destination `btrfs subvolume show <target_root>/snapshots/<parent>/@`
+    """
+
+    remote_parent = _read_remote_send_metadata(config, ssh, parent_send_path, subvolume_name)
+    local_parent_path = _dest_subvolume_path(config, parent_name, subvolume_name)
+    if not local_parent_path.exists():
+        raise SyncError(f"Incremental parent is recorded but missing on destination: {local_parent_path}")
+
+    try:
+        local_parent = btrfs.local_subvolume_show(local_parent_path, config.destination.sudo, subvolume_name, config.destination.btrfs_command)
+    except Exception as exc:
+        raise SyncError(f"Cannot read destination parent metadata: {local_parent_path}: {exc}") from exc
+
+    ok, reason = _parent_metadata_matches(remote_parent, local_parent, state_parent)
+    if ok:
+        print(f"  {subvolume_name}: parent guard ok for {parent_name} ({reason})")
+        return
+
+    message = (
+        f"Refusing incremental send: parent metadata mismatch for {parent_name}/{subvolume_name}.\n"
+        f"This can happen if the destination contains snapshots from another OS/source.\n"
+        f"Details: {reason}\n"
+        f"Use a separate destination target_root or an empty destination for this source."
+    )
+    if config.source.allow_incremental_without_parent_match:
+        print("WARNING: " + message.replace("\n", " "))
+        return
+    raise SyncError(message)
+
+
+def _filesystem_parent_candidates(config: AppConfig, snapshot_name: str, subvolume_name: str, source_names: set[str]) -> list[str]:
+    """Find local destination parent candidates by matching snapshot names.
+
+    This lets the app recover/adopt a valid parent even if state.json is missing
+    or incomplete, as long as local Btrfs `Received UUID` matches the source
+    parent's UUID.
+    """
+
+    snapshots_root = config.destination.target_root / "snapshots"
+    if not snapshots_root.exists():
+        return []
+    candidates: list[str] = []
+    for child in snapshots_root.iterdir():
+        if not child.is_dir():
+            continue
+        name = child.name
+        if name >= snapshot_name or name not in source_names:
+            continue
+        if (child / subvolume_name).exists():
+            candidates.append(name)
+    candidates.sort(reverse=True)
+    return candidates
+
+
+def _select_parent(config: AppConfig, ssh: SSHRunner, state: dict, source_by_name: dict[str, SnapshotMeta], snapshot: SnapshotMeta, subvolume_name: str, *, dry_run: bool) -> tuple[str | None, str | None]:
+    """Choose and optionally verify newest valid incremental parent.
+
+    Fast discovery does not have metadata for every remote snapshot. This
+    function keeps things fast by reading metadata only for the candidate parent
+    that would actually be used for an incremental send.
+    """
+
+    source_names = set(source_by_name.keys())
+    state_parent = latest_synced_before(state, snapshot.name, subvolume_name, source_names)
+
+    candidate_names: list[str] = []
+    state_parent_data: dict[str, dict] = {}
+    if state_parent:
+        parent_name, parent_state = state_parent
+        candidate_names.append(parent_name)
+        state_parent_data[parent_name] = parent_state
+
+    # Also look at the filesystem for matching date-named snapshots. This helps
+    # if state.json is missing but destination snapshots are present.
+    for name in _filesystem_parent_candidates(config, snapshot.name, subvolume_name, source_names):
+        if name not in candidate_names:
+            candidate_names.append(name)
+
+    for parent_name in candidate_names:
+        parent_snapshot = source_by_name.get(parent_name)
+        if not parent_snapshot:
+            continue
+        parent_subvol = parent_snapshot.subvolumes.get(subvolume_name)
+        if not parent_subvol:
+            continue
+
+        if dry_run:
+            # Dry-run remains fast. It explains that real mode will verify the
+            # parent before using it.
+            return parent_name, _preview_send_path(config, parent_name, parent_subvol)
+
+        parent_send_path = _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
+        if config.source.verify_incremental_parent:
+            _verify_incremental_parent(
+                config,
+                ssh,
+                parent_name=parent_name,
+                parent_subvol=parent_subvol,
+                parent_send_path=parent_send_path,
+                subvolume_name=subvolume_name,
+                state_parent=state_parent_data.get(parent_name),
+            )
+        return parent_name, parent_send_path
+
+    # No usable parent was found. If the destination is not empty, this may be a
+    # user mistake such as pointing another OS at an existing backup location.
+    if _destination_has_existing_snapshots(config) and not state.get("snapshots") and not config.source.allow_incremental_without_parent_match:
+        raise SyncError(
+            "Destination already contains snapshots, but state.json has no usable parent. "
+            "Refusing to guess because this could mix snapshots from different OS installs. "
+            "Use an empty/separate target_root or enable allow_incremental_without_parent_match only if you understand the risk."
+        )
+    return None, None
 
 
 def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | None = None, only_snapshot: str | None = None, only_missing: bool = True) -> int:
@@ -146,9 +349,25 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     ssh = SSHRunner(config.ssh)
     ssh.test()
 
-    # Discovery uses Timeshift for names/tags and Btrfs for subvolume metadata.
+    # Discovery uses Timeshift for names/tags. By default it avoids expensive
+    # btrfs metadata probes for every snapshot/subvolume. This makes dry-run and
+    # initial planning much faster on systems with many snapshots. If the user
+    # wants the old verification behavior, they can set
+    # source.verify_subvolumes_at_discovery = true.
     print("Reading source Timeshift snapshots with sudo timeshift --list...")
-    snapshots = [snap for snap in list_source_snapshots(config, ssh, include_btrfs_info=True) if snap.subvolumes]
+    if config.source.verify_subvolumes_at_discovery:
+        print("Discovery verification: enabled, checking every configured subvolume with btrfs.")
+    else:
+        print("Discovery verification: fast mode, delaying btrfs checks until send time.")
+    snapshots = [
+        snap
+        for snap in list_source_snapshots(
+            config,
+            ssh,
+            include_btrfs_info=config.source.verify_subvolumes_at_discovery,
+        )
+        if snap.subvolumes
+    ]
     source_by_name = {snap.name: snap for snap in snapshots}
 
     if only_snapshot:
@@ -170,10 +389,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             print(f"  would ensure local directory: {target_dir}")
             if config.destination.compression:
                 print(f"  would set destination compression property: {config.destination.compression}")
-        else:
-            target_dir.mkdir(parents=True, exist_ok=True)
-            if config.destination.set_compression_before_receive:
-                btrfs.set_local_compression(target_dir, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
 
         for subvol_name in config.source.subvolumes:
             subvolume = snapshot.subvolumes.get(subvol_name)
@@ -196,9 +411,27 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 print(f"  {subvol_name}: would {mode} send{parent_text}")
                 print(f"    source: {current_send_path}")
                 print(f"    dest:   {dest_path}")
+                if parent_name and config.source.verify_incremental_parent:
+                    print("    safety: real run will verify parent source UUID against destination received_uuid")
                 if config.stream.use_mbuffer:
                     print(f"    stream: would use {' '.join(config.stream.command() or [])}")
                 continue
+
+            # Read source metadata for the exact path being sent. This is saved
+            # into state.json and is later used by the parent guard.
+            current_meta = _read_remote_send_metadata(config, ssh, current_send_path, subvol_name)
+            subvolume.uuid = current_meta.uuid
+            subvolume.parent_uuid = current_meta.parent_uuid
+            subvolume.received_uuid = current_meta.received_uuid
+            subvolume.readonly = current_meta.readonly
+            subvolume.send_path = current_send_path
+
+            # Create the local receive directory only after parent selection.
+            # This prevents an empty in-progress directory from being mistaken as
+            # an existing backup by the safety guard.
+            target_dir.mkdir(parents=True, exist_ok=True)
+            if config.destination.set_compression_before_receive:
+                btrfs.set_local_compression(target_dir, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
 
             print(f"  {subvol_name}: {mode} send/receive")
             # Build remote send command. If parent_send_path is set, btrfs send

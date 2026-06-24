@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.0.9 config
+# timeshift-btrfs-sync v0.1.3 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -64,6 +64,22 @@ snapshot_root = "/timeshift-btrfs/snapshots"
 
 # Subvolumes expected inside each Timeshift snapshot.
 subvolumes = ["@", "@home"]
+
+# Speed option. Default false is fast: discovery does NOT run btrfs show/property
+# for every snapshot/subvolume. It trusts the configured naming layout and only
+# checks Btrfs metadata when a subvolume is actually going to be sent.
+# Set true if you want list-source/sync discovery to verify every subvolume up front.
+verify_subvolumes_at_discovery = false
+
+# Safety option. Keep true. Before using an existing destination snapshot as an
+# incremental parent, the app compares current source Btrfs UUID metadata with
+# destination `received_uuid` metadata. This prevents accidentally mixing
+# snapshots from another OS/source into the same backup target.
+verify_incremental_parent = true
+
+# Dangerous escape hatch. Keep false. If true, the app may continue when it
+# cannot prove that the selected incremental parent matches the current source.
+allow_incremental_without_parent_match = false
 
 # Source-side read-only cache for writable Timeshift snapshots.
 # Create only the top-level cache_root manually once on the source.

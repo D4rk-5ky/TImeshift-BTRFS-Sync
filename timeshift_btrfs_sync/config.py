@@ -21,6 +21,22 @@ class SourceConfig:
     timeshift_command: str = "timeshift"
     cache_root: str | None = None
     create_readonly_cache: bool = True
+
+    # Speed option. False means discovery does not run btrfs property/show for
+    # every snapshot. The app assumes configured subvolume names exist and only
+    # runs Btrfs checks for snapshots that are actually going to be sent.
+    verify_subvolumes_at_discovery: bool = False
+
+    # Safety option. When true, an incremental parent is verified by comparing
+    # source Btrfs UUID metadata with local destination received_uuid metadata
+    # before using `btrfs send -p`. This prevents accidentally using snapshots
+    # from another OS/source as parents while keeping discovery fast.
+    verify_incremental_parent: bool = True
+
+    # Safety option. When false, the app refuses incremental send if existing
+    # destination snapshots cannot be proven to match the current source.
+    allow_incremental_without_parent_match: bool = False
+
     send_compressed_data: bool = False
     send_proto: int | None = None
 
@@ -210,6 +226,9 @@ def load_config(path: str | Path) -> AppConfig:
         timeshift_command=str(source_raw.get("timeshift_command", "timeshift")),
         cache_root=(str(source_raw.get("cache_root")) if source_raw.get("cache_root") else None),
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
+        verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
+        verify_incremental_parent=_as_bool(source_raw.get("verify_incremental_parent"), "source.verify_incremental_parent", True),
+        allow_incremental_without_parent_match=_as_bool(source_raw.get("allow_incremental_without_parent_match"), "source.allow_incremental_without_parent_match", False),
         send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
         send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),
     )

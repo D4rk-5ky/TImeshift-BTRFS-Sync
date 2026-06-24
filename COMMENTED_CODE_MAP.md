@@ -22,7 +22,9 @@ functions.
 
 ## Source-side commands
 
-These are the only commands that need passwordless sudo on the source:
+These are the only commands that need passwordless sudo on the source. In fast
+discovery mode, the app does not run the btrfs metadata commands for every
+snapshot up front; it delays them until send time.
 
 ```bash
 sudo -n timeshift --list
@@ -33,6 +35,57 @@ sudo -n btrfs subvolume create <cache_root>/<snapshot>
 sudo -n btrfs subvolume snapshot -r <source> <cache>
 sudo -n btrfs send [-p <parent>] [--compressed-data] [--proto N] <snapshot>
 ```
+
+## Fast discovery logic
+
+Controlled by:
+
+```toml
+[source]
+verify_subvolumes_at_discovery = false
+```
+
+When false, `sync` discovery only does:
+
+```bash
+sudo -n timeshift --list
+```
+
+`list-source` is also fast by default. Use this when you want the slower
+per-subvolume Btrfs verification during listing:
+
+```bash
+ts-btrfs list-source --config ./config.toml --verify-btrfs
+```
+
+Then the app constructs expected paths like:
+
+```text
+<snapshot_root>/<snapshot-name>/@
+<snapshot_root>/<snapshot-name>/@home
+```
+
+Btrfs checks happen later only for subvolumes that are actually being sent.
+
+
+## Incremental parent guard
+
+Fast discovery avoids metadata checks for every snapshot, but the selected
+incremental parent is still checked before real send. The app compares:
+
+```text
+source parent UUID == destination parent Received UUID
+```
+
+Commands used for one selected parent:
+
+```bash
+sudo -n btrfs subvolume show <source-parent-send-path>
+sudo -n btrfs subvolume show <destination-parent-subvolume>
+```
+
+This is what prevents accidentally using a destination snapshot from another OS
+or source as the parent for the current source.
 
 ## Destination-side commands
 

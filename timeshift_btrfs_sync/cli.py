@@ -15,7 +15,7 @@ from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.4.0 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.1.1 config
 name = "kubuntu-timeshift"
 default_dry_run = true
 prune_after_sync = false
@@ -36,6 +36,9 @@ snapshot_root = "/timeshift-btrfs/snapshots"
 subvolumes = ["@", "@home"]
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
+verify_subvolumes_at_discovery = false
+verify_incremental_parent = true
+allow_incremental_without_parent_match = false
 send_compressed_data = false
 # send_proto = 2
 
@@ -99,8 +102,21 @@ def cmd_test_ssh(args) -> int:
 
 
 def cmd_list_source(args) -> int:
+    """List snapshots on the source machine.
+
+    Default is fast listing: parse Timeshift names/tags and construct expected
+    subvolume paths without probing every subvolume with Btrfs. Use
+    --verify-btrfs when you explicitly want the slower full verification.
+    """
+
     config = load_config(args.config)
-    print_snapshot_table(list_source_snapshots(config, SSHRunner(config.ssh), include_btrfs_info=not args.fast))
+    print_snapshot_table(
+        list_source_snapshots(
+            config,
+            SSHRunner(config.ssh),
+            include_btrfs_info=args.verify_btrfs,
+        )
+    )
     return 0
 
 
@@ -163,7 +179,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("list-source", help="list source Timeshift snapshots")
     p.add_argument("--config", "-c", required=True)
-    p.add_argument("--fast", action="store_true")
+    p.add_argument(
+        "--verify-btrfs",
+        action="store_true",
+        help="slow: verify every configured subvolume with btrfs during listing",
+    )
     p.set_defaults(func=cmd_list_source)
 
     p = sub.add_parser("sync", help="pull missing snapshots")
