@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.2.7
+# Config and CLI audit for v0.2.8
 
 This file records the audit requested after v0.2.3.
 
@@ -177,7 +177,7 @@ python3 -m timeshift_btrfs_sync show-state --help
 - Confirmed MQTT support is optional: paho-mqtt is imported only when publishing is enabled.
 
 
-## 0.2.7 audit addition
+## 0.2.8 audit addition
 
 - Confirmed no new config or CLI flags were added for high-watermark sync; it is automatic normal sync behavior.
 - Confirmed `destination.set_compression_after_receive` remains documented and present in `config.example.toml`, but now defaults to `false`.

@@ -24,14 +24,15 @@ Corrected sequence:
 24th zip -> 0.2.4
 25th zip -> 0.2.5
 26th zip -> 0.2.6
-27th zip -> 0.2.7
+28th zip -> 0.2.9
+29th zip -> 0.2.10
 ```
 
-This build is the 27th zip in the corrected sequence, so its version is `0.2.7`.
+This build is the 29th zip in the corrected sequence, so its version is `0.2.10`.
 
-The next zip should be `0.2.8`.
+The next zip should be `0.3.0` or `0.2.10`, depending on whether the next change is a larger feature or a patch.
 
-## 0.2.7
+## 0.2.9
 
 - Stopped trying to set destination compression on read-only received subvolumes.
 - Changed `destination.set_compression_after_receive` default to `false`.
@@ -87,3 +88,24 @@ The next zip should be `0.2.8`.
 - Added optional split logging with `.log`, `.out`, and `.err` files.
 - Added `timeshift_btrfs_sync/log.py`; all file logging logic lives there.
 - `log_dir` controls file logging and creates the directory automatically.
+
+## 0.2.9 - Home Assistant MQTT template docs fix
+
+- Added a safer Home Assistant MQTT + Pushover automation example.
+- Fixed the example trigger syntax by placing `topic` directly under `trigger: mqtt`.
+- Added fallback handling for manual **Run actions** tests where `trigger.payload_json` does not exist.
+- Added success and failure MQTT test payload examples for Home Assistant Developer Tools.
+
+## 0.2.10 - Home Assistant YAML block/parser fix
+
+Docs-only update.
+
+- Replaced the Home Assistant MQTT/Pushover example with a parser-friendlier YAML block.
+- Uses quoted one-line `description:` instead of a folded multiline description.
+- Uses the older singular `trigger:` / `action:` syntax for compatibility with more Home Assistant YAML editors.
+- Keeps the MQTT JSON fallback logic for manual "Run actions" tests.
+
+## 0.2.9 - Home Assistant YAML indentation fix
+
+- Fixed indentation and structure of the README Home Assistant MQTT Pushover automation example.
+- Reworked template variables so manual action tests do not fail when `trigger.payload_json` is absent.

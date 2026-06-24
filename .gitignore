@@ -1,5 +1,6 @@
 # Ignore all .config files
 *.config
+timeshift_btrfs_sync/__pycache__
 
 # But keep the example config tracked
 !config.example.config

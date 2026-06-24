@@ -18,7 +18,7 @@ from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.7 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.10 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 

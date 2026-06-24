@@ -3,7 +3,7 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.2.7
+# timeshift-btrfs-sync v0.2.9
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -15,7 +15,7 @@ does not accidentally use destination snapshots from another OS/source as parent
 This is the 27th zip build in the corrected sequence, so the version is:
 
 ```text
-0.2.7
+0.2.9
 ```
 
 See `VERSIONING.md` for the count.
@@ -346,7 +346,7 @@ file so it is easy to recognize in Home Assistant:
   "timestamp": "2026-06-24T10:40:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.7"
+  "version": "0.2.9"
 }
 ```
 
@@ -367,13 +367,115 @@ stderr text that the app captured:
   "timestamp": "2026-06-24T10:41:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.7"
+  "version": "0.2.9"
 }
 ```
 
 Home Assistant can consume this using an MQTT sensor or an automation trigger on
 the configured topic. This build does not create MQTT discovery entities yet; it
 only publishes simple JSON status messages.
+
+### Home Assistant Pushover automation example
+
+Important details:
+
+- The MQTT trigger `topic` belongs directly under `trigger: mqtt`; do not put it
+  under an `options:` key.
+- `trigger.payload_json` only exists when the automation is actually started by
+  an MQTT message containing valid JSON. If you press **Run actions** manually
+  from the automation editor, there is no MQTT payload, so the example below
+  includes a safe fallback.
+- To test the real path, publish a test MQTT message to the same topic from
+  **Developer Tools -> MQTT** instead of only running the actions manually.
+
+
+
+This version deliberately uses the older singular `trigger:` / `action:` automation keys and a one-line quoted `description:`. Home Assistant still understands this format, and it avoids the YAML parser problem you hit around the old folded multiline description near line 5.
+```yaml
+alias: "Timeshift Btrfs Sync - MQTT Pushover"
+description: "Send Pushover notification when timeshift-btrfs-sync reports success or failure over MQTT."
+trigger:
+  - platform: mqtt
+    topic: "homeassistant/timeshift-btrfs-sync/kubuntu-timeshift/status"
+condition: []
+action:
+  - variables:
+      sync_success: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.success | default(false) | bool }}
+      sync_name: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.name | default(p.job | default('timeshift-btrfs-sync')) }}
+      sync_command: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.command | default('manual/test') }}
+      sync_exit_code: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.exit_code | default('unknown') }}
+      sync_error: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.error | default('Automation was run without an MQTT JSON trigger') }}
+      sync_stderr: >-
+        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
+        {{ p.stderr | default('No MQTT trigger payload_json was available') }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ sync_success | bool }}"
+        sequence:
+          - action: notify.pushover
+            data:
+              title: "✅ Btrfs sync successful"
+              message: >-
+                {{ sync_name }} finished successfully.
+
+                Command: {{ sync_command }}
+                Exit code: {{ sync_exit_code }}
+              data:
+                priority: 0
+                sound: pushover
+    default:
+      - action: notify.pushover
+        data:
+          title: "❌ Btrfs sync failed"
+          message: >-
+            {{ sync_name }} failed.
+
+            Command: {{ sync_command }}
+            Exit code: {{ sync_exit_code }}
+
+            Error: {{ sync_error }}
+
+            Last stderr: {{ sync_stderr }}
+          data:
+            priority: 1
+            sound: siren
+mode: queued
+```
+
+Success test payload:
+
+```json
+{
+  "success": true,
+  "name": "kubuntu-timeshift",
+  "command": "sync",
+  "exit_code": 0
+}
+```
+
+Failure test payload:
+
+```json
+{
+  "success": false,
+  "name": "kubuntu-timeshift",
+  "command": "sync",
+  "exit_code": 1,
+  "error": "Test failure",
+  "stderr": "Test stderr"
+}
+```
 
 ## Interrupted receive recovery
 
@@ -946,7 +1048,7 @@ Every option below is also present in `config.example.toml`. Options commented o
 
 ## Changelog
 
-### 0.2.7
+### 0.2.9
 
 - Stopped trying to set destination compression on read-only received subvolumes.
 - Changed `destination.set_compression_after_receive` default to `false`.
