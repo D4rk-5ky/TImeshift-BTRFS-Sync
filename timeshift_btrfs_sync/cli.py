@@ -12,326 +12,14 @@ from .config import ConfigError, load_config
 from .lock import FileLock
 from .log import active_logger, create_run_logger
 from .mqtt import build_payload, publish_status
+from .mail import build_payload as build_mail_payload, send_status as send_mail_status
 from .retention import prune
 from .ssh import SSHRunner
 from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once, verify_source_identity_for_manual_snapshot
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.16 config
-# Run this config on the BACKUP/DESTINATION machine.
-# The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
-
-# Human-readable job name. This is only for identification.
-name = "kubuntu-timeshift"
-
-# Safe default: commands preview changes unless --run is passed.
-default_dry_run = true
-
-# If true, `sync` automatically runs destination retention pruning after a successful sync.
-# Safety rule: pruning only deletes for real when the command is also run with
-# both --run and --yes-delete. Without --yes-delete, the app prints the prune
-# plan and refuses to delete. Keep false while testing.
-prune_after_sync = false
-
-# Optional split file logging. If blank or omitted, only terminal output is used.
-# When set, the directory is created automatically and each run writes:
-#   *.log = normal commands and captured command output
-#   *.mbuffer = mbuffer progress/summary and transfer command header
-#   *.btrfs-out = btrfs send/receive verbose output and send/receive commands
-#   *.err = stderr/error output
-log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
-
-
-[mqtt]
-# Optional MQTT notifications for Home Assistant or another MQTT consumer.
-# This feature uses the paho-mqtt Python module. Install optional dependency with:
-#   python3 -m pip install -e '.[mqtt]'
-#
-# If enabled = false, paho-mqtt is not required and nothing is published.
-enabled = false
-
-# MQTT broker address and port. For Home Assistant add-on broker this is often
-# the HA host/IP and port 1883.
-host = "homeassistant.local"
-port = 1883
-
-# Topic where JSON status messages are published.
-# Home Assistant can use this topic in an MQTT sensor or automation trigger.
-topic = "timeshift-btrfs-sync/kubuntu-timeshift/status"
-
-# Optional MQTT authentication. Use either password or password_file, not both.
-# username = "mqtt-user"
-# password = "mqtt-password"
-# password_file = "/root/.config/ts-btrfs-mqtt.password"
-
-# Optional fixed MQTT client id. Blank/omitted creates one from the local hostname.
-# client_id = "ts-btrfs-kubuntu-timeshift"
-
-# MQTT publish options.
-# qos must be 0, 1, or 2. retain=true lets Home Assistant see the last known status
-# immediately after restart, but retain=false avoids stale retained status messages.
-qos = 0
-retain = false
-timeout = 10
-
-# Control whether success and/or failure messages are sent.
-notify_on_success = true
-notify_on_failure = true
-
-# Optional internal metadata paths. Omit these to use defaults under target_root:
-#   <target_root>/.ts-btrfs-sync/state.json
-#   <target_root>/.ts-btrfs-sync/lock
-# state_file records successfully received snapshots and incremental parent data.
-# lock_file prevents two sync/prune jobs from running against the same target.
-# state_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/state.json"
-# lock_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/lock"
-
-[ssh]
-# Source machine containing the Timeshift snapshots.
-host = "source-machine.example.lan"
-
-# Dedicated source SSH user.
-user = "ts-btrfs-sync-user"
-
-# Optional SSH port.
-# port = 22
-
-# Recommended authentication: SSH private key.
-# This adds: ssh -i /root/.ssh/timeshift-btrfs-sync ...
-# The key file itself should be protected with chmod 600.
-# identity_file = "/root/.ssh/timeshift-btrfs-sync"
-
-# Optional SSH compression.
-# true adds: ssh -C
-# Useful over slow links; often unnecessary on fast LANs or already-compressed data.
-compression = false
-
-# Optional SSH cipher choice.
-# This adds: ssh -c <cipher>
-# Leave unset/blank to use OpenSSH's default cipher negotiation.
-# cipher = "chacha20-poly1305@openssh.com"
-# cipher = "aes128-gcm@openssh.com"
-
-# Optional password authentication through sshpass on the DESTINATION machine.
-# Key-based auth is safer. If password/password_file is set, remove BatchMode=yes.
-# password = "your-ssh-password"
-# password_file = "/root/.ssh/timeshift-btrfs-sync.password"
-
-# Extra SSH options.
-# BatchMode=yes makes SSH fail instead of hanging on prompts. Use it for key auth.
-# Do NOT use BatchMode=yes together with password/password_file.
-extra_args = ["-o", "BatchMode=yes"]
-
-
-[manual_snapshot]
-# Optional source-side Timeshift on-demand snapshot creation before a normal sync.
-# When enabled = true, `sync` first reads sudo timeshift --list, verifies the
-# configured source if require_verified_source is true, then creates the snapshot:
-#   sudo -n timeshift --create --scripted --comments <comment>
-#
-# The command intentionally omits explicit --tags O. Timeshift defaults to
-# on-demand/tag O when no tag is supplied, and some Timeshift versions reject
-# explicit --tags O even though the help text lists O as valid.
-# Dry-run only prints what would happen. If --snapshot is used, automatic
-# creation is skipped because that command is a targeted sync.
-enabled = false
-
-# Independent cleanup for app-created on-demand snapshots.
-# This only affects tag O snapshots whose saved Timeshift comment contains marker.
-# It does not affect normal/user-created Timeshift on-demand snapshots.
-# Real deletion still requires prune to run with --run --yes-delete.
-cleanup_enabled = true
-
-# Safety guard for creating source-side on-demand snapshots. Keep true.
-# Before creating a manual snapshot, the app first runs timeshift --list and
-# requires the configured source to match an already received state.json entry
-# by Btrfs UUID. This prevents creating stale snapshots on the wrong mounted OS.
-# First-ever sync with no state should normally run with manual_snapshot.enabled
-# = false first, or this can be explicitly set false if you accept the risk.
-require_verified_source = true
-
-# Comment passed to Timeshift. Keep the marker text inside the comment so the
-# destination prune logic can recognize snapshots created by this app.
-comment = "ts-btrfs-sync automatic on-demand snapshot"
-marker = "ts-btrfs-sync"
-
-# Destination retention for app-created on-demand snapshots recognized by marker.
-# Default 10. This is independent from [retention].ondemand.
-# Set 0 to delete all matching app-created snapshots except globally protected
-# snapshots/newest common parent. Set cleanup_enabled = false to keep them all.
-retention_count = 10
-
-[source]
-# Source-side command prefix. sudo -n means sudo must not prompt for a password.
-sudo = "sudo -n"
-
-# Source-side commands. Absolute paths are also valid, for example /usr/bin/btrfs.
-btrfs_command = "btrfs"
-timeshift_command = "timeshift"
-
-# Snapshot discovery command:
-#   sudo -n timeshift --list
-# The app parses snapshot names from that output, then constructs paths as:
-#   snapshot_root/<snapshot-name>/<subvolume>
-snapshot_root = "/timeshift-btrfs/snapshots"
-
-# Subvolumes expected inside each Timeshift snapshot.
-subvolumes = ["@", "@home"]
-
-# Speed option. Default false is fast: discovery does NOT run btrfs show/property
-# for every snapshot/subvolume. It trusts the configured naming layout and only
-# checks Btrfs metadata when a subvolume is actually going to be sent.
-# Set true if you want list-source/sync discovery to verify every subvolume up front.
-verify_subvolumes_at_discovery = false
-
-# Safety option. Keep true. Before using an existing destination snapshot as an
-# incremental parent, the app compares current source Btrfs UUID metadata with
-# destination `received_uuid` metadata. This prevents accidentally mixing
-# snapshots from another OS/source into the same backup target.
-verify_incremental_parent = true
-
-# Performance/safety balance. When true, the first incremental parent for each
-# subvolume name (@, @home) is verified during a run. Later incrementals in the
-# same run trust the chain that this process just created, avoiding repeated
-# remote/local UUID checks for every single incremental send.
-verify_incremental_parent_once_per_run = true
-
-# Dangerous escape hatch. Keep false. If true, the app may continue when it
-# cannot prove that the selected incremental parent matches the current source.
-allow_incremental_without_parent_match = false
-
-# Source-side read-only cache for writable Timeshift snapshots.
-# Create only the top-level cache_root manually once on the source.
-# Per-snapshot cache parents are created with btrfs, not mkdir:
-#   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
-# Read-only send snapshots are then created with:
-#   sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
-cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
-create_readonly_cache = true
-
-# Source cache cleanup. Keep true. After a successful incremental send, the
-# previous source cache snapshot is no longer needed and is deleted with:
-#   sudo -n btrfs subvolume delete <old-cache-subvolume>
-# The newest/current cache snapshot is kept because it is needed as the parent
-# for the next incremental send, including the next program run.
-cleanup_superseded_cache = true
-
-# Optional Btrfs send compressed-data mode.
-# true adds: btrfs send --compressed-data
-# This preserves already-compressed source extents when supported. It is not the
-# same thing as choosing destination compression.
-send_compressed_data = false
-
-# Optional Btrfs send protocol version.
-# Example: send_proto = 2 adds: btrfs send --proto 2
-# send_proto = 2
-
-[destination]
-# Local Btrfs backup root on the BACKUP/DESTINATION machine.
-#
-# The app creates two folders inside this target_root:
-#   snapshots/       = received Btrfs backup snapshots
-#   .ts-btrfs-sync/ = app state.json, lock file, logs
-#
-# If you completely reset/start over with a new full sync, clean both folders.
-# Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.
-# Received @ and @home entries are Btrfs subvolumes, so delete those with
-# `btrfs subvolume delete` before removing the ordinary folders.
-target_root = "/Backups/Kubuntu/timeshift-btrfs"
-
-# Local sudo prefix for btrfs receive/delete/property commands.
-sudo = "sudo -n"
-btrfs_command = "btrfs"
-
-# Whether the app may create target_root and internal metadata directories.
-create_target_root = true
-
-# Interrupted receive cleanup. Keep true. If a previous transfer was cancelled
-# and left a partial destination subvolume that is not in state.json, the app
-# deletes that incomplete Btrfs subvolume and retries the receive. It only
-# deletes paths that are Btrfs subvolumes or empty directories; non-empty normal
-# directories still require manual inspection.
-cleanup_incomplete_receive = true
-
-# Destination Btrfs compression property.
-# Accepted: zstd, lzo, zlib, none, or blank.
-# zstd:3 is accepted but normalized to zstd because `btrfs property set` does
-# not set compression levels. Use mount options for exact levels.
-compression = "zstd"
-
-# Before receive, set compression on the destination snapshot parent directory.
-set_compression_before_receive = true
-
-# After receive, optionally try to set compression on the received subvolume.
-# Default false because received Btrfs snapshots are normally read-only, and
-# setting properties on a read-only subvolume fails. Leave false unless you
-# intentionally make received snapshots writable before setting properties.
-set_compression_after_receive = false
-
-[stream]
-# Optional mbuffer between SSH send and local receive.
-# false pipeline:
-#   ssh source 'btrfs send ...' | btrfs receive ...
-# true pipeline:
-#   ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
-use_mbuffer = false
-
-# mbuffer command and memory buffer size.
-mbuffer_command = "mbuffer"
-mbuffer_size = "256M"
-
-# Optional mbuffer rate limit. Example: "100M" adds `mbuffer -R 100M`.
-# mbuffer_rate = "100M"
-
-# Optional extra mbuffer arguments as a TOML string list.
-mbuffer_extra_args = []
-
-# Optional Btrfs verbose output.
-# This adds -v to both:
-#   btrfs send -v ...
-#   btrfs receive -v ...
-# Btrfs verbose mode prints operation/details, not a clean percent progress bar.
-# mbuffer is still the useful throughput/total progress display.
-btrfs_verbose = false
-
-[retention]
-# Destination retention counts by Timeshift tag.
-# H=hourly, D=daily, W=weekly, M=monthly, B=boot, O=on-demand/manual.
-#
-# These rules are used by:
-#   ts-btrfs prune --config ./config.toml --dry-run
-#   ts-btrfs prune --config ./config.toml --run --yes-delete
-#   ts-btrfs sync  --config ./config.toml --run --prune --yes-delete
-#
-# Important: `prune_after_sync = true` or `--prune` only enables the prune step.
-# Real deletion still requires `--run --yes-delete`.
-hourly = 6
-daily = 7
-weekly = 4
-monthly = 6
-boot = 5
-# Retention count for normal/user-created Timeshift on-demand snapshots.
-# This is ignored unless cleanup_ondemand = true.
-ondemand = 10
-
-# Cleanup switch for normal/user-created Timeshift tag O snapshots.
-# Default false means your normal manual on-demand snapshots are never pruned by
-# this app unless you explicitly allow it. App-created on-demand cleanup is
-# controlled independently by [manual_snapshot].cleanup_enabled.
-cleanup_ondemand = false
-
-# Optional extension. Yearly is not native Timeshift behavior.
-yearly = 0
-
-# Extra safety: always keep newest snapshot and latest likely incremental parent.
-keep_latest = true
-keep_latest_common_parent = true
-
-# Names listed here are never pruned.
-protected_snapshots = []
-'''
-
+EXAMPLE_CONFIG = '# timeshift-btrfs-sync v0.2.19 config\n# Run this config on the BACKUP/DESTINATION machine.\n# The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.\n\n# Human-readable job name. This is only for identification.\nname = "kubuntu-timeshift"\n\n# Safe default: commands preview changes unless --run is passed.\ndefault_dry_run = true\n\n# If true, `sync` automatically runs destination retention pruning after a successful sync.\n# Safety rule: pruning only deletes for real when the command is also run with\n# both --run and --yes-delete. Without --yes-delete, the app prints the prune\n# plan and refuses to delete. Keep false while testing.\nprune_after_sync = false\n\n# Optional split file logging. If blank or omitted, only terminal output is used.\n# When set, the directory is created automatically and each run writes:\n#   *.log = normal commands and captured command output\n#   *.mbuffer = mbuffer progress/summary and transfer command header\n#   *.btrfs-out = btrfs send/receive verbose output and send/receive commands\n#   *.err = stderr/error output\nlog_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"\n\n\n# Optional internal metadata paths. Omit these to use defaults under target_root:\n#   <target_root>/.ts-btrfs-sync/state.json\n#   <target_root>/.ts-btrfs-sync/lock\n# state_file records successfully received snapshots and incremental parent data.\n# lock_file prevents two sync/prune jobs from running against the same target.\n# state_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/state.json"\n# lock_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/lock"\n\n[mqtt]\n# Optional MQTT notifications for Home Assistant or another MQTT consumer.\n# This feature uses the paho-mqtt Python module. Install optional dependency with:\n#   python3 -m pip install -e \'.[mqtt]\'\n#\n# If enabled = false, paho-mqtt is not required and nothing is published.\nenabled = false\n\n# MQTT broker address and port. For Home Assistant add-on broker this is often\n# the HA host/IP and port 1883.\nhost = "homeassistant.local"\nport = 1883\n\n# Topic where JSON status messages are published.\n# Home Assistant can use this topic in an MQTT sensor or automation trigger.\ntopic = "timeshift-btrfs-sync/kubuntu-timeshift/status"\n\n# Optional MQTT authentication. Use either password or password_file, not both.\n# username = "mqtt-user"\n# password = "mqtt-password"\n# password_file = "/root/.config/ts-btrfs-mqtt.password"\n\n# Optional fixed MQTT client id. Blank/omitted creates one from the local hostname.\n# client_id = "ts-btrfs-kubuntu-timeshift"\n\n# MQTT publish options.\n# qos must be 0, 1, or 2. retain=true lets Home Assistant see the last known status\n# immediately after restart, but retain=false avoids stale retained status messages.\nqos = 0\nretain = false\ntimeout = 10\n\n# Control whether success and/or failure messages are sent.\nnotify_on_success = true\nnotify_on_failure = true\n\n\n[mail]\n# Optional email notifications using Python standard library smtplib/email.\n# No extra Python dependency is required. If enabled = false, no mail is sent.\nenabled = false\n\n# SMTP server settings. Typical STARTTLS setup uses port 587 with starttls=true.\n# Typical implicit SSL setup uses port 465 with smtp_ssl=true and starttls=false.\nsmtp_host = "smtp.example.com"\nsmtp_port = 587\nsmtp_ssl = false\nstarttls = true\ntimeout = 10\n\n# Optional SMTP authentication. Use either password or password_file, not both.\n# username = "smtp-user@example.com"\n# password = "smtp-password"\n# password_file = "/root/.config/ts-btrfs-mail.password"\n\n# Sender and recipients. to_addrs must contain at least one address when enabled=true.\nfrom_addr = "timeshift-btrfs-sync@example.com"\nto_addrs = ["admin@example.com"]\n\n# Mail content options.\nsubject_prefix = "[timeshift-btrfs-sync]"\ninclude_json = true\n\n# Control whether success and/or failure messages are sent.\nnotify_on_success = true\nnotify_on_failure = true\n\n\n[ssh]\n# Source machine containing the Timeshift snapshots.\nhost = "source-machine.example.lan"\n\n# Dedicated source SSH user.\nuser = "ts-btrfs-sync-user"\n\n# Optional SSH port.\n# port = 22\n\n# Recommended authentication: SSH private key.\n# This adds: ssh -i /root/.ssh/timeshift-btrfs-sync ...\n# The key file itself should be protected with chmod 600.\n# identity_file = "/root/.ssh/timeshift-btrfs-sync"\n\n# Optional SSH compression.\n# true adds: ssh -C\n# Useful over slow links; often unnecessary on fast LANs or already-compressed data.\ncompression = false\n\n# Optional SSH cipher choice.\n# This adds: ssh -c <cipher>\n# Leave unset/blank to use OpenSSH\'s default cipher negotiation.\n# cipher = "chacha20-poly1305@openssh.com"\n# cipher = "aes128-gcm@openssh.com"\n\n# Optional password authentication through sshpass on the DESTINATION machine.\n# Key-based auth is safer. If password/password_file is set, remove BatchMode=yes.\n# password = "your-ssh-password"\n# password_file = "/root/.ssh/timeshift-btrfs-sync.password"\n\n# Extra SSH options.\n# BatchMode=yes makes SSH fail instead of hanging on prompts. Use it for key auth.\n# Do NOT use BatchMode=yes together with password/password_file.\nextra_args = ["-o", "BatchMode=yes"]\n\n\n[manual_snapshot]\n# Optional source-side Timeshift on-demand snapshot creation before a normal sync.\n# When enabled = true, `sync` first reads sudo timeshift --list, verifies the\n# configured source if require_verified_source is true, then creates the snapshot:\n#   sudo -n timeshift --create --scripted --comments <comment>\n#\n# The command intentionally omits explicit --tags O. Timeshift defaults to\n# on-demand/tag O when no tag is supplied, and some Timeshift versions reject\n# explicit --tags O even though the help text lists O as valid.\n# Dry-run only prints what would happen. If --snapshot is used, automatic\n# creation is skipped because that command is a targeted sync.\nenabled = false\n\n# Independent cleanup for app-created on-demand snapshots.\n# This only affects tag O snapshots whose saved Timeshift comment contains marker.\n# It does not affect normal/user-created Timeshift on-demand snapshots.\n# Real deletion still requires prune to run with --run --yes-delete.\ncleanup_enabled = true\n\n# Safety guard for creating source-side on-demand snapshots. Keep true.\n# Before creating a manual snapshot, the app first runs timeshift --list and\n# requires the configured source to match an already received state.json entry\n# by Btrfs UUID. This prevents creating stale snapshots on the wrong mounted OS.\n# First-ever sync with no state should normally run with manual_snapshot.enabled\n# = false first, or this can be explicitly set false if you accept the risk.\nrequire_verified_source = true\n\n# Comment passed to Timeshift. Keep the marker text inside the comment so the\n# destination prune logic can recognize snapshots created by this app.\ncomment = "ts-btrfs-sync automatic on-demand snapshot"\nmarker = "ts-btrfs-sync"\n\n# Destination retention for app-created on-demand snapshots recognized by marker.\n# Default 10. This is independent from [retention].ondemand.\n# Set 0 to delete all matching app-created snapshots except globally protected\n# snapshots/newest common parent. Set cleanup_enabled = false to keep them all.\nretention_count = 10\n\n[source]\n# Source-side command prefix. sudo -n means sudo must not prompt for a password.\nsudo = "sudo -n"\n\n# Source-side commands. Absolute paths are also valid, for example /usr/bin/btrfs.\nbtrfs_command = "btrfs"\ntimeshift_command = "timeshift"\n\n# Snapshot discovery command:\n#   sudo -n timeshift --list\n# The app parses snapshot names from that output, then constructs paths as:\n#   snapshot_root/<snapshot-name>/<subvolume>\nsnapshot_root = "/timeshift-btrfs/snapshots"\n\n# Subvolumes expected inside each Timeshift snapshot.\nsubvolumes = ["@", "@home"]\n\n# Speed option. Default false is fast: discovery does NOT run btrfs show/property\n# for every snapshot/subvolume. It trusts the configured naming layout and only\n# checks Btrfs metadata when a subvolume is actually going to be sent.\n# Set true if you want list-source/sync discovery to verify every subvolume up front.\nverify_subvolumes_at_discovery = false\n\n# Safety option. Keep true. Before using an existing destination snapshot as an\n# incremental parent, the app compares current source Btrfs UUID metadata with\n# destination `received_uuid` metadata. This prevents accidentally mixing\n# snapshots from another OS/source into the same backup target.\nverify_incremental_parent = true\n\n# Performance/safety balance. When true, the first incremental parent for each\n# subvolume name (@, @home) is verified during a run. Later incrementals in the\n# same run trust the chain that this process just created, avoiding repeated\n# remote/local UUID checks for every single incremental send.\nverify_incremental_parent_once_per_run = true\n\n# Dangerous escape hatch. Keep false. If true, the app may continue when it\n# cannot prove that the selected incremental parent matches the current source.\nallow_incremental_without_parent_match = false\n\n# Source-side read-only cache for writable Timeshift snapshots.\n# Create only the top-level cache_root manually once on the source.\n# Per-snapshot cache parents are created with btrfs, not mkdir:\n#   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>\n# Read-only send snapshots are then created with:\n#   sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>\ncache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"\ncreate_readonly_cache = true\n\n# Source cache cleanup. Keep true. After a successful incremental send, the\n# previous source cache snapshot is no longer needed and is deleted with:\n#   sudo -n btrfs subvolume delete <old-cache-subvolume>\n# The newest/current cache snapshot is kept because it is needed as the parent\n# for the next incremental send, including the next program run.\ncleanup_superseded_cache = true\n\n# Optional Btrfs send compressed-data mode.\n# true adds: btrfs send --compressed-data\n# This preserves already-compressed source extents when supported. It is not the\n# same thing as choosing destination compression.\nsend_compressed_data = false\n\n# Optional Btrfs send protocol version.\n# Example: send_proto = 2 adds: btrfs send --proto 2\n# send_proto = 2\n\n[destination]\n# Local Btrfs backup root on the BACKUP/DESTINATION machine.\n#\n# The app creates two folders inside this target_root:\n#   snapshots/       = received Btrfs backup snapshots\n#   .ts-btrfs-sync/ = app state.json, lock file, logs\n#\n# If you completely reset/start over with a new full sync, clean both folders.\n# Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.\n# Received @ and @home entries are Btrfs subvolumes, so delete those with\n# `btrfs subvolume delete` before removing the ordinary folders.\ntarget_root = "/Backups/Kubuntu/timeshift-btrfs"\n\n# Local sudo prefix for btrfs receive/delete/property commands.\nsudo = "sudo -n"\nbtrfs_command = "btrfs"\n\n# Whether the app may create target_root and internal metadata directories.\ncreate_target_root = true\n\n# Interrupted receive cleanup. Keep true. If a previous transfer was cancelled\n# and left a partial destination subvolume that is not in state.json, the app\n# deletes that incomplete Btrfs subvolume and retries the receive. It only\n# deletes paths that are Btrfs subvolumes or empty directories; non-empty normal\n# directories still require manual inspection.\ncleanup_incomplete_receive = true\n\n# Destination Btrfs compression property.\n# Accepted: zstd, lzo, zlib, none, or blank.\n# zstd:3 is accepted but normalized to zstd because `btrfs property set` does\n# not set compression levels. Use mount options for exact levels.\ncompression = "zstd"\n\n# Before receive, set compression on the destination snapshot parent directory.\nset_compression_before_receive = true\n\n# After receive, optionally try to set compression on the received subvolume.\n# Default false because received Btrfs snapshots are normally read-only, and\n# setting properties on a read-only subvolume fails. Leave false unless you\n# intentionally make received snapshots writable before setting properties.\nset_compression_after_receive = false\n\n[stream]\n# Optional mbuffer between SSH send and local receive.\n# false pipeline:\n#   ssh source \'btrfs send ...\' | btrfs receive ...\n# true pipeline:\n#   ssh source \'btrfs send ...\' | mbuffer -m 256M | btrfs receive ...\nuse_mbuffer = false\n\n# mbuffer command and memory buffer size.\nmbuffer_command = "mbuffer"\nmbuffer_size = "256M"\n\n# Optional mbuffer rate limit. Example: "100M" adds `mbuffer -R 100M`.\n# mbuffer_rate = "100M"\n\n# Optional extra mbuffer arguments as a TOML string list.\nmbuffer_extra_args = []\n\n# Optional Btrfs verbose output.\n# This adds -v to both:\n#   btrfs send -v ...\n#   btrfs receive -v ...\n# Btrfs verbose mode prints operation/details, not a clean percent progress bar.\n# mbuffer is still the useful throughput/total progress display.\nbtrfs_verbose = false\n\n[retention]\n# Destination retention counts by Timeshift tag.\n# H=hourly, D=daily, W=weekly, M=monthly, B=boot, O=on-demand/manual.\n#\n# These rules are used by:\n#   ts-btrfs prune --config ./config.toml --dry-run\n#   ts-btrfs prune --config ./config.toml --run --yes-delete\n#   ts-btrfs sync  --config ./config.toml --run --prune --yes-delete\n#\n# Important: `prune_after_sync = true` or `--prune` only enables the prune step.\n# Real deletion still requires `--run --yes-delete`.\nhourly = 6\ndaily = 7\nweekly = 4\nmonthly = 6\nboot = 5\n# Retention count for normal/user-created Timeshift on-demand snapshots.\n# This is ignored unless cleanup_ondemand = true.\nondemand = 10\n\n# Cleanup switch for normal/user-created Timeshift tag O snapshots.\n# Default false means your normal manual on-demand snapshots are never pruned by\n# this app unless you explicitly allow it. App-created on-demand cleanup is\n# controlled independently by [manual_snapshot].cleanup_enabled.\ncleanup_ondemand = false\n\n# Optional extension. Yearly is not native Timeshift behavior.\nyearly = 0\n\n# Extra safety: always keep newest snapshot and latest likely incremental parent.\nkeep_latest = true\nkeep_latest_common_parent = true\n\n# Names listed here are never pruned.\nprotected_snapshots = []\n'
 
 def _failure_exit_code(exc: BaseException) -> int:
     """Map common failures to the same exit codes main() returns."""
@@ -382,6 +70,35 @@ def _publish_mqtt_status(config, command_name: str, *, success: bool, exit_code:
         print(f"WARNING: MQTT notification failed: {mqtt_exc}", file=sys.stderr)
 
 
+
+
+def _send_mail_status(config, command_name: str, *, success: bool, exit_code: int, error: str = "", stderr_tail: str = "") -> None:
+    """Send optional email status without changing the command exit code."""
+
+    mail_config = getattr(config, "mail", None)
+    if not mail_config or not mail_config.enabled:
+        return
+    if success and not mail_config.notify_on_success:
+        return
+    if not success and not mail_config.notify_on_failure:
+        return
+
+    payload = build_mail_payload(
+        job_name=config.name,
+        command=command_name,
+        state="success" if success else "failure",
+        success=success,
+        exit_code=exit_code,
+        stderr_tail=stderr_tail,
+        error=error,
+        version=__version__,
+    )
+    try:
+        send_mail_status(mail_config, payload)
+    except Exception as mail_exc:
+        print(f"WARNING: mail notification failed: {mail_exc}", file=sys.stderr)
+
+
 def _with_logging(config, command_name: str, callback):
     """Run a command with optional logging and MQTT notification.
 
@@ -398,29 +115,49 @@ def _with_logging(config, command_name: str, callback):
         try:
             result = int(callback() or 0)
             _publish_mqtt_status(config, command_name, success=(result == 0), exit_code=result)
+            _send_mail_status(config, command_name, success=(result == 0), exit_code=result)
             return result
         except KeyboardInterrupt as exc:
             if logger:
                 logger.err("ERROR: Interrupted by user")
+            stderr_tail = _stderr_tail_for_exception(exc, logger)
             _publish_mqtt_status(
                 config,
                 command_name,
                 success=False,
                 exit_code=130,
                 error="Interrupted by user",
-                stderr_tail=_stderr_tail_for_exception(exc, logger),
+                stderr_tail=stderr_tail,
+            )
+            _send_mail_status(
+                config,
+                command_name,
+                success=False,
+                exit_code=130,
+                error="Interrupted by user",
+                stderr_tail=stderr_tail,
             )
             raise
         except Exception as exc:
             if logger:
                 logger.err(f"ERROR: {exc}")
+            stderr_tail = _stderr_tail_for_exception(exc, logger)
+            exit_code = _failure_exit_code(exc)
             _publish_mqtt_status(
                 config,
                 command_name,
                 success=False,
-                exit_code=_failure_exit_code(exc),
+                exit_code=exit_code,
                 error=str(exc),
-                stderr_tail=_stderr_tail_for_exception(exc, logger),
+                stderr_tail=stderr_tail,
+            )
+            _send_mail_status(
+                config,
+                command_name,
+                success=False,
+                exit_code=exit_code,
+                error=str(exc),
+                stderr_tail=stderr_tail,
             )
             raise
 

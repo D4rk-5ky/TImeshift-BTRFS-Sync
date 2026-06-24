@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.2.18
+# timeshift-btrfs-sync v0.2.19
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -31,14 +31,14 @@ MIT License. See [`LICENSE`](LICENSE).
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
 This build keeps fast discovery, but adds an incremental parent guard so the app
-does not accidentally use destination snapshots from another OS/source as parents. This build also adds optional MQTT status notifications for Home Assistant.
+does not accidentally use destination snapshots from another OS/source as parents. This build also adds optional MQTT and email status notifications.
 
 ## Version
 
 This build version is:
 
 ```text
-0.2.18
+0.2.19
 ```
 
 See `VERSIONING.md` for the count.
@@ -59,8 +59,10 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Destination compression is no longer applied to read-only received subvolumes; after-receive compression is disabled by default and skipped if the subvolume is read-only.
 - New state entries store both the original Timeshift source UUID and the exact send-path UUID, which matters when writable snapshots are sent through a read-only cache.
 - Optional MQTT success/failure notifications using `paho-mqtt`.
+- Optional email success/failure notifications using Python standard library `smtplib` / `email`.
 - Adds `timeshift_btrfs_sync/mqtt.py` so MQTT logic is kept in one file.
-- MQTT failure JSON includes the config `name`, command, exit code, error text, and latest stderr tail.
+- Adds `timeshift_btrfs_sync/mail.py` so email logic is kept in one file.
+- MQTT and email failure notifications include the config `name`, command, exit code, error text, and latest stderr tail.
 - Better stderr handling: captured command stderr is mirrored to the terminal unless it is an expected quiet probe.
 - Recovery for interrupted receives: incomplete destination subvolumes can be deleted and retried automatically.
 - Clear separator after source cache cleanup before the next send/receive block.
@@ -89,7 +91,7 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Clear documentation that pruning needs `--yes-delete` before any real deletion happens.
 
 
-## 0.2.18 README warning/disclaimer order
+## 0.2.19 README warning/disclaimer order
 
 The README now starts in this order:
 
@@ -568,7 +570,7 @@ file so it is easy to recognize in Home Assistant:
   "timestamp": "2026-06-24T10:40:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.11"
+  "version": "0.2.19"
 }
 ```
 
@@ -589,7 +591,7 @@ stderr text that the app captured:
   "timestamp": "2026-06-24T10:41:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.11"
+  "version": "0.2.19"
 }
 ```
 
@@ -679,6 +681,43 @@ Failure test payload:
   "stderr": "Test stderr"
 }
 ```
+
+## Optional email notifications
+
+Email notifications are optional and controlled by the `[mail]` section in
+`config.toml`. This uses Python standard library `smtplib` and `email.message`,
+so no extra Python dependency is required. If `mail.enabled = false`, no email is
+sent.
+
+Minimal STARTTLS example:
+
+```toml
+[mail]
+enabled = true
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_ssl = false
+starttls = true
+username = "smtp-user@example.com"
+password_file = "/root/.config/ts-btrfs-mail.password"
+from_addr = "timeshift-btrfs-sync@example.com"
+to_addrs = ["admin@example.com"]
+subject_prefix = "[timeshift-btrfs-sync]"
+notify_on_success = true
+notify_on_failure = true
+include_json = true
+```
+
+For implicit SMTP SSL, use port 465 and set:
+
+```toml
+smtp_ssl = true
+starttls = false
+```
+
+Success mail includes the job name from the top-level `name` config, the command,
+exit code, host, timestamp, and optional JSON payload. Failure mail includes the
+same fields plus the error text and latest captured stderr tail.
 
 ## Interrupted receive recovery
 
@@ -1177,6 +1216,26 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `notify_on_success` | If true, publish success JSON after a successful command. |
 | `notify_on_failure` | If true, publish failure JSON after a failed command. |
 
+### `[mail]`
+
+| Option | Meaning |
+|---|---|
+| `enabled` | Enable optional email status notifications. If false, no email is sent. |
+| `smtp_host` | SMTP server hostname or IP. Required when `enabled = true`. |
+| `smtp_port` | SMTP server port. Common values: `587` for STARTTLS, `465` for implicit SSL. |
+| `smtp_ssl` | If true, connect with implicit SMTP SSL using `smtplib.SMTP_SSL`. |
+| `starttls` | If true and `smtp_ssl = false`, upgrade the SMTP connection using STARTTLS. |
+| `username` | Optional SMTP username. If omitted, SMTP login is skipped. |
+| `password` | Optional SMTP password. Use either `password` or `password_file`, not both. |
+| `password_file` | Optional file containing the SMTP password. Safer than storing the password directly in config.toml. |
+| `from_addr` | Sender address. Required when enabled. |
+| `to_addrs` | List of recipient addresses. Required when enabled. |
+| `subject_prefix` | Prefix for success/failure email subjects. |
+| `timeout` | SMTP connect/send timeout in seconds. |
+| `include_json` | If true, append the JSON status payload to the plain-text email body. |
+| `notify_on_success` | If true, send email after a successful command. |
+| `notify_on_failure` | If true, send email after a failed command. |
+
 ### `[manual_snapshot]`
 
 | Option | Meaning |
@@ -1263,7 +1322,7 @@ Every option below is also present in `config.example.toml`. Options commented o
 
 ## Changelog
 
-### 0.2.18
+### 0.2.19
 
 - Reordered the README front section to put project name first, then the AI-assisted warning, disclaimer, data-loss warning, and license.
 - Expanded the disclaimer and data-loss warning text.
@@ -1314,7 +1373,9 @@ Every option below is also present in `config.example.toml`. Options commented o
 ### 0.2.6
 
 - Added optional MQTT status notifications using `paho-mqtt`.
+- Added optional email status notifications using Python standard library `smtplib` / `email`.
 - Added `timeshift_btrfs_sync/mqtt.py` so MQTT logic is isolated in one file.
+- Added `timeshift_btrfs_sync/mail.py` so email logic is isolated in one file.
 - Added `[mqtt]` config section with optional username/password/password_file.
 - Success payloads include config `name`, command, exit code, timestamp, host, app, and version.
 - Failure payloads include the same fields plus error text and the latest captured stderr tail.

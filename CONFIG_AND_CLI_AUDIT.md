@@ -230,10 +230,19 @@ when available, and `timeshift_btrfs_sync.timeshift.create_remote_manual_snapsho
 asks the command runner to mirror stdout when the create command fails.
 
 
-## 0.2.18 audit note
+## 0.2.19 audit note
 
 Docs-only README front matter update. No CLI flags or config options changed.
 
 ## 0.2.17 audit note
 
 Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshift defaults creates to on-demand/tag O and some versions reject explicit O.
+
+
+## 0.2.19 mail notification audit
+
+- Added `[mail]` config section to `config.example.toml` and `README.md`.
+- Added `timeshift_btrfs_sync/mail.py`.
+- Added `MailConfig` parsing and validation in `config.py`.
+- Added success/failure mail notification calls in `cli.py`.
+- Verified mail disabled does not require any third-party Python dependency.

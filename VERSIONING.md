@@ -35,15 +35,15 @@ Corrected sequence:
 35th zip -> 0.2.15
 36th zip -> 0.2.16
 37th zip -> 0.2.17
-38th zip -> 0.2.18
+38th zip -> 0.2.19
 ```
 
-This build is version `0.2.18`.
+This build is version `0.2.19`.
 
 The next zip should normally be `0.2.19` for a patch or `0.3.0` for a larger feature.
 
 
-## 0.2.18 - README warning/disclaimer order
+## 0.2.19 - README warning/disclaimer order
 
 Docs-only update.
 

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.2.16 config
+# timeshift-btrfs-sync v0.2.19 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -22,6 +22,14 @@ prune_after_sync = false
 #   *.err = stderr/error output
 log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
 
+
+# Optional internal metadata paths. Omit these to use defaults under target_root:
+#   <target_root>/.ts-btrfs-sync/state.json
+#   <target_root>/.ts-btrfs-sync/lock
+# state_file records successfully received snapshots and incremental parent data.
+# lock_file prevents two sync/prune jobs from running against the same target.
+# state_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/state.json"
+# lock_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/lock"
 
 [mqtt]
 # Optional MQTT notifications for Home Assistant or another MQTT consumer.
@@ -59,13 +67,37 @@ timeout = 10
 notify_on_success = true
 notify_on_failure = true
 
-# Optional internal metadata paths. Omit these to use defaults under target_root:
-#   <target_root>/.ts-btrfs-sync/state.json
-#   <target_root>/.ts-btrfs-sync/lock
-# state_file records successfully received snapshots and incremental parent data.
-# lock_file prevents two sync/prune jobs from running against the same target.
-# state_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/state.json"
-# lock_file = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/lock"
+
+[mail]
+# Optional email notifications using Python standard library smtplib/email.
+# No extra Python dependency is required. If enabled = false, no mail is sent.
+enabled = false
+
+# SMTP server settings. Typical STARTTLS setup uses port 587 with starttls=true.
+# Typical implicit SSL setup uses port 465 with smtp_ssl=true and starttls=false.
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_ssl = false
+starttls = true
+timeout = 10
+
+# Optional SMTP authentication. Use either password or password_file, not both.
+# username = "smtp-user@example.com"
+# password = "smtp-password"
+# password_file = "/root/.config/ts-btrfs-mail.password"
+
+# Sender and recipients. to_addrs must contain at least one address when enabled=true.
+from_addr = "timeshift-btrfs-sync@example.com"
+to_addrs = ["admin@example.com"]
+
+# Mail content options.
+subject_prefix = "[timeshift-btrfs-sync]"
+include_json = true
+
+# Control whether success and/or failure messages are sent.
+notify_on_success = true
+notify_on_failure = true
+
 
 [ssh]
 # Source machine containing the Timeshift snapshots.

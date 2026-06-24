@@ -9,6 +9,7 @@ import tomllib
 
 from .ssh import SSHConfig
 from .mqtt import MQTTConfig
+from .mail import MailConfig
 
 
 
@@ -187,6 +188,7 @@ class AppConfig:
     stream: StreamConfig
     retention: RetentionConfig
     mqtt: MQTTConfig
+    mail: MailConfig
     manual_snapshot: ManualSnapshotConfig
     state_file: Path
     lock_file: Path
@@ -418,6 +420,54 @@ def load_config(path: str | Path) -> AppConfig:
         notify_on_failure=_as_bool(mqtt_raw.get("notify_on_failure"), "mqtt.notify_on_failure", True),
     )
 
+
+    mail_raw = raw.get("mail", {})
+    if not isinstance(mail_raw, dict):
+        raise ConfigError("[mail] must be a TOML table")
+    mail_port = mail_raw.get("smtp_port", 587)
+    if not isinstance(mail_port, int) or mail_port <= 0:
+        raise ConfigError("mail.smtp_port must be a positive integer")
+    mail_timeout = mail_raw.get("timeout", 10)
+    if not isinstance(mail_timeout, int) or mail_timeout <= 0:
+        raise ConfigError("mail.timeout must be a positive integer")
+    mail_password = mail_raw.get("password") if isinstance(mail_raw.get("password"), str) and mail_raw.get("password") else None
+    mail_password_file = mail_raw.get("password_file") if isinstance(mail_raw.get("password_file"), str) and mail_raw.get("password_file") else None
+    if mail_password and mail_password_file:
+        raise ConfigError("Use either mail.password or mail.password_file, not both")
+    if mail_password_file and not Path(mail_password_file).expanduser().is_file():
+        raise ConfigError(f"mail.password_file does not exist or is not a file: {mail_password_file}")
+    mail_enabled = _as_bool(mail_raw.get("enabled"), "mail.enabled", False)
+    mail_smtp_host = str(mail_raw.get("smtp_host", "")).strip()
+    mail_from_addr = str(mail_raw.get("from_addr", "")).strip()
+    mail_to_addrs = _string_list(mail_raw.get("to_addrs"), "mail.to_addrs")
+    mail_smtp_ssl = _as_bool(mail_raw.get("smtp_ssl"), "mail.smtp_ssl", False)
+    mail_starttls = _as_bool(mail_raw.get("starttls"), "mail.starttls", True)
+    if mail_smtp_ssl and mail_starttls:
+        raise ConfigError("mail.smtp_ssl and mail.starttls cannot both be true")
+    if mail_enabled and not mail_smtp_host:
+        raise ConfigError("mail.smtp_host is required when mail.enabled = true")
+    if mail_enabled and not mail_from_addr:
+        raise ConfigError("mail.from_addr is required when mail.enabled = true")
+    if mail_enabled and not mail_to_addrs:
+        raise ConfigError("mail.to_addrs must contain at least one address when mail.enabled = true")
+    mail = MailConfig(
+        enabled=mail_enabled,
+        smtp_host=mail_smtp_host,
+        smtp_port=mail_port,
+        smtp_ssl=mail_smtp_ssl,
+        starttls=mail_starttls,
+        username=mail_raw.get("username") if isinstance(mail_raw.get("username"), str) and mail_raw.get("username") else None,
+        password=mail_password,
+        password_file=str(Path(mail_password_file).expanduser()) if mail_password_file else None,
+        from_addr=mail_from_addr,
+        to_addrs=mail_to_addrs,
+        subject_prefix=str(mail_raw.get("subject_prefix", "[timeshift-btrfs-sync]")).strip(),
+        timeout=mail_timeout,
+        notify_on_success=_as_bool(mail_raw.get("notify_on_success"), "mail.notify_on_success", True),
+        notify_on_failure=_as_bool(mail_raw.get("notify_on_failure"), "mail.notify_on_failure", True),
+        include_json=_as_bool(mail_raw.get("include_json"), "mail.include_json", True),
+    )
+
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")
     lock_file = _as_path(raw.get("lock_file", str(target_root / ".ts-btrfs-sync" / "lock")), "lock_file")
 
@@ -435,6 +485,7 @@ def load_config(path: str | Path) -> AppConfig:
         stream=stream,
         retention=retention,
         mqtt=mqtt,
+        mail=mail,
         manual_snapshot=manual_snapshot,
         state_file=state_file,
         lock_file=lock_file,

@@ -257,3 +257,8 @@ The pipeline lets that Btrfs verbose output pass through live to the terminal. T
 ## Timeshift on-demand tag workaround
 
 Manual snapshot creation intentionally omits explicit `--tags O`. Timeshift defaults to tag `O` for manual/on-demand creates, and some versions reject explicit `O` because of a CLI validation bug.
+
+
+## timeshift_btrfs_sync/mail.py
+
+Contains all optional SMTP email notification logic. It uses Python standard library `smtplib` and `email.message`, builds success/failure status payloads, supports optional username/password or password_file, STARTTLS, implicit SMTP SSL, and sends plain-text status emails.
