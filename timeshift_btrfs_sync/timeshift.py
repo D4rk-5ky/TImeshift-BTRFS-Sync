@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 from . import btrfs
-from .commands import quote_join, sudo_prefix
+from .commands import quote_join, remote_double_quote, sudo_prefix
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
 
@@ -92,7 +92,34 @@ def list_remote_snapshots(
     return snapshots
 
 
-def create_remote_manual_snapshot(ssh: SSHRunner, *, sudo: str, timeshift_command: str, comment: str) -> None:
-    """Create a Timeshift on-demand snapshot with tag O."""
+def create_remote_manual_snapshot_cmd(sudo: str, timeshift_command: str, comment: str) -> str:
+    """Build the Timeshift manual/on-demand snapshot create command.
 
-    ssh.run(timeshift_cmd(sudo, timeshift_command, ["--create", "--scripted", "--tags", "O", "--comments", comment]))
+    Do not pass ``--tags O`` here. Timeshift documents O as the default
+    on-demand tag, but several Timeshift versions reject an explicit O tag due
+    to a CLI validation bug. Omitting ``--tags`` is both cleaner and safer: a
+    plain ``timeshift --create`` snapshot becomes an on-demand snapshot by
+    default.
+
+    The comment is intentionally quoted with remote-safe double quotes instead
+    of the default single-quote style. That avoids very noisy logged SSH
+    commands such as ``'"'"'comment'"'"'`` while still making comments with
+    spaces safe for the remote shell.
+    """
+
+    base = sudo_prefix(sudo) + [timeshift_command, "--create", "--scripted", "--comments"]
+    return quote_join(base) + " " + remote_double_quote(comment)
+
+
+def create_remote_manual_snapshot(ssh: SSHRunner, *, sudo: str, timeshift_command: str, comment: str) -> None:
+    """Create a Timeshift on-demand snapshot.
+
+    Timeshift assigns the on-demand/O tag automatically when no other tag is
+    supplied. This avoids the known CLI bug where explicit ``--tags O`` can
+    fail even though the man page lists O as valid.
+    """
+
+    # Timeshift sometimes reports the useful reason for create failures on
+    # stdout rather than stderr. Mirror stdout on failure so users can see the
+    # real Timeshift error instead of only "Command failed (1)".
+    ssh.run(create_remote_manual_snapshot_cmd(sudo, timeshift_command, comment), mirror_stdout_on_failure=True)

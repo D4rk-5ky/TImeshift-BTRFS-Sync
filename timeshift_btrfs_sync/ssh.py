@@ -92,6 +92,7 @@ class SSHRunner:
         check: bool = True,
         log_stderr: bool = True,
         mirror_stderr: bool = True,
+        mirror_stdout_on_failure: bool = False,
     ) -> Completed:
         """Run a remote command and capture stdout/stderr.
 
@@ -106,6 +107,7 @@ class SSHRunner:
             env=self.config.environment(),
             log_stderr=log_stderr,
             mirror_stderr=mirror_stderr,
+            mirror_stdout_on_failure=mirror_stdout_on_failure,
         )
 
     def environment(self) -> dict[str, str] | None:

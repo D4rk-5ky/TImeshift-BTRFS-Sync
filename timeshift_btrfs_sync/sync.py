@@ -81,6 +81,113 @@ def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_in
     )
 
 
+
+
+def verify_source_identity_for_manual_snapshot(
+    config: AppConfig,
+    ssh: SSHRunner,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+) -> tuple[str, str]:
+    """Require the configured source to match existing state before creating.
+
+    This is used before the app asks source Timeshift to create a new manual
+    snapshot. It prevents writing a new stale snapshot to the wrong mounted OS
+    or wrong source host. The match is not name-only: it walks state.json
+    newest-to-oldest, finds an entry that still exists in `timeshift --list`,
+    and confirms Btrfs UUID / destination received_uuid identity.
+    """
+
+    confirmed_name, reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
+    if not confirmed_name:
+        raise SyncError(
+            "Refusing to create manual Timeshift snapshot.\n\n"
+            "manual_snapshot.require_verified_source = true, but the configured source "
+            "could not be matched to any already received snapshot in state.json.\n"
+            "This may be the wrong mounted OS, wrong snapshot_root, wrong source host, "
+            "or a first-ever sync with no trusted state yet.\n"
+            f"Reason: {reason}\n\n"
+            "Run a normal sync first with manual_snapshot.enabled = false, or set "
+            "manual_snapshot.require_verified_source = false only if you intentionally "
+            "want to allow first-run/unverified manual snapshot creation."
+        )
+    return confirmed_name, reason
+
+
+def _maybe_create_manual_snapshot(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+    dry_run: bool,
+    only_snapshot: str | None,
+) -> bool:
+    """Optionally create a source Timeshift tag O snapshot before sync.
+
+    This is controlled by [manual_snapshot]. For safety, the source list is read
+    before this function is called. When manual_snapshot.require_verified_source
+    is true, the app walks state.json newest-to-oldest and requires a
+    UUID-confirmed match between the configured source and an already received
+    destination snapshot before it asks Timeshift to create a new snapshot.
+
+    Returns True only when a real source snapshot was created and the caller
+    should read `timeshift --list` again.
+    """
+
+    manual = config.manual_snapshot
+    if not manual.enabled:
+        return False
+    if only_snapshot:
+        print("Manual snapshot creation: skipped because --snapshot was specified.")
+        _human_rule("----")
+        return False
+
+    if manual.require_verified_source:
+        _human_blank()
+        print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+        print("  require_verified_source: true")
+        print("  checking existing source Timeshift list against state.json UUID history")
+
+        confirmed_name, reason = verify_source_identity_for_manual_snapshot(config, ssh, state, source_by_name)
+
+        print(f"  confirmed source anchor: {confirmed_name}")
+        print(f"  reason: {reason}")
+        _human_rule("----")
+    else:
+        _human_blank()
+        print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+        print("  require_verified_source: false")
+        print("  WARNING: creating a manual Timeshift snapshot without UUID-confirming the source first")
+        _human_rule("----")
+
+    _human_blank()
+    print("MANUAL SNAPSHOT CREATE")
+    print(f"  tag:     O (Timeshift default; --tags O is intentionally omitted)")
+    print(f"  comment: {manual.comment}")
+
+    if manual.marker and manual.marker.lower() not in manual.comment.lower():
+        print()
+        print(f"WARNING: manual_snapshot.comment does not contain marker {manual.marker!r};")
+        print("         marker-based retention may not recognize this snapshot later.")
+
+    if dry_run:
+        print()
+        print("Dry-run: would run source Timeshift --create --scripted --comments ...")
+        _human_rule("----")
+        return False
+
+    timeshift.create_remote_manual_snapshot(
+        ssh,
+        sudo=config.source.sudo,
+        timeshift_command=config.source.timeshift_command,
+        comment=manual.comment,
+    )
+    print()
+    print("Requested source Timeshift on-demand snapshot. Reading source list after creation.")
+    _human_rule("----")
+    return True
+
 def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
     """Print source snapshots in table form."""
 
@@ -710,28 +817,44 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     ssh = SSHRunner(config.ssh)
     ssh.test()
 
-    # Discovery uses Timeshift for names/tags. By default it avoids expensive
-    # btrfs metadata probes for every snapshot/subvolume. This makes dry-run and
-    # initial planning much faster on systems with many snapshots. If the user
-    # wants the old verification behavior, they can set
-    # source.verify_subvolumes_at_discovery = true.
-    print("Reading source Timeshift snapshots with sudo timeshift --list...")
-    _human_blank()
-    if config.source.verify_subvolumes_at_discovery:
-        print("Discovery verification: enabled, checking every configured subvolume with btrfs.")
-    else:
-        print("Discovery verification: fast mode, delaying btrfs checks until send time.")
-    _human_rule("----")
-    snapshots = [
-        snap
-        for snap in list_source_snapshots(
-            config,
-            ssh,
-            include_btrfs_info=config.source.verify_subvolumes_at_discovery,
-        )
-        if snap.subvolumes
-    ]
-    source_by_name = {snap.name: snap for snap in snapshots}
+    def discover_source_snapshot_list(*, reason: str) -> tuple[list[SnapshotMeta], dict[str, SnapshotMeta]]:
+        """Read source Timeshift snapshots and return both list and name lookup."""
+
+        # Discovery uses Timeshift for names/tags. By default it avoids expensive
+        # btrfs metadata probes for every snapshot/subvolume. This makes dry-run
+        # and initial planning much faster on systems with many snapshots. If the
+        # user wants the old verification behavior, they can set
+        # source.verify_subvolumes_at_discovery = true.
+        print(f"Reading source Timeshift snapshots with sudo timeshift --list ({reason})...")
+        _human_blank()
+        if config.source.verify_subvolumes_at_discovery:
+            print("Discovery verification: enabled, checking every configured subvolume with btrfs.")
+        else:
+            print("Discovery verification: fast mode, delaying btrfs checks until send time.")
+        _human_rule("----")
+        discovered = [
+            snap
+            for snap in list_source_snapshots(
+                config,
+                ssh,
+                include_btrfs_info=config.source.verify_subvolumes_at_discovery,
+            )
+            if snap.subvolumes
+        ]
+        return discovered, {snap.name: snap for snap in discovered}
+
+    snapshots, source_by_name = discover_source_snapshot_list(reason="before manual snapshot safety check")
+
+    created_manual_snapshot = _maybe_create_manual_snapshot(
+        config,
+        ssh,
+        state=state,
+        source_by_name=source_by_name,
+        dry_run=dry_run,
+        only_snapshot=only_snapshot,
+    )
+    if created_manual_snapshot:
+        snapshots, source_by_name = discover_source_snapshot_list(reason="after manual snapshot creation")
 
     sync_floor_name: str | None = None
     if only_snapshot:

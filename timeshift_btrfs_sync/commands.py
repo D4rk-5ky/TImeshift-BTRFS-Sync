@@ -28,7 +28,13 @@ class CommandError(RuntimeError):
         self.stdout = stdout
         self.stderr = stderr
         printable = cmd if isinstance(cmd, str) else shlex.join(cmd)
-        super().__init__(f"Command failed ({returncode}): {printable}\n{stderr.strip()}")
+        details: list[str] = []
+        if stdout.strip():
+            details.append("COMMAND STDOUT:\n" + stdout.rstrip())
+        if stderr.strip():
+            details.append("COMMAND STDERR:\n" + stderr.rstrip())
+        suffix = "\n" + "\n".join(details) if details else ""
+        super().__init__(f"Command failed ({returncode}): {printable}{suffix}")
 
 
 @dataclass(slots=True)
@@ -55,6 +61,29 @@ def quote_join(parts: Iterable[str]) -> str:
     return " ".join(shlex.quote(str(p)) for p in parts)
 
 
+def remote_double_quote(value: str) -> str:
+    """Return a shell-safe double-quoted argument for a remote shell command.
+
+    Most remote commands are built with :func:`quote_join`, which uses
+    single-quote based shell escaping. That is very safe, but when a remote
+    command itself is later displayed as one quoted SSH argument, nested
+    single quotes are rendered as the classic ``'"'"'`` sequence.
+
+    Human-entered Timeshift comments are a good case for double quoting: it
+    keeps spaces safe, escapes the characters that are still special inside
+    double quotes, and makes the logged SSH command much easier to read.
+    """
+
+    text = str(value)
+    text = text.replace("\\", "\\\\")
+    text = text.replace('"', '\\"')
+    text = text.replace("$", "\\$")
+    text = text.replace("`", "\\`")
+    text = text.replace("\n", "\\n")
+    text = text.replace("\r", "\\r")
+    return f'"{text}"'
+
+
 def _merged_env(extra_env: dict[str, str] | None) -> dict[str, str] | None:
     """Merge optional child-process environment variables."""
 
@@ -73,6 +102,7 @@ def run_local(
     env: dict[str, str] | None = None,
     log_stderr: bool = True,
     mirror_stderr: bool = True,
+    mirror_stdout_on_failure: bool = False,
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
@@ -105,6 +135,14 @@ def run_local(
     if log_stderr and mirror_stderr and proc.stderr:
         print(f"COMMAND STDERR: {shlex.join(cmd)}", file=sys.stderr)
         print(proc.stderr.rstrip(), file=sys.stderr)
+
+    # Some tools, including Timeshift, may print useful failure details to
+    # stdout instead of stderr. Do not mirror stdout for every successful
+    # command because that would make normal output noisy, but allow selected
+    # callers to expose stdout when a command fails.
+    if check and proc.returncode != 0 and mirror_stdout_on_failure and proc.stdout:
+        print(f"COMMAND STDOUT: {shlex.join(cmd)}", file=sys.stderr)
+        print(proc.stdout.rstrip(), file=sys.stderr)
 
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)

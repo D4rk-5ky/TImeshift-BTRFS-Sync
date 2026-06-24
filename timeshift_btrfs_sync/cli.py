@@ -15,10 +15,10 @@ from .mqtt import build_payload, publish_status
 from .retention import prune
 from .ssh import SSHRunner
 from .state import load_state
-from .sync import list_source_snapshots, print_snapshot_table, sync_once
+from .sync import list_source_snapshots, print_snapshot_table, sync_once, verify_source_identity_for_manual_snapshot
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.10 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.16 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -122,6 +122,45 @@ compression = false
 # BatchMode=yes makes SSH fail instead of hanging on prompts. Use it for key auth.
 # Do NOT use BatchMode=yes together with password/password_file.
 extra_args = ["-o", "BatchMode=yes"]
+
+
+[manual_snapshot]
+# Optional source-side Timeshift on-demand snapshot creation before a normal sync.
+# When enabled = true, `sync` first reads sudo timeshift --list, verifies the
+# configured source if require_verified_source is true, then creates the snapshot:
+#   sudo -n timeshift --create --scripted --comments <comment>
+#
+# The command intentionally omits explicit --tags O. Timeshift defaults to
+# on-demand/tag O when no tag is supplied, and some Timeshift versions reject
+# explicit --tags O even though the help text lists O as valid.
+# Dry-run only prints what would happen. If --snapshot is used, automatic
+# creation is skipped because that command is a targeted sync.
+enabled = false
+
+# Independent cleanup for app-created on-demand snapshots.
+# This only affects tag O snapshots whose saved Timeshift comment contains marker.
+# It does not affect normal/user-created Timeshift on-demand snapshots.
+# Real deletion still requires prune to run with --run --yes-delete.
+cleanup_enabled = true
+
+# Safety guard for creating source-side on-demand snapshots. Keep true.
+# Before creating a manual snapshot, the app first runs timeshift --list and
+# requires the configured source to match an already received state.json entry
+# by Btrfs UUID. This prevents creating stale snapshots on the wrong mounted OS.
+# First-ever sync with no state should normally run with manual_snapshot.enabled
+# = false first, or this can be explicitly set false if you accept the risk.
+require_verified_source = true
+
+# Comment passed to Timeshift. Keep the marker text inside the comment so the
+# destination prune logic can recognize snapshots created by this app.
+comment = "ts-btrfs-sync automatic on-demand snapshot"
+marker = "ts-btrfs-sync"
+
+# Destination retention for app-created on-demand snapshots recognized by marker.
+# Default 10. This is independent from [retention].ondemand.
+# Set 0 to delete all matching app-created snapshots except globally protected
+# snapshots/newest common parent. Set cleanup_enabled = false to keep them all.
+retention_count = 10
 
 [source]
 # Source-side command prefix. sudo -n means sudo must not prompt for a password.
@@ -272,7 +311,15 @@ daily = 7
 weekly = 4
 monthly = 6
 boot = 5
+# Retention count for normal/user-created Timeshift on-demand snapshots.
+# This is ignored unless cleanup_ondemand = true.
 ondemand = 10
+
+# Cleanup switch for normal/user-created Timeshift tag O snapshots.
+# Default false means your normal manual on-demand snapshots are never pruned by
+# this app unless you explicitly allow it. App-created on-demand cleanup is
+# controlled independently by [manual_snapshot].cleanup_enabled.
+cleanup_ondemand = false
 
 # Optional extension. Yearly is not native Timeshift behavior.
 yearly = 0
@@ -465,7 +512,36 @@ def cmd_create_manual(args) -> int:
     config = load_config(args.config)
 
     def _run() -> int:
-        create_remote_manual_snapshot(SSHRunner(config.ssh), sudo=config.source.sudo, timeshift_command=config.source.timeshift_command, comment=args.comment)
+        ssh = SSHRunner(config.ssh)
+        ssh.test()
+        if config.manual_snapshot.require_verified_source:
+            print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+            print("  require_verified_source: true")
+            snapshots = [
+                snap
+                for snap in list_source_snapshots(
+                    config,
+                    ssh,
+                    include_btrfs_info=config.source.verify_subvolumes_at_discovery,
+                )
+                if snap.subvolumes
+            ]
+            source_by_name = {snap.name: snap for snap in snapshots}
+            confirmed_name, reason = verify_source_identity_for_manual_snapshot(
+                config,
+                ssh,
+                load_state(config.state_file),
+                source_by_name,
+            )
+            print(f"  confirmed source anchor: {confirmed_name}")
+            print(f"  reason: {reason}")
+            print()
+        else:
+            print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+            print("  require_verified_source: false")
+            print("  WARNING: creating a manual Timeshift snapshot without UUID-confirming the source first")
+            print()
+        create_remote_manual_snapshot(ssh, sudo=config.source.sudo, timeshift_command=config.source.timeshift_command, comment=args.comment)
         print("Requested remote Timeshift on-demand snapshot.")
         return 0
 
@@ -591,7 +667,10 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser(
         "create-manual",
         help="create source Timeshift tag O snapshot",
-        description="Ask source Timeshift to create an on-demand/manual snapshot with tag O.",
+        description=(
+            "Ask source Timeshift to create an on-demand/manual snapshot with tag O.\n"
+            "By default, manual_snapshot.require_verified_source also applies here: the source must match state.json by UUID first."
+        ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
     p.add_argument("--config", "-c", required=True, help="path to config.toml")

@@ -59,6 +59,27 @@ error        = exception/error text on failure
 stderr       = newest captured stderr tail on failure
 ```
 
+## Manual snapshot config logic
+
+Automatic on-demand snapshot creation is controlled by `[manual_snapshot]` and
+implemented in `sync.py`. When enabled, a normal `sync` run first performs
+source discovery with `timeshift --list` and, by default, requires a
+UUID-confirmed source match from `state.json` before creating a new source
+Timeshift tag `O` snapshot.
+
+The manual snapshot command is built in `timeshift.py` and uses remote-safe
+double-quote escaping for the comment so logs stay readable:
+
+```bash
+sudo -n timeshift --create --scripted --comments "<comment>"
+```
+
+The configured comment should contain `manual_snapshot.marker`. Destination
+pruning uses that marker, when present in saved state comments, to keep the
+newest `manual_snapshot.retention_count` app-created on-demand snapshots. This
+is independent from normal `[retention].cleanup_ondemand`, which controls
+whether user-created Timeshift tag `O` snapshots may be pruned.
+
 ## Source-side commands
 
 These are the only commands that need passwordless sudo on the source. In fast
@@ -67,7 +88,7 @@ snapshot up front; it delays them until send time.
 
 ```bash
 sudo -n timeshift --list
-sudo -n timeshift --create --scripted --tags O --comments "..."
+sudo -n timeshift --create --scripted --comments "..."
 sudo -n btrfs subvolume show <path>
 sudo -n btrfs property get -ts <path> ro
 sudo -n btrfs subvolume create <cache_root>/<snapshot>
@@ -231,3 +252,8 @@ The pipeline lets that Btrfs verbose output pass through live to the terminal. T
 - `sync.py` now includes interrupted receive cleanup controlled by `destination.cleanup_incomplete_receive`.
 - `commands.py` mirrors captured stderr to the terminal, except for expected quiet probes.
 - Source cache cleanup now prints a separator before the next transfer block.
+
+
+## Timeshift on-demand tag workaround
+
+Manual snapshot creation intentionally omits explicit `--tags O`. Timeshift defaults to tag `O` for manual/on-demand creates, and some versions reject explicit `O` because of a CLI validation bug.

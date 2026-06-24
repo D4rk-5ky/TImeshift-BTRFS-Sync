@@ -1,9 +1,32 @@
-> [!WARNING]
-> **Work in progress — not ready for real use.**
->
-> This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
+# timeshift-btrfs-sync v0.2.18
 
-# timeshift-btrfs-sync v0.2.9
+> ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
+
+## Disclaimer
+
+This project is AI-assisted / vibe-coded software created as a hobby project.
+
+It has not been professionally audited, and it may contain bugs, unsafe behavior,
+data-loss issues, security problems, or incorrect assumptions. Use it at your own risk.
+
+You are responsible for reviewing the code, testing it in a safe environment,
+making backups, and understanding what it does before using it on real data.
+
+The author is not responsible for any damage, data loss, broken systems,
+security issues, or other problems caused by using this software.
+
+## Data Loss Warning
+
+This application can perform destructive operations, including deleting files,
+snapshots, or backup data.
+
+Before using these features, make sure you have tested the program, understand
+the configuration, and have a working backup. The author is not responsible for
+lost or damaged data.
+
+## License
+
+MIT License. See [`LICENSE`](LICENSE).
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -12,10 +35,10 @@ does not accidentally use destination snapshots from another OS/source as parent
 
 ## Version
 
-This is the 27th zip build in the corrected sequence, so the version is:
+This build version is:
 
 ```text
-0.2.9
+0.2.18
 ```
 
 See `VERSIONING.md` for the count.
@@ -24,6 +47,13 @@ See `VERSIONING.md` for the count.
 
 A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
 
+- README front matter is now ordered as project name, AI-assisted warning, disclaimer, data-loss warning, and MIT license.
+- Optional `[manual_snapshot]` config section to create a source Timeshift on-demand/tag `O` snapshot before normal sync.
+- Manual snapshot creation now omits explicit `--tags O` because Timeshift already defaults to on-demand and some Timeshift versions reject explicit `O`.
+- New safety guard: before creating an automatic manual snapshot, the app first runs `timeshift --list` and requires a UUID-confirmed match against `state.json` by default.
+- Manual snapshot comments include a configurable marker so app-created snapshots can be recognized later.
+- App-created on-demand cleanup is controlled by `[manual_snapshot].cleanup_enabled` and `retention_count`.
+- Normal/user-created Timeshift on-demand cleanup is controlled separately by `[retention].cleanup_ondemand`.
 - Prune-safe high-watermark sync: after destination pruning, the app skips older source snapshots at or below the newest UUID-confirmed state/source match instead of sending them again.
 - If the newest state snapshot is no longer listed on the source, the app walks backward through `state.json` until it finds a source snapshot that still exists and matches by Btrfs UUID.
 - Destination compression is no longer applied to read-only received subvolumes; after-receive compression is disabled by default and skipped if the subvolume is read-only.
@@ -58,6 +88,131 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Clear documentation that `target_root` creates both `snapshots/` and `.ts-btrfs-sync/`, and both must be cleaned when fully resetting a backup.
 - Clear documentation that pruning needs `--yes-delete` before any real deletion happens.
 
+
+## 0.2.18 README warning/disclaimer order
+
+The README now starts in this order:
+
+```text
+# Project name
+AI-assisted / vibe-coded warning
+Disclaimer
+Data Loss Warning
+License
+```
+
+The project license remains MIT.
+
+## 0.2.17 Timeshift on-demand tag workaround
+
+Timeshift documents `--tags {O,B,H,D,W,M}` and says the default tag is `O`,
+but some Timeshift versions have a CLI bug where explicit `--tags O` fails
+with:
+
+```text
+E: Unknown value specified for option --tags (O).
+E: Expected values: O, B, H, D, W, M
+```
+
+This build avoids the bug by not passing `--tags O` for app-created manual
+snapshots. A plain Timeshift create command defaults to an on-demand/tag `O`
+snapshot, so the command is now:
+
+```bash
+sudo -n timeshift --create --scripted --comments "ts-btrfs-sync automatic on-demand snapshot"
+```
+
+This keeps the snapshot as on-demand while avoiding the Timeshift CLI validator
+bug.
+
+## 0.2.16 cleaner manual snapshot command logging
+
+Manual Timeshift snapshot creation still uses safe shell quoting, but the
+`--comments` value is now quoted with remote-safe double quotes instead of
+nested single quotes. This makes the displayed/logged SSH command much easier
+to read.
+
+Example shown in logs now looks like this:
+
+```bash
+sshpass -e ssh -i /root/.ssh/btrbk-source-password btrbk-source@10.0.0.52 'sudo -n timeshift --create --scripted --comments "ts-btrfs-sync automatic on-demand snapshot"'
+```
+
+Comments with double quotes, dollar signs, backticks, backslashes, or line
+breaks are still escaped before being sent to the remote shell.
+
+
+## 0.2.16 manual snapshot create diagnostics
+
+If source Timeshift refuses to create the app-owned manual/on-demand snapshot,
+the app now shows more of the real Timeshift output. Some Timeshift failures are
+reported on stdout instead of stderr, so manual snapshot creation now mirrors
+stdout on failure and includes both stdout and stderr in the final error.
+
+This does not relax the source identity safety check. The order remains:
+
+```text
+1. Read source Timeshift list.
+2. Confirm source identity against state.json by Btrfs UUID.
+3. Only then ask Timeshift to create the app-owned on-demand snapshot.
+```
+
+If this step fails, copy the displayed `COMMAND STDOUT` / `COMMAND STDERR` lines.
+Those lines are the important part; the SSH command line alone normally only
+shows that Timeshift returned exit code 1.
+
+## 0.2.14 verified manual snapshot source guard
+
+Automatic source-side manual snapshot creation is now safer. When
+`manual_snapshot.enabled = true`, the default is also:
+
+```toml
+[manual_snapshot]
+require_verified_source = true
+```
+
+Before creating the new Timeshift tag `O` snapshot, the app now:
+
+```text
+1. Runs sudo -n timeshift --list first.
+2. Walks state.json newest-to-oldest.
+3. Finds the newest state snapshot that still exists in the source list.
+4. Confirms source/destination identity by Btrfs UUID / received_uuid.
+5. Only then runs timeshift --create.
+6. Reads timeshift --list again so the new snapshot can be synced.
+```
+
+If the newest state entry is no longer present on the source, the app walks
+backward until it finds a source snapshot that still exists and matches by UUID.
+
+If no UUID-confirmed source anchor is found, the app refuses to create the
+manual snapshot. This prevents creating stale snapshots on the wrong mounted OS,
+wrong `snapshot_root`, or wrong source host.
+
+For a first-ever sync with no trusted state yet, leave
+`manual_snapshot.enabled = false` for the first normal sync, or explicitly set
+`manual_snapshot.require_verified_source = false` only if you accept that risk.
+
+The same verification guard is also applied to the one-off `create-manual`
+command by default, because that command also creates a source-side Timeshift
+snapshot.
+
+## 0.2.13 independent on-demand retention controls
+
+- Added independent cleanup control for app-created on-demand snapshots: `[manual_snapshot].cleanup_enabled`.
+- Added independent cleanup control for normal/user-created Timeshift on-demand snapshots: `[retention].cleanup_ondemand`.
+- `manual_snapshot.enabled` only controls whether the app creates a new source Timeshift tag `O` snapshot before sync.
+- `manual_snapshot.cleanup_enabled` only controls pruning of app-created tag `O` snapshots recognized by the configured marker.
+- `retention.cleanup_ondemand` only controls pruning of normal/user-created Timeshift tag `O` snapshots.
+- Default safety behavior: normal/user-created on-demand snapshots are **not** pruned unless `cleanup_ondemand = true`.
+- The `create-manual` command still exists for one-off manual creation from the CLI.
+
+## 0.2.11 documentation fix
+
+- Restored the Home Assistant MQTT/Pushover example to the UI/exported automation style using `triggers:`, `actions:`, and MQTT `options:`.
+- Removed the legacy singular `trigger:` / `action:` example from the README.
+- Kept the note that `trigger.payload_json` requires a real MQTT JSON trigger; manual **Run actions** tests may not provide it.
+
 ## Source sudo remains minimal
 
 The source still only needs passwordless sudo for Btrfs and Timeshift:
@@ -70,7 +225,7 @@ ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/timeshift *
 What those lines allow:
 
 - `sudo -n timeshift --list` for snapshot discovery.
-- `sudo -n timeshift --create --scripted --tags O ...` for manual snapshots.
+- `sudo -n timeshift --create --scripted --comments ...` for manual snapshots.
 - `sudo -n btrfs subvolume show ...` for UUID metadata when needed, mainly the first incremental parent per subvolume per run.
 - `sudo -n btrfs property get -ts ... ro` for read-only checks when a subvolume is actually going to be sent.
 - `sudo -n btrfs subvolume create ...` for send-cache snapshot parents.
@@ -86,6 +241,73 @@ What those lines do **not** directly allow:
 - `sudo python`
 - source-side helper scripts
 
+
+## Optional automatic on-demand snapshot before sync
+
+You can let `sync` create a normal Timeshift on-demand/manual snapshot on the
+source before it reads the source snapshot list:
+
+```toml
+[manual_snapshot]
+# Create one app-tagged Timeshift on-demand/tag O snapshot before normal sync.
+# The app intentionally omits explicit --tags O because Timeshift defaults to O.
+enabled = true
+
+# Keep true for safety: verify the configured source against state.json by UUID
+# before creating a new source-side Timeshift snapshot.
+require_verified_source = true
+
+# Independently prune app-created on-demand snapshots by marker.
+cleanup_enabled = true
+
+comment = "ts-btrfs-sync automatic on-demand snapshot"
+marker = "ts-btrfs-sync"
+retention_count = 10
+
+[retention]
+# Independently decide whether normal/user-created Timeshift tag O snapshots
+# may be pruned. Default false keeps them all.
+cleanup_ondemand = false
+ondemand = 10
+```
+
+Real run behavior with the default safety guard enabled:
+
+```text
+1. Connect to source over SSH.
+2. Run: sudo -n timeshift --list
+3. Verify the configured source against state.json using Btrfs UUID metadata.
+4. Run: sudo -n timeshift --create --scripted --comments <comment>
+5. Run: sudo -n timeshift --list again.
+6. Sync the newly created snapshot like any other Timeshift snapshot.
+```
+
+If the UUID verification cannot find a trusted source anchor, the app refuses to
+create the manual snapshot. This protects against accidentally creating a stale
+snapshot on the wrong mounted OS.
+
+Dry-run behavior only prints that the manual snapshot would be created. It does
+not create anything on the source.
+
+If `--snapshot <name>` is used, automatic manual creation is skipped because the
+command is a targeted sync of one existing snapshot.
+
+The comment marker is used by destination pruning when the comment is available
+in `timeshift --list` and saved in `state.json`. This lets the app recognize
+its own on-demand snapshots separately from your normal/manual Timeshift
+on-demand snapshots.
+
+The cleanup switches are independent:
+
+```text
+manual_snapshot.enabled          create a new app-tagged source snapshot before sync
+manual_snapshot.cleanup_enabled  prune only app-created on-demand snapshots by marker
+retention.cleanup_ondemand       prune normal/user-created Timeshift tag O snapshots
+```
+
+Default safety behavior keeps normal/user-created on-demand snapshots unless you
+explicitly set `cleanup_ondemand = true`. Real deletion still requires prune to
+run in non-dry-run mode and `--yes-delete`.
 
 ## Fast discovery for many snapshots
 
@@ -346,7 +568,7 @@ file so it is easy to recognize in Home Assistant:
   "timestamp": "2026-06-24T10:40:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.9"
+  "version": "0.2.11"
 }
 ```
 
@@ -367,7 +589,7 @@ stderr text that the app captured:
   "timestamp": "2026-06-24T10:41:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.9"
+  "version": "0.2.11"
 }
 ```
 
@@ -377,76 +599,57 @@ only publishes simple JSON status messages.
 
 ### Home Assistant Pushover automation example
 
-Important details:
+This example uses the same Home Assistant automation YAML shape as the UI/exported automation format:
 
-- The MQTT trigger `topic` belongs directly under `trigger: mqtt`; do not put it
-  under an `options:` key.
-- `trigger.payload_json` only exists when the automation is actually started by
-  an MQTT message containing valid JSON. If you press **Run actions** manually
-  from the automation editor, there is no MQTT payload, so the example below
-  includes a safe fallback.
-- To test the real path, publish a test MQTT message to the same topic from
-  **Developer Tools -> MQTT** instead of only running the actions manually.
+- top-level `triggers:` instead of legacy `trigger:`
+- top-level `actions:` instead of legacy `action:`
+- MQTT topic under `options:` for the MQTT trigger
 
+Important: `trigger.payload_json` only exists when the automation is actually started by an MQTT message containing valid JSON. If you press **Run actions** manually from the automation editor, there may be no MQTT payload. For real testing, publish a test MQTT message to the same topic from **Developer Tools -> MQTT**.
 
-
-This version deliberately uses the older singular `trigger:` / `action:` automation keys and a one-line quoted `description:`. Home Assistant still understands this format, and it avoids the YAML parser problem you hit around the old folded multiline description near line 5.
 ```yaml
-alias: "Timeshift Btrfs Sync - MQTT Pushover"
-description: "Send Pushover notification when timeshift-btrfs-sync reports success or failure over MQTT."
-trigger:
-  - platform: mqtt
-    topic: "homeassistant/timeshift-btrfs-sync/kubuntu-timeshift/status"
-condition: []
-action:
-  - variables:
-      sync_success: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.success | default(false) | bool }}
-      sync_name: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.name | default(p.job | default('timeshift-btrfs-sync')) }}
-      sync_command: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.command | default('manual/test') }}
-      sync_exit_code: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.exit_code | default('unknown') }}
-      sync_error: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.error | default('Automation was run without an MQTT JSON trigger') }}
-      sync_stderr: >-
-        {% set p = trigger.payload_json if trigger is defined and trigger.payload_json is defined else {} %}
-        {{ p.stderr | default('No MQTT trigger payload_json was available') }}
+alias: Timeshift Btrfs Sync - MQTT Pushover
+description: >-
+  Send Pushover notification when timeshift-btrfs-sync reports success or
+  failure over MQTT.
+triggers:
+  - trigger: mqtt
+    options:
+      topic: homeassistant/timeshift-btrfs-sync/kubuntu-timeshift/status
+actions:
   - choose:
       - conditions:
           - condition: template
-            value_template: "{{ sync_success | bool }}"
+            value_template: "{{ trigger.payload_json.success | default(false) | bool }}"
         sequence:
           - action: notify.pushover
             data:
-              title: "✅ Btrfs sync successful"
+              title: ✅ Btrfs sync successful
               message: >-
-                {{ sync_name }} finished successfully.
+                {{ trigger.payload_json.name | default(trigger.payload_json.job
+                | default('timeshift-btrfs-sync')) }} finished successfully.
 
-                Command: {{ sync_command }}
-                Exit code: {{ sync_exit_code }}
+                Command: {{ trigger.payload_json.command | default('unknown') }}
+                Exit code: {{ trigger.payload_json.exit_code | default(0) }}
               data:
                 priority: 0
                 sound: pushover
     default:
       - action: notify.pushover
         data:
-          title: "❌ Btrfs sync failed"
+          title: ❌ Btrfs sync failed
           message: >-
-            {{ sync_name }} failed.
+            {{ trigger.payload_json.name | default(trigger.payload_json.job |
+            default('timeshift-btrfs-sync')) }} failed.
 
-            Command: {{ sync_command }}
-            Exit code: {{ sync_exit_code }}
+            Command: {{ trigger.payload_json.command | default('unknown') }}
+            Exit code: {{ trigger.payload_json.exit_code | default('unknown') }}
 
-            Error: {{ sync_error }}
+            Error: {{ trigger.payload_json.error | default('No error message')
+            }}
 
-            Last stderr: {{ sync_stderr }}
+            Last stderr: {{ trigger.payload_json.stderr | default('No stderr
+            captured') }}
           data:
             priority: 1
             sound: siren
@@ -925,7 +1128,7 @@ Applies destination retention rules without syncing first.
 
 ### `create-manual`
 
-Creates a source Timeshift on-demand/manual snapshot with tag `O`.
+Creates a source Timeshift on-demand/manual snapshot. Timeshift assigns tag `O` by default when no other tag is given.
 
 | Flag | Meaning |
 |---|---|
@@ -973,6 +1176,17 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `timeout` | MQTT connect/publish timeout in seconds. |
 | `notify_on_success` | If true, publish success JSON after a successful command. |
 | `notify_on_failure` | If true, publish failure JSON after a failed command. |
+
+### `[manual_snapshot]`
+
+| Option | Meaning |
+|---|---|
+| `enabled` | If true, `sync` creates a source Timeshift on-demand/tag `O` snapshot before reading the source list. The command intentionally omits explicit `--tags O` because Timeshift defaults to `O` and some versions reject explicit `O`. Dry-run only previews it. This only controls creation. |
+| `cleanup_enabled` | If true, destination prune may delete old app-created on-demand snapshots recognized by marker. This does not affect normal/user-created on-demand snapshots. Default `true`. |
+| `require_verified_source` | If true, automatic manual snapshot creation first requires a UUID-confirmed match between the configured source and existing `state.json` history. Default `true`. |
+| `comment` | Comment passed to `timeshift --create --comments`. Keep the marker text inside this comment. |
+| `marker` | Case-insensitive text used to recognize app-created manual snapshots in saved state comments. |
+| `retention_count` | Number of newest app-created/manual snapshots to keep by marker during destination prune. Default `10`; set `0` to keep none except global safety keeps. Set `cleanup_enabled = false` to keep all app-created snapshots. |
 
 ### `[ssh]`
 
@@ -1040,13 +1254,53 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `weekly` | Number of newest `W` snapshots to keep. |
 | `monthly` | Number of newest `M` snapshots to keep. |
 | `boot` | Number of newest `B` snapshots to keep. |
-| `ondemand` | Number of newest `O` snapshots to keep. |
+| `ondemand` | Number of newest normal/user-created Timeshift tag `O` snapshots to keep when `cleanup_ondemand = true`. Default `10`. |
+| `cleanup_ondemand` | If true, destination prune may delete old normal/user-created Timeshift tag `O` snapshots. Default `false` for safety. App-created on-demand cleanup is controlled separately by `[manual_snapshot].cleanup_enabled`. |
 | `yearly` | Optional non-native `Y` retention count. |
 | `keep_latest` | Always keep newest synced snapshot. |
 | `keep_latest_common_parent` | Keep newest likely common parent for incremental safety. |
 | `protected_snapshots` | Snapshot names that are never pruned. |
 
 ## Changelog
+
+### 0.2.18
+
+- Reordered the README front section to put project name first, then the AI-assisted warning, disclaimer, data-loss warning, and license.
+- Expanded the disclaimer and data-loss warning text.
+- Added an explicit MIT license section near the top of the README.
+
+### 0.2.17
+
+- Manual Timeshift snapshot creation no longer passes explicit `--tags O`.
+- Timeshift defaults manual creates to on-demand/tag `O`, and some versions reject explicit `O` despite listing it as valid.
+- The generated command is now `timeshift --create --scripted --comments <comment>`.
+
+### 0.2.16
+
+- Manual Timeshift snapshot creation now uses readable remote-safe double-quote escaping for the `--comments` value.
+- This avoids noisy nested single-quote escapes in terminal output and log files.
+
+### 0.2.14
+
+- Added `manual_snapshot.require_verified_source`, default `true`.
+- Automatic manual snapshot creation now runs `timeshift --list` first and verifies the configured source against `state.json` with Btrfs UUID metadata before creating a new Timeshift snapshot.
+- If the newest state snapshot is not on the source, the app walks backward through state until it finds a source snapshot that still exists and matches by UUID.
+- If no UUID-confirmed source anchor exists, the app refuses to create a manual snapshot instead of risking creation on the wrong mounted OS/source.
+- The same guard also applies to the one-off `create-manual` command by default.
+
+### 0.2.13
+
+- Added independent cleanup controls for app-created and normal/user-created on-demand snapshots.
+- `manual_snapshot.cleanup_enabled` controls pruning of app-created tag `O` snapshots recognized by marker.
+- `retention.cleanup_ondemand` controls pruning of normal/user-created Timeshift tag `O` snapshots.
+- Default safety behavior keeps normal/user-created on-demand snapshots unless explicitly allowed.
+
+### 0.2.12
+
+- Added `[manual_snapshot]` config section.
+- `sync --run` can create a source Timeshift tag `O` snapshot before sync.
+- The created snapshot uses a configurable comment and marker.
+- Added marker-based app-created on-demand retention with default count 10.
 
 ### 0.2.9
 
@@ -1184,7 +1438,3 @@ Every option below is also present in `config.example.toml`. Options commented o
 - Added more explanatory comments/docstrings around functions, commands, config sections, and performance options.
 - Added `VERSIONING.md` explaining the zip count and corrected version sequence.
 
-## Disclaimer
-
-Test with throwaway data first. You are responsible for verifying that backups
-and restores work on your systems.

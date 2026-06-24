@@ -24,13 +24,74 @@ Corrected sequence:
 24th zip -> 0.2.4
 25th zip -> 0.2.5
 26th zip -> 0.2.6
-28th zip -> 0.2.9
-29th zip -> 0.2.10
+27th zip -> 0.2.7
+28th zip -> 0.2.8
+29th zip -> 0.2.9
+30th zip -> 0.2.10
+31st zip -> 0.2.11
+32nd zip -> 0.2.12
+33rd zip -> 0.2.13
+34th zip -> 0.2.14
+35th zip -> 0.2.15
+36th zip -> 0.2.16
+37th zip -> 0.2.17
+38th zip -> 0.2.18
 ```
 
-This build is the 29th zip in the corrected sequence, so its version is `0.2.10`.
+This build is version `0.2.18`.
 
-The next zip should be `0.3.0` or `0.2.10`, depending on whether the next change is a larger feature or a patch.
+The next zip should normally be `0.2.19` for a patch or `0.3.0` for a larger feature.
+
+
+## 0.2.18 - README warning/disclaimer order
+
+Docs-only update.
+
+- Reordered the README front matter as project name, AI-assisted warning, disclaimer, data-loss warning, and license.
+- Expanded the disclaimer and data-loss warning.
+- Added a top-level MIT license section pointing to `LICENSE`.
+
+## 0.2.17 - Timeshift on-demand tag workaround
+
+- Manual snapshot creation no longer passes explicit `--tags O`.
+- Timeshift defaults manual creates to on-demand/tag `O`, and some versions reject explicit `O` despite listing it as valid.
+- The generated command is now `timeshift --create --scripted --comments <comment>`.
+
+## 0.2.16 - Cleaner manual snapshot comment quoting
+
+- Manual Timeshift snapshot creation now quotes the `--comments` value with remote-safe double quotes.
+- This keeps logged SSH commands readable and avoids the noisy nested single-quote escape pattern.
+- The quoting still escapes characters that are special inside remote shell double quotes, including double quotes, `$`, backticks, backslashes, and line breaks.
+
+## 0.2.14 - Verified manual snapshot source guard
+
+- Added `manual_snapshot.require_verified_source`, default `true`.
+- Before automatic manual snapshot creation, the app now reads `timeshift --list` first.
+- The configured source must match existing `state.json` history by Btrfs UUID / destination received_uuid before Timeshift is asked to create a new tag `O` snapshot.
+- If the newest state snapshot is not present on the source, the app walks backward in state until it finds a UUID-confirmed source anchor.
+- If no trusted source anchor exists, the app refuses to create a manual snapshot to avoid writing to the wrong mounted OS/source.
+
+## 0.2.13 - Independent on-demand retention controls
+
+- Split app-created on-demand cleanup from normal/user-created Timeshift on-demand cleanup.
+- Added `manual_snapshot.cleanup_enabled` for pruning only app-created tag `O` snapshots recognized by the configured marker.
+- Added `retention.cleanup_ondemand` for pruning normal/user-created Timeshift tag `O` snapshots.
+- Default safety behavior keeps normal/user-created on-demand snapshots unless `cleanup_ondemand = true`.
+
+## 0.2.12 - Manual snapshot config
+
+- Added optional `[manual_snapshot]` config section.
+- `sync --run` can create a source Timeshift tag `O` snapshot before source discovery.
+- Created snapshots use a configurable comment and marker.
+- Added marker-based retention for app-created on-demand snapshots, default count 10.
+
+## 0.2.11 - Home Assistant UI YAML style fix
+
+Docs-only update.
+
+- Restored the Home Assistant MQTT/Pushover example to the UI/exported automation style using `triggers:`, `actions:`, and MQTT `options:`.
+- Removed the legacy singular `trigger:` / `action:` example from the README.
+- Kept the note that `trigger.payload_json` requires a real MQTT JSON trigger; manual **Run actions** tests may not provide it.
 
 ## 0.2.9
 
@@ -109,3 +170,15 @@ Docs-only update.
 
 - Fixed indentation and structure of the README Home Assistant MQTT Pushover automation example.
 - Reworked template variables so manual action tests do not fail when `trigger.payload_json` is absent.
+
+## 0.2.16 - Manual snapshot create diagnostics
+
+This build improves failure visibility for source Timeshift manual snapshot
+creation.
+
+If `timeshift --create` exits non-zero and Timeshift writes the useful reason to
+stdout instead of stderr, the app now mirrors that stdout to the terminal and
+includes both stdout and stderr in the raised command error. This is especially
+useful for debugging source-side Timeshift failures where the SSH command itself
+works, the source identity check passes, but Timeshift refuses to create the
+snapshot.

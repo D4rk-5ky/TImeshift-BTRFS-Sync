@@ -11,6 +11,45 @@ from .ssh import SSHConfig
 from .mqtt import MQTTConfig
 
 
+
+@dataclass(slots=True)
+class ManualSnapshotConfig:
+    """Optional source-side Timeshift on-demand snapshot creation and cleanup."""
+
+    # When true, `sync` asks source Timeshift to create a tag O snapshot before
+    # it reads the source snapshot list. Dry-run only prints what would happen.
+    enabled: bool = False
+
+    # Independent prune switch for on-demand snapshots created by this app.
+    # Matching is based on the configured marker in the saved Timeshift comment.
+    # Even when true, real deletion still requires prune to run and --yes-delete.
+    cleanup_enabled: bool = True
+
+    # Safety guard for automatic source-side snapshot creation. When true, the
+    # app first runs timeshift --list, walks state.json newest-to-oldest, and
+    # requires a UUID-confirmed match between the configured source and an
+    # already received destination snapshot before creating a new Timeshift
+    # on-demand snapshot. This prevents creating stale snapshots on the wrong
+    # mounted OS/source.
+    require_verified_source: bool = True
+
+    # Comment passed to `timeshift --create --comments`. The comment should
+    # contain marker so later retention can recognize snapshots created by this
+    # app, even though they are normal Timeshift on-demand snapshots.
+    comment: str = "ts-btrfs-sync automatic on-demand snapshot"
+
+    # Marker used when applying the app-created on-demand retention rule to
+    # destination state entries. Matching is case-insensitive.
+    marker: str = "ts-btrfs-sync"
+
+    # Destination retention for app-created on-demand snapshots. This is separate
+    # from retention.ondemand, which applies only to normal/user-created
+    # Timeshift O snapshots when retention.cleanup_ondemand = true.
+    # Set to 0 to delete all matching app-created snapshots except globally
+    # protected/newest snapshots. Disable cleanup_enabled to keep them all.
+    retention_count: int = 10
+
+
 @dataclass(slots=True)
 class SourceConfig:
     """Remote/source Timeshift and Btrfs settings."""
@@ -120,6 +159,13 @@ class RetentionConfig:
     boot: int = 5
     ondemand: int = 10
     yearly: int = 0
+
+    # Independent prune switch for normal/user-created Timeshift tag O snapshots.
+    # False is the safest default: user manual snapshots are kept unless this is
+    # explicitly enabled. App-created O snapshots are controlled separately by
+    # manual_snapshot.cleanup_enabled.
+    cleanup_ondemand: bool = False
+
     keep_latest: bool = True
     keep_latest_common_parent: bool = True
     protected_snapshots: list[str] = field(default_factory=list)
@@ -141,6 +187,7 @@ class AppConfig:
     stream: StreamConfig
     retention: RetentionConfig
     mqtt: MQTTConfig
+    manual_snapshot: ManualSnapshotConfig
     state_file: Path
     lock_file: Path
     log_dir: Path | None
@@ -305,11 +352,30 @@ def load_config(path: str | Path) -> AppConfig:
         boot=int(_as_int(retention_raw.get("boot"), "retention.boot", 5)),
         ondemand=int(_as_int(retention_raw.get("ondemand"), "retention.ondemand", 10)),
         yearly=int(_as_int(retention_raw.get("yearly"), "retention.yearly", 0)),
+        cleanup_ondemand=_as_bool(retention_raw.get("cleanup_ondemand"), "retention.cleanup_ondemand", False),
         keep_latest=_as_bool(retention_raw.get("keep_latest"), "retention.keep_latest", True),
         keep_latest_common_parent=_as_bool(retention_raw.get("keep_latest_common_parent"), "retention.keep_latest_common_parent", True),
         protected_snapshots=_string_list(retention_raw.get("protected_snapshots"), "retention.protected_snapshots"),
     )
 
+    manual_raw = raw.get("manual_snapshot", {})
+    if not isinstance(manual_raw, dict):
+        raise ConfigError("[manual_snapshot] must be a TOML table")
+    manual_comment = str(manual_raw.get("comment", "ts-btrfs-sync automatic on-demand snapshot")).strip()
+    manual_marker = str(manual_raw.get("marker", "ts-btrfs-sync")).strip()
+    manual_enabled = _as_bool(manual_raw.get("enabled"), "manual_snapshot.enabled", False)
+    if manual_enabled and not manual_comment:
+        raise ConfigError("manual_snapshot.comment must be non-empty when manual_snapshot.enabled = true")
+    if manual_enabled and not manual_marker:
+        raise ConfigError("manual_snapshot.marker must be non-empty when manual_snapshot.enabled = true")
+    manual_snapshot = ManualSnapshotConfig(
+        enabled=manual_enabled,
+        comment=manual_comment or "ts-btrfs-sync automatic on-demand snapshot",
+        marker=manual_marker or "ts-btrfs-sync",
+        cleanup_enabled=_as_bool(manual_raw.get("cleanup_enabled"), "manual_snapshot.cleanup_enabled", True),
+        require_verified_source=_as_bool(manual_raw.get("require_verified_source"), "manual_snapshot.require_verified_source", True),
+        retention_count=int(_as_int(manual_raw.get("retention_count"), "manual_snapshot.retention_count", 10)),
+    )
 
     mqtt_raw = raw.get("mqtt", {})
     if not isinstance(mqtt_raw, dict):
@@ -369,6 +435,7 @@ def load_config(path: str | Path) -> AppConfig:
         stream=stream,
         retention=retention,
         mqtt=mqtt,
+        manual_snapshot=manual_snapshot,
         state_file=state_file,
         lock_file=lock_file,
         log_dir=log_dir,

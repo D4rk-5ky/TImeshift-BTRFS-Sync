@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.2.8
+# Config and CLI audit for v0.2.16
 
 This file records the audit requested after v0.2.3.
 
@@ -6,7 +6,7 @@ This file records the audit requested after v0.2.3.
 
 - All argparse command flags are present in `python3 -m timeshift_btrfs_sync --help` or the matching subcommand help.
 - All argparse command flags are described in `README.md` under **Complete CLI command reference**.
-- All config options parsed by `timeshift_btrfs_sync/config.py`, including `[mqtt]`, are present in `config.example.toml`.
+- All config options parsed by `timeshift_btrfs_sync/config.py`, including `[mqtt]` and `[manual_snapshot]`, are present in `config.example.toml`.
 - All config options are described in `README.md` under **Complete config option reference**.
 - `init-config` now writes the same complete commented example as `config.example.toml`.
 
@@ -86,6 +86,15 @@ This file records the audit requested after v0.2.3.
 - `notify_on_success`
 - `notify_on_failure`
 
+### `[manual_snapshot]`
+
+- `enabled`
+- `cleanup_enabled`
+- `require_verified_source`
+- `comment`
+- `marker`
+- `retention_count`
+
 ### `[ssh]`
 
 - `host`
@@ -143,6 +152,7 @@ This file records the audit requested after v0.2.3.
 - `monthly`
 - `boot`
 - `ondemand`
+- `cleanup_ondemand`
 - `yearly`
 - `keep_latest`
 - `keep_latest_common_parent`
@@ -183,3 +193,47 @@ python3 -m timeshift_btrfs_sync show-state --help
 - Confirmed `destination.set_compression_after_receive` remains documented and present in `config.example.toml`, but now defaults to `false`.
 - Confirmed `config.example.toml` parses with the new default.
 - Confirmed `init-config` writes the same full commented config example.
+
+
+## 0.2.14 audit addition
+
+- Added and documented `manual_snapshot.require_verified_source`.
+- Confirmed `config.example.toml` includes the new source verification guard.
+- Confirmed `init-config` writes the same full commented config including the verification guard.
+- Confirmed no new CLI flags were needed; verified automatic manual snapshot creation is controlled from config.
+- Confirmed the existing `create-manual` command also respects `manual_snapshot.require_verified_source` by default.
+
+
+## 0.2.13 audit addition
+
+- Added and documented `manual_snapshot.cleanup_enabled`.
+- Added and documented `retention.cleanup_ondemand`.
+- Confirmed `config.example.toml` includes both independent on-demand cleanup controls.
+- Confirmed `init-config` writes the same full commented config including the new cleanup controls.
+- Confirmed no new CLI flags were needed; on-demand creation/cleanup is controlled from config plus existing prune/--yes-delete safety.
+
+
+## 0.2.16 audit addition
+
+- Confirmed no new config options were added.
+- Confirmed no new CLI flags were added.
+- Confirmed manual snapshot command building now uses readable remote-safe double-quote escaping for `timeshift --create --comments`.
+
+
+## 0.2.16 audit addition
+
+No new CLI flags or config options were added. The audit remains valid.
+
+Runtime behavior changed for failed manual Timeshift snapshot creation:
+`timeshift_btrfs_sync.commands.CommandError` now includes both stdout and stderr
+when available, and `timeshift_btrfs_sync.timeshift.create_remote_manual_snapshot`
+asks the command runner to mirror stdout when the create command fails.
+
+
+## 0.2.18 audit note
+
+Docs-only README front matter update. No CLI flags or config options changed.
+
+## 0.2.17 audit note
+
+Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshift defaults creates to on-demand/tag O and some versions reject explicit O.
