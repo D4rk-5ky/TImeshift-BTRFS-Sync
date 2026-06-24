@@ -4,3 +4,12 @@ timeshift_btrfs_sync/__pycache__
 
 # But keep the example config tracked
 !config.example.config
+
+# Runtime logs
+logs/
+**/logs/
+
+# Python cache files
+__pycache__/
+**/__pycache__/
+*.py[cod]
