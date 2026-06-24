@@ -11,9 +11,11 @@ Corrected sequence:
 11th zip -> 0.1.1
 12th zip -> 0.1.2
 13th zip -> 0.1.3
+14th zip -> 0.1.4
+15th zip -> 0.1.5
 ```
 
-This build is the 13th zip in that corrected sequence, so its version is
-`0.1.3`.
+This build is the 15th zip in that corrected sequence, so its version is
+`0.1.5`.
 
-The next zip should be `0.1.4`.
+The next zip should be `0.1.6`.

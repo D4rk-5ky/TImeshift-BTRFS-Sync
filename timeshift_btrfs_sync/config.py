@@ -33,6 +33,13 @@ class SourceConfig:
     # from another OS/source as parents while keeping discovery fast.
     verify_incremental_parent: bool = True
 
+    # Performance/safety balance. When true, the app verifies the first
+    # incremental parent for each subvolume name during a run, then trusts the
+    # Btrfs incremental chain for later snapshots in the same run. This avoids
+    # repeated source/destination UUID metadata checks for every incremental
+    # send while still preventing the initial "wrong OS/source" mistake.
+    verify_incremental_parent_once_per_run: bool = True
+
     # Safety option. When false, the app refuses incremental send if existing
     # destination snapshots cannot be proven to match the current source.
     allow_incremental_without_parent_match: bool = False
@@ -228,6 +235,7 @@ def load_config(path: str | Path) -> AppConfig:
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
         verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
         verify_incremental_parent=_as_bool(source_raw.get("verify_incremental_parent"), "source.verify_incremental_parent", True),
+        verify_incremental_parent_once_per_run=_as_bool(source_raw.get("verify_incremental_parent_once_per_run"), "source.verify_incremental_parent_once_per_run", True),
         allow_incremental_without_parent_match=_as_bool(source_raw.get("allow_incremental_without_parent_match"), "source.allow_incremental_without_parent_match", False),
         send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
         send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),

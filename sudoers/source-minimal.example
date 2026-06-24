@@ -1,4 +1,4 @@
 # /etc/sudoers.d/ts-btrfs-source
 # Edit with: sudo visudo -f /etc/sudoers.d/ts-btrfs-source
-btrbk-source ALL=(root) NOPASSWD: /usr/bin/btrfs *
-btrbk-source ALL=(root) NOPASSWD: /usr/bin/timeshift *
+ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/btrfs *
+ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/timeshift *

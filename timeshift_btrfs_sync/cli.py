@@ -15,14 +15,14 @@ from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.1.1 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.1.5 config
 name = "kubuntu-timeshift"
 default_dry_run = true
 prune_after_sync = false
 
 [ssh]
 host = "source-machine.example.lan"
-user = "btrbk-source"
+user = "ts-btrfs-sync-user"
 # identity_file = "/root/.ssh/timeshift-btrfs-sync"
 compression = false
 # cipher = "chacha20-poly1305@openssh.com"
@@ -38,6 +38,7 @@ cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 verify_subvolumes_at_discovery = false
 verify_incremental_parent = true
+verify_incremental_parent_once_per_run = true
 allow_incremental_without_parent_match = false
 send_compressed_data = false
 # send_proto = 2

@@ -79,12 +79,19 @@ def mark_subvolume_synced(
     snap_state["tags"] = snapshot.tags
     snap_state["comment"] = snapshot.comment
     snap_state["created"] = snapshot.created
+    # Prefer explicit source metadata when we have it. In the fast path we do
+    # not read remote source UUID metadata for every send. After `btrfs receive`,
+    # the local destination `Received UUID` is the UUID of the source subvolume
+    # that was sent, so we can still save the useful source identity using only
+    # local metadata.
+    inferred_source_uuid = subvolume.uuid or (received_meta.received_uuid if received_meta else None)
+
     snap_state.setdefault("subvolumes", {})[subvolume.name] = {
         "status": "ok",
         "name": subvolume.name,
         "source_path": subvolume.path,
         "send_path": send_path,
-        "source_uuid": subvolume.uuid,
+        "source_uuid": inferred_source_uuid,
         "source_parent_uuid": subvolume.parent_uuid,
         "source_received_uuid": subvolume.received_uuid,
         "destination_path": str(destination_path),
@@ -93,6 +100,7 @@ def mark_subvolume_synced(
         "destination_received_uuid": received_meta.received_uuid if received_meta else None,
         "parent_snapshot": parent_snapshot,
         "parent_source_path": parent_source_path,
+        "source_uuid_inferred_from_destination_received_uuid": bool(subvolume.uuid is None and received_meta and received_meta.received_uuid),
     }
 
 

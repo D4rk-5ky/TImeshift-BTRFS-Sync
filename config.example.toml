@@ -17,7 +17,7 @@ prune_after_sync = false
 host = "source-machine.example.lan"
 
 # Dedicated source SSH user.
-user = "btrbk-source"
+user = "ts-btrfs-sync-user"
 
 # Optional SSH port.
 # port = 22
@@ -76,6 +76,12 @@ verify_subvolumes_at_discovery = false
 # destination `received_uuid` metadata. This prevents accidentally mixing
 # snapshots from another OS/source into the same backup target.
 verify_incremental_parent = true
+
+# Performance/safety balance. When true, the first incremental parent for each
+# subvolume name (@, @home) is verified during a run. Later incrementals in the
+# same run trust the chain that this process just created, avoiding repeated
+# remote/local UUID checks for every single incremental send.
+verify_incremental_parent_once_per_run = true
 
 # Dangerous escape hatch. Keep false. If true, the app may continue when it
 # cannot prove that the selected incremental parent matches the current source.

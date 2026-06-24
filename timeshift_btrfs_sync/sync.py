@@ -5,9 +5,10 @@ The important performance/safety rule in this version is:
 * Discovery is fast and only uses Timeshift names plus configured subvolume
   names. It does not run `btrfs subvolume show` and `btrfs property get` for
   every snapshot.
-* Before a real incremental send, the selected parent is verified with Btrfs
-  metadata on both sides. This keeps the protection against accidentally mixing
-  snapshots from different operating systems or different sources.
+* Before the first real incremental send for each subvolume name in a run, the
+  selected parent is verified with Btrfs metadata on both sides. Later
+  incrementals in the same run reuse that verified chain and only refresh local
+  destination metadata after receive.
 """
 
 from __future__ import annotations
@@ -273,12 +274,24 @@ def _filesystem_parent_candidates(config: AppConfig, snapshot_name: str, subvolu
     return candidates
 
 
-def _select_parent(config: AppConfig, ssh: SSHRunner, state: dict, source_by_name: dict[str, SnapshotMeta], snapshot: SnapshotMeta, subvolume_name: str, *, dry_run: bool) -> tuple[str | None, str | None]:
+def _select_parent(
+    config: AppConfig,
+    ssh: SSHRunner,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+    snapshot: SnapshotMeta,
+    subvolume_name: str,
+    *,
+    dry_run: bool,
+    verified_parent_subvolumes: set[str] | None = None,
+) -> tuple[str | None, str | None]:
     """Choose and optionally verify newest valid incremental parent.
 
     Fast discovery does not have metadata for every remote snapshot. This
     function keeps things fast by reading metadata only for the candidate parent
-    that would actually be used for an incremental send.
+    that would actually be used for the first incremental send for a subvolume
+    type during this run. After that, the chain is trusted for the same
+    subvolume name because every new parent was just created by this process.
     """
 
     source_names = set(source_by_name.keys())
@@ -310,17 +323,35 @@ def _select_parent(config: AppConfig, ssh: SSHRunner, state: dict, source_by_nam
             # parent before using it.
             return parent_name, _preview_send_path(config, parent_name, parent_subvol)
 
-        parent_send_path = _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
+        # Prefer the exact parent send_path already saved in state. This avoids
+        # re-running source-side readonly/cache checks for a parent that was just
+        # sent earlier in the same run. If state is missing/incomplete, fall back
+        # to ensuring the source parent path exists.
+        parent_state = state_parent_data.get(parent_name)
+        parent_send_path = parent_state.get("send_path") if parent_state else None
+        if not parent_send_path:
+            parent_send_path = _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
+
         if config.source.verify_incremental_parent:
-            _verify_incremental_parent(
-                config,
-                ssh,
-                parent_name=parent_name,
-                parent_subvol=parent_subvol,
-                parent_send_path=parent_send_path,
-                subvolume_name=subvolume_name,
-                state_parent=state_parent_data.get(parent_name),
+            already_verified = bool(
+                verified_parent_subvolumes is not None
+                and config.source.verify_incremental_parent_once_per_run
+                and subvolume_name in verified_parent_subvolumes
             )
+            if already_verified:
+                print(f"  {subvolume_name}: parent guard already verified earlier in this run; trusting incremental chain")
+            else:
+                _verify_incremental_parent(
+                    config,
+                    ssh,
+                    parent_name=parent_name,
+                    parent_subvol=parent_subvol,
+                    parent_send_path=parent_send_path,
+                    subvolume_name=subvolume_name,
+                    state_parent=parent_state,
+                )
+                if verified_parent_subvolumes is not None:
+                    verified_parent_subvolumes.add(subvolume_name)
         return parent_name, parent_send_path
 
     # No usable parent was found. If the destination is not empty, this may be a
@@ -376,6 +407,13 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             raise SyncError(f"Source snapshot not found: {only_snapshot}")
 
     transferred = 0
+
+    # Tracks which subvolume chains have already passed the expensive parent
+    # guard during this run. Example: once @ has matched source-parent UUID to
+    # destination received_uuid, later @ incrementals in the same run do not
+    # repeat the same remote/local metadata comparison.
+    verified_parent_subvolumes: set[str] = set()
+
     for snapshot in sorted(snapshots, key=lambda s: s.sort_key()):
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
@@ -402,7 +440,16 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             if dest_path.exists() and not dry_run:
                 raise SyncError(f"Destination path already exists but is not recorded as synced: {dest_path}")
 
-            parent_name, parent_send_path = _select_parent(config, ssh, state, source_by_name, snapshot, subvol_name, dry_run=dry_run)
+            parent_name, parent_send_path = _select_parent(
+                config,
+                ssh,
+                state,
+                source_by_name,
+                snapshot,
+                subvol_name,
+                dry_run=dry_run,
+                verified_parent_subvolumes=verified_parent_subvolumes,
+            )
             current_send_path = _preview_send_path(config, snapshot.name, subvolume) if dry_run else _ensure_source_send_path(config, ssh, snapshot.name, subvolume)
             mode = "incremental" if parent_send_path else "full"
 
@@ -412,18 +459,19 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 print(f"    source: {current_send_path}")
                 print(f"    dest:   {dest_path}")
                 if parent_name and config.source.verify_incremental_parent:
-                    print("    safety: real run will verify parent source UUID against destination received_uuid")
+                    if config.source.verify_incremental_parent_once_per_run:
+                        print("    safety: real run verifies the first incremental parent per subvolume, then trusts the chain")
+                    else:
+                        print("    safety: real run verifies every incremental parent source UUID against destination received_uuid")
                 if config.stream.use_mbuffer:
                     print(f"    stream: would use {' '.join(config.stream.command() or [])}")
                 continue
 
-            # Read source metadata for the exact path being sent. This is saved
-            # into state.json and is later used by the parent guard.
-            current_meta = _read_remote_send_metadata(config, ssh, current_send_path, subvol_name)
-            subvolume.uuid = current_meta.uuid
-            subvolume.parent_uuid = current_meta.parent_uuid
-            subvolume.received_uuid = current_meta.received_uuid
-            subvolume.readonly = current_meta.readonly
+            # Do not run remote `btrfs subvolume show` for every current send.
+            # The send path was already made safe by _ensure_source_send_path(),
+            # and after receive the local destination `Received UUID` tells us
+            # which source UUID arrived. That local metadata is enough for
+            # future parent-guard checks.
             subvolume.send_path = current_send_path
 
             # Create the local receive directory only after parent selection.

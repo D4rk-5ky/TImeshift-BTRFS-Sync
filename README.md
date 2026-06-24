@@ -3,7 +3,7 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.1.3
+# timeshift-btrfs-sync v0.1.5
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -12,10 +12,10 @@ does not accidentally use destination snapshots from another OS/source as parent
 
 ## Version
 
-This is the 11th zip build in the corrected sequence, so the version is:
+This is the 14th zip build in the corrected sequence, so the version is:
 
 ```text
-0.1.3
+0.1.5
 ```
 
 See `VERSIONING.md` for the count.
@@ -31,6 +31,8 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Optional `btrfs send --compressed-data`.
 - Fast discovery mode that avoids per-snapshot Btrfs checks during planning.
 - Incremental parent guard that compares current source UUID with destination received_uuid before using a parent.
+- Parent-guard cache: verify the first incremental parent per subvolume in a run, then trust the chain created by this process.
+- Faster state updates: after receive, update metadata from local destination `Received UUID` instead of remote source UUID checks for every current send.
 - Comments/docstrings explaining sections, functions, commands, and code paths.
 
 ## Source sudo remains minimal
@@ -38,15 +40,15 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 The source still only needs passwordless sudo for Btrfs and Timeshift:
 
 ```sudoers
-btrbk-source ALL=(root) NOPASSWD: /usr/bin/btrfs *
-btrbk-source ALL=(root) NOPASSWD: /usr/bin/timeshift *
+ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/btrfs *
+ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/timeshift *
 ```
 
 What those lines allow:
 
 - `sudo -n timeshift --list` for snapshot discovery.
 - `sudo -n timeshift --create --scripted --tags O ...` for manual snapshots.
-- `sudo -n btrfs subvolume show ...` for UUID metadata when needed.
+- `sudo -n btrfs subvolume show ...` for UUID metadata when needed, mainly the first incremental parent per subvolume per run.
 - `sudo -n btrfs property get -ts ... ro` for read-only checks when a subvolume is actually going to be sent.
 - `sudo -n btrfs subvolume create ...` for send-cache snapshot parents.
 - `sudo -n btrfs subvolume snapshot -r ...` for read-only send-cache snapshots.
@@ -148,13 +150,15 @@ The default config is:
 [source]
 verify_subvolumes_at_discovery = false
 verify_incremental_parent = true
+verify_incremental_parent_once_per_run = true
 allow_incremental_without_parent_match = false
 ```
 
 Meaning:
 
 - discovery stays fast,
-- real incremental parents are checked,
+- the first real incremental parent for each subvolume name is checked,
+- later incrementals in the same run trust the chain this process just created,
 - unsafe/unproven parents are refused.
 
 If the destination has no snapshots yet, the first send is full. After a full
@@ -165,6 +169,24 @@ If `state.json` is missing but destination snapshots exist, the app can still
 look for matching date-named snapshots on disk and compare source UUID against
 destination `Received UUID`. If no valid match can be proven, it stops and asks
 you to use an empty/separate `target_root`.
+
+### Parent guard is now once per subvolume per run
+
+Older guarded builds verified every incremental parent. With many incrementals,
+that still caused repeated remote/local metadata commands. This build verifies
+only the first incremental parent for each subvolume name during one run:
+
+```text
+@ first incremental      -> verify source UUID vs destination received_uuid
+@ later incrementals     -> trust chain created by this process
+@home first incremental  -> verify source UUID vs destination received_uuid
+@home later incrementals -> trust chain created by this process
+```
+
+After every receive, the app still reads local destination metadata and updates
+`state.json`. The source UUID for the just-received snapshot is inferred from the
+local destination `Received UUID`, so the app no longer needs a remote
+`btrfs subvolume show` for every current snapshot merely to refresh state.
 
 ## SSH options
 
@@ -185,7 +207,7 @@ What it does:
 Resulting command shape:
 
 ```bash
-ssh -C -c chacha20-poly1305@openssh.com btrbk-source@source 'sudo -n btrfs send ...'
+ssh -C -c chacha20-poly1305@openssh.com ts-btrfs-sync-user@source 'sudo -n btrfs send ...'
 ```
 
 ## SSH password or identity file
@@ -195,7 +217,7 @@ Recommended key-based auth:
 ```toml
 [ssh]
 host = "source-machine.example.lan"
-user = "btrbk-source"
+user = "ts-btrfs-sync-user"
 identity_file = "/root/.ssh/timeshift-btrfs-sync"
 extra_args = ["-o", "BatchMode=yes"]
 ```
@@ -210,7 +232,7 @@ Optional password auth through `sshpass` on the destination:
 ```toml
 [ssh]
 host = "source-machine.example.lan"
-user = "btrbk-source"
+user = "ts-btrfs-sync-user"
 password_file = "/root/.ssh/timeshift-btrfs-sync.password"
 extra_args = ["-o", "StrictHostKeyChecking=accept-new"]
 ```
@@ -323,6 +345,18 @@ What the commands do:
 - `sync --run --limit 1` performs one real subvolume transfer for safe testing.
 
 ## Changelog
+
+### 0.1.5
+
+- Optimized incremental parent guard to verify once per subvolume name per run by default.
+- Reuses saved parent `send_path` from `state.json` when possible.
+- Stops reading remote source UUID metadata for every current send; state is updated from local destination `Received UUID` after receive.
+- Keeps `source.verify_incremental_parent = true` as the safety default.
+
+### 0.1.4
+
+- Renamed the example source SSH/sudo user to `ts-btrfs-sync-user` everywhere.
+- No intended code behavior change.
 
 ### 0.1.3
 

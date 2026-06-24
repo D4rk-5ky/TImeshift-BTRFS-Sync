@@ -70,14 +70,16 @@ Btrfs checks happen later only for subvolumes that are actually being sent.
 
 ## Incremental parent guard
 
-Fast discovery avoids metadata checks for every snapshot, but the selected
-incremental parent is still checked before real send. The app compares:
+Fast discovery avoids metadata checks for every snapshot, but the first selected
+incremental parent for each subvolume name is still checked before real send.
+Later incrementals in the same run trust the chain that this process just
+created. The app compares:
 
 ```text
 source parent UUID == destination parent Received UUID
 ```
 
-Commands used for one selected parent:
+Commands used for the first selected parent for a subvolume during a run:
 
 ```bash
 sudo -n btrfs subvolume show <source-parent-send-path>
@@ -119,8 +121,9 @@ Incremental send is chosen in `sync.py` using state from `state.json`:
 
 1. Find the newest older snapshot already received for the same subvolume.
 2. Ensure the source still has that parent snapshot/cache path.
-3. Run `btrfs send -p <parent> <current>`.
-4. Update `state.json` only after receive succeeds.
+3. Verify the first incremental parent for each subvolume name during the run, unless disabled.
+4. Run `btrfs send -p <parent> <current>`.
+5. Update `state.json` only after receive succeeds, using local destination metadata when possible.
 
 ## Compression logic
 
