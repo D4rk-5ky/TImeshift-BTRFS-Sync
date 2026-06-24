@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.2.5 config
+# timeshift-btrfs-sync v0.2.7 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -21,6 +21,43 @@ prune_after_sync = false
 #   *.btrfs-out = btrfs send/receive verbose output and send/receive commands
 #   *.err = stderr/error output
 log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
+
+
+[mqtt]
+# Optional MQTT notifications for Home Assistant or another MQTT consumer.
+# This feature uses the paho-mqtt Python module. Install optional dependency with:
+#   python3 -m pip install -e '.[mqtt]'
+#
+# If enabled = false, paho-mqtt is not required and nothing is published.
+enabled = false
+
+# MQTT broker address and port. For Home Assistant add-on broker this is often
+# the HA host/IP and port 1883.
+host = "homeassistant.local"
+port = 1883
+
+# Topic where JSON status messages are published.
+# Home Assistant can use this topic in an MQTT sensor or automation trigger.
+topic = "timeshift-btrfs-sync/kubuntu-timeshift/status"
+
+# Optional MQTT authentication. Use either password or password_file, not both.
+# username = "mqtt-user"
+# password = "mqtt-password"
+# password_file = "/root/.config/ts-btrfs-mqtt.password"
+
+# Optional fixed MQTT client id. Blank/omitted creates one from the local hostname.
+# client_id = "ts-btrfs-kubuntu-timeshift"
+
+# MQTT publish options.
+# qos must be 0, 1, or 2. retain=true lets Home Assistant see the last known status
+# immediately after restart, but retain=false avoids stale retained status messages.
+qos = 0
+retain = false
+timeout = 10
+
+# Control whether success and/or failure messages are sent.
+notify_on_success = true
+notify_on_failure = true
 
 # Optional internal metadata paths. Omit these to use defaults under target_root:
 #   <target_root>/.ts-btrfs-sync/state.json
@@ -167,8 +204,11 @@ compression = "zstd"
 # Before receive, set compression on the destination snapshot parent directory.
 set_compression_before_receive = true
 
-# After receive, try to set compression property on the received subvolume too.
-set_compression_after_receive = true
+# After receive, optionally try to set compression on the received subvolume.
+# Default false because received Btrfs snapshots are normally read-only, and
+# setting properties on a read-only subvolume fails. Leave false unless you
+# intentionally make received snapshots writable before setting properties.
+set_compression_after_receive = false
 
 [stream]
 # Optional mbuffer between SSH send and local receive.

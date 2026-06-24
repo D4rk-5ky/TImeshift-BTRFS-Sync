@@ -8,6 +8,7 @@ from typing import Any
 import tomllib
 
 from .ssh import SSHConfig
+from .mqtt import MQTTConfig
 
 
 @dataclass(slots=True)
@@ -70,7 +71,7 @@ class DestinationConfig:
 
     compression: str | None = None
     set_compression_before_receive: bool = True
-    set_compression_after_receive: bool = True
+    set_compression_after_receive: bool = False
 
 
 @dataclass(slots=True)
@@ -139,6 +140,7 @@ class AppConfig:
     destination: DestinationConfig
     stream: StreamConfig
     retention: RetentionConfig
+    mqtt: MQTTConfig
     state_file: Path
     lock_file: Path
     log_dir: Path | None
@@ -277,7 +279,7 @@ def load_config(path: str | Path) -> AppConfig:
         cleanup_incomplete_receive=_as_bool(destination_raw.get("cleanup_incomplete_receive"), "destination.cleanup_incomplete_receive", True),
         compression=_compression_value(destination_raw.get("compression")),
         set_compression_before_receive=_as_bool(destination_raw.get("set_compression_before_receive"), "destination.set_compression_before_receive", True),
-        set_compression_after_receive=_as_bool(destination_raw.get("set_compression_after_receive"), "destination.set_compression_after_receive", True),
+        set_compression_after_receive=_as_bool(destination_raw.get("set_compression_after_receive"), "destination.set_compression_after_receive", False),
     )
 
     stream_raw = raw.get("stream", {})
@@ -308,6 +310,48 @@ def load_config(path: str | Path) -> AppConfig:
         protected_snapshots=_string_list(retention_raw.get("protected_snapshots"), "retention.protected_snapshots"),
     )
 
+
+    mqtt_raw = raw.get("mqtt", {})
+    if not isinstance(mqtt_raw, dict):
+        raise ConfigError("[mqtt] must be a TOML table")
+    mqtt_port = mqtt_raw.get("port", 1883)
+    if not isinstance(mqtt_port, int) or mqtt_port <= 0:
+        raise ConfigError("mqtt.port must be a positive integer")
+    mqtt_qos = mqtt_raw.get("qos", 0)
+    if not isinstance(mqtt_qos, int) or mqtt_qos not in {0, 1, 2}:
+        raise ConfigError("mqtt.qos must be 0, 1, or 2")
+    mqtt_timeout = mqtt_raw.get("timeout", 10)
+    if not isinstance(mqtt_timeout, int) or mqtt_timeout <= 0:
+        raise ConfigError("mqtt.timeout must be a positive integer")
+    mqtt_password = mqtt_raw.get("password") if isinstance(mqtt_raw.get("password"), str) and mqtt_raw.get("password") else None
+    mqtt_password_file = mqtt_raw.get("password_file") if isinstance(mqtt_raw.get("password_file"), str) and mqtt_raw.get("password_file") else None
+    if mqtt_password and mqtt_password_file:
+        raise ConfigError("Use either mqtt.password or mqtt.password_file, not both")
+    if mqtt_password_file and not Path(mqtt_password_file).expanduser().is_file():
+        raise ConfigError(f"mqtt.password_file does not exist or is not a file: {mqtt_password_file}")
+    mqtt_enabled = _as_bool(mqtt_raw.get("enabled"), "mqtt.enabled", False)
+    mqtt_host = str(mqtt_raw.get("host", "")).strip()
+    mqtt_topic = str(mqtt_raw.get("topic", "timeshift-btrfs-sync/status")).strip()
+    if mqtt_enabled and not mqtt_host:
+        raise ConfigError("mqtt.host is required when mqtt.enabled = true")
+    if mqtt_enabled and not mqtt_topic:
+        raise ConfigError("mqtt.topic is required when mqtt.enabled = true")
+    mqtt = MQTTConfig(
+        enabled=mqtt_enabled,
+        host=mqtt_host,
+        port=mqtt_port,
+        topic=mqtt_topic,
+        username=mqtt_raw.get("username") if isinstance(mqtt_raw.get("username"), str) and mqtt_raw.get("username") else None,
+        password=mqtt_password,
+        password_file=str(Path(mqtt_password_file).expanduser()) if mqtt_password_file else None,
+        client_id=mqtt_raw.get("client_id") if isinstance(mqtt_raw.get("client_id"), str) and mqtt_raw.get("client_id") else None,
+        qos=mqtt_qos,
+        retain=_as_bool(mqtt_raw.get("retain"), "mqtt.retain", False),
+        timeout=mqtt_timeout,
+        notify_on_success=_as_bool(mqtt_raw.get("notify_on_success"), "mqtt.notify_on_success", True),
+        notify_on_failure=_as_bool(mqtt_raw.get("notify_on_failure"), "mqtt.notify_on_failure", True),
+    )
+
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")
     lock_file = _as_path(raw.get("lock_file", str(target_root / ".ts-btrfs-sync" / "lock")), "lock_file")
 
@@ -324,6 +368,7 @@ def load_config(path: str | Path) -> AppConfig:
         destination=destination,
         stream=stream,
         retention=retention,
+        mqtt=mqtt,
         state_file=state_file,
         lock_file=lock_file,
         log_dir=log_dir,

@@ -3,19 +3,19 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.2.5
+# timeshift-btrfs-sync v0.2.7
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
 This build keeps fast discovery, but adds an incremental parent guard so the app
-does not accidentally use destination snapshots from another OS/source as parents.
+does not accidentally use destination snapshots from another OS/source as parents. This build also adds optional MQTT status notifications for Home Assistant.
 
 ## Version
 
-This is the 24th zip build in the corrected sequence, so the version is:
+This is the 27th zip build in the corrected sequence, so the version is:
 
 ```text
-0.2.5
+0.2.7
 ```
 
 See `VERSIONING.md` for the count.
@@ -24,6 +24,13 @@ See `VERSIONING.md` for the count.
 
 A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
 
+- Prune-safe high-watermark sync: after destination pruning, the app skips older source snapshots at or below the newest UUID-confirmed state/source match instead of sending them again.
+- If the newest state snapshot is no longer listed on the source, the app walks backward through `state.json` until it finds a source snapshot that still exists and matches by Btrfs UUID.
+- Destination compression is no longer applied to read-only received subvolumes; after-receive compression is disabled by default and skipped if the subvolume is read-only.
+- New state entries store both the original Timeshift source UUID and the exact send-path UUID, which matters when writable snapshots are sent through a read-only cache.
+- Optional MQTT success/failure notifications using `paho-mqtt`.
+- Adds `timeshift_btrfs_sync/mqtt.py` so MQTT logic is kept in one file.
+- MQTT failure JSON includes the config `name`, command, exit code, error text, and latest stderr tail.
 - Better stderr handling: captured command stderr is mirrored to the terminal unless it is an expected quiet probe.
 - Recovery for interrupted receives: incomplete destination subvolumes can be deleted and retried automatically.
 - Clear separator after source cache cleanup before the next send/receive block.
@@ -293,6 +300,80 @@ LOCAL RECEIVE: sudo -n btrfs receive ...
 `mbuffer` progress is intentionally written to `.mbuffer`, not `.log`, so the normal
 log does not get flooded during large transfers. Btrfs verbose output is written to
 `.btrfs-out`, so it does not mix with mbuffer progress.
+
+## Optional MQTT notifications
+
+MQTT notifications are optional and controlled by the `[mqtt]` section in
+`config.toml`. If `mqtt.enabled = false`, the app does not import `paho-mqtt` and
+no MQTT message is sent.
+
+Install the optional MQTT dependency in the same virtual environment as the app:
+
+```bash
+python3 -m pip install -e '.[mqtt]'
+```
+
+Minimal example:
+
+```toml
+[mqtt]
+enabled = true
+host = "homeassistant.local"
+port = 1883
+topic = "timeshift-btrfs-sync/kubuntu-timeshift/status"
+username = "mqtt-user"
+password_file = "/root/.config/ts-btrfs-mqtt.password"
+qos = 0
+retain = false
+notify_on_success = true
+notify_on_failure = true
+```
+
+A success payload is JSON and includes the human-readable `name` from the config
+file so it is easy to recognize in Home Assistant:
+
+```json
+{
+  "state": "success",
+  "status": "success",
+  "success": true,
+  "job": "kubuntu-timeshift",
+  "name": "kubuntu-timeshift",
+  "command": "sync",
+  "exit_code": 0,
+  "error": "",
+  "stderr": "",
+  "timestamp": "2026-06-24T10:40:00+00:00",
+  "host": "backup-host",
+  "app": "timeshift-btrfs-sync",
+  "version": "0.2.7"
+}
+```
+
+A failure payload uses the same topic and includes the exit code plus the newest
+stderr text that the app captured:
+
+```json
+{
+  "state": "failure",
+  "status": "failure",
+  "success": false,
+  "job": "kubuntu-timeshift",
+  "name": "kubuntu-timeshift",
+  "command": "sync",
+  "exit_code": 1,
+  "error": "Command failed (1): ...",
+  "stderr": "ERROR: last stderr output here",
+  "timestamp": "2026-06-24T10:41:00+00:00",
+  "host": "backup-host",
+  "app": "timeshift-btrfs-sync",
+  "version": "0.2.7"
+}
+```
+
+Home Assistant can consume this using an MQTT sensor or an automation trigger on
+the configured topic. This build does not create MQTT discovery entities yet; it
+only publishes simple JSON status messages.
 
 ## Interrupted receive recovery
 
@@ -591,21 +672,22 @@ Example:
 [destination]
 compression = "zstd"
 set_compression_before_receive = true
-set_compression_after_receive = true
+set_compression_after_receive = false
 ```
 
-What the app tries to run:
+What the app normally tries to run before receive:
 
 ```bash
 sudo -n btrfs property set /Backups/Kubuntu/timeshift-btrfs compression zstd
 sudo -n btrfs property set /Backups/Kubuntu/timeshift-btrfs/snapshots compression zstd
 sudo -n btrfs property set /Backups/Kubuntu/timeshift-btrfs/snapshots/2026-06-22_18-00-01 compression zstd
-sudo -n btrfs property set /Backups/Kubuntu/timeshift-btrfs/snapshots/2026-06-22_18-00-01/@ compression zstd
 ```
 
 Important notes:
 
 - This is best-effort.
+- The default is now `set_compression_after_receive = false` because received Btrfs snapshots are normally read-only. Trying to set compression on the received `@` or `@home` subvolume itself can fail with a read-only-property error.
+- If `set_compression_after_receive = true` is enabled, the app checks the received subvolume read-only property first and skips the after-receive compression change when it is read-only.
 - This should not break incremental send/receive.
 - Incremental send still depends on a valid unchanged parent existing on both source and destination.
 - `compression = "zstd:3"` is normalized to `zstd` because `btrfs property set ... compression` does not set levels.
@@ -627,6 +709,23 @@ What it does:
 - Optionally adds `--proto 2` if configured.
 - Attempts to preserve compressed source extents when supported.
 - This is separate from destination compression.
+
+## Prune-safe high-watermark sync
+
+When destination pruning deletes old received snapshots, the same old snapshots may still exist on the source in `timeshift --list`. The app should **not** send those old pruned snapshots again.
+
+Instead of storing a long tombstone list, the app now finds a confirmed sync floor from `state.json`:
+
+```text
+1. Walk state.json newest-to-oldest.
+2. Find the newest state snapshot that still exists in source `timeshift --list`.
+3. Confirm Btrfs UUID identity between source and destination.
+4. Skip source snapshots older than or equal to that confirmed floor.
+```
+
+If the newest state entry is no longer present on the source, the app automatically walks backward until it finds an older snapshot that is still present and UUID-confirmed. If no UUID-confirmed floor can be found, the app refuses to use the high-watermark skip and continues with the normal parent guard behavior.
+
+This means if you keep 6 hourly snapshots on the destination but the source still has 12, the next normal sync continues from the newest confirmed received snapshot instead of re-sending the 6 older pruned ones.
 
 ## Usual test flow
 
@@ -755,6 +854,24 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `state_file` | Optional path to state tracking file. Default: `<target_root>/.ts-btrfs-sync/state.json`. |
 | `lock_file` | Optional path to lock file. Default: `<target_root>/.ts-btrfs-sync/lock`. |
 
+### `[mqtt]`
+
+| Option | Meaning |
+|---|---|
+| `enabled` | Enable optional MQTT status notifications. If false, `paho-mqtt` is not required. |
+| `host` | MQTT broker hostname or IP. Required when `enabled = true`. |
+| `port` | MQTT broker port, normally `1883`. |
+| `topic` | MQTT topic used for JSON status messages. Required when enabled. |
+| `username` | Optional MQTT username. Anonymous MQTT is used if omitted. |
+| `password` | Optional MQTT password. Use either `password` or `password_file`, not both. |
+| `password_file` | Optional file containing the MQTT password. Safer than storing the password directly in config.toml. |
+| `client_id` | Optional fixed MQTT client id. If omitted, one is generated from the local hostname. |
+| `qos` | MQTT publish QoS. Must be `0`, `1`, or `2`. |
+| `retain` | If true, retain the last status message on the broker. Useful for HA sensors, but can show stale status. |
+| `timeout` | MQTT connect/publish timeout in seconds. |
+| `notify_on_success` | If true, publish success JSON after a successful command. |
+| `notify_on_failure` | If true, publish failure JSON after a failed command. |
+
 ### `[ssh]`
 
 | Option | Meaning |
@@ -799,7 +916,7 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `cleanup_incomplete_receive` | If true, delete and retry incomplete destination receives that are not recorded in state.json. Only Btrfs subvolumes or empty directories are auto-deleted. |
 | `compression` | Destination Btrfs compression property: `zstd`, `lzo`, `zlib`, `none`, or blank. `zstd:3` is normalized to `zstd`. |
 | `set_compression_before_receive` | If true, set compression on the receive parent before `btrfs receive`. |
-| `set_compression_after_receive` | If true, set compression on the received subvolume after receive. |
+| `set_compression_after_receive` | If true, try to set compression on the received subvolume after receive, but skip when it is read-only. Default false because received snapshots are normally read-only. |
 
 ### `[stream]`
 
@@ -828,6 +945,24 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `protected_snapshots` | Snapshot names that are never pruned. |
 
 ## Changelog
+
+### 0.2.7
+
+- Stopped trying to set destination compression on read-only received subvolumes.
+- Changed `destination.set_compression_after_receive` default to `false`.
+- If after-receive compression is explicitly enabled, read-only received subvolumes are detected and skipped safely.
+- Added prune-safe high-watermark sync: after pruning old destination snapshots, normal sync uses the newest UUID-confirmed state/source match as a floor and skips older source snapshots instead of re-sending them.
+- If the newest state snapshot is not present on the source, the app walks backward in `state.json` until it finds a source snapshot that exists and matches by Btrfs UUID.
+- New state entries store both `original_source_uuid` and `send_source_uuid`, so writable Timeshift snapshots sent through read-only cache can be verified correctly later.
+
+### 0.2.6
+
+- Added optional MQTT status notifications using `paho-mqtt`.
+- Added `timeshift_btrfs_sync/mqtt.py` so MQTT logic is isolated in one file.
+- Added `[mqtt]` config section with optional username/password/password_file.
+- Success payloads include config `name`, command, exit code, timestamp, host, app, and version.
+- Failure payloads include the same fields plus error text and the latest captured stderr tail.
+- Added optional dependency extra: `python3 -m pip install -e '.[mqtt]'`.
 
 ### 0.2.5
 

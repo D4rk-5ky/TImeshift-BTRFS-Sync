@@ -16,6 +16,7 @@ functions.
 | `timeshift_btrfs_sync/sync.py` | Main sync loop: discover snapshots, choose parent, send/receive, update state. |
 | `timeshift_btrfs_sync/commands.py` | Runs subprocess commands and manages the streaming pipeline with optional mbuffer. |
 | `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files. |
+| `timeshift_btrfs_sync/mqtt.py` | Owns optional MQTT JSON notifications using `paho-mqtt`. |
 | `timeshift_btrfs_sync/state.py` | Reads/writes `state.json` and finds incremental parents. |
 | `timeshift_btrfs_sync/retention.py` | Plans and applies destination pruning. |
 | `timeshift_btrfs_sync/lock.py` | Prevents overlapping runs with a lock file. |
@@ -39,6 +40,24 @@ Files created per run:
 The streaming pipeline in `commands.py` calls `log.py` helper functions so
 mbuffer progress can be shown live on screen and written to `.mbuffer` without
 flooding `.log`. Btrfs verbose output is written separately to `.btrfs-out`.
+
+## MQTT notification logic
+
+All MQTT logic lives in `timeshift_btrfs_sync/mqtt.py`. The module imports
+`paho.mqtt.client` lazily only when `[mqtt] enabled = true`, so normal non-MQTT
+runs do not require paho-mqtt.
+
+Success and failure payloads are JSON with simple top-level fields for Home
+Assistant MQTT sensors or automations:
+
+```text
+state/status = success or failure
+job/name     = config name
+command      = CLI command, for example sync
+exit_code    = command exit code
+error        = exception/error text on failure
+stderr       = newest captured stderr tail on failure
+```
 
 ## Source-side commands
 
@@ -165,13 +184,31 @@ Incremental send is chosen in `sync.py` using state from `state.json`:
 4. Run `btrfs send -p <parent> <current>`.
 5. Update `state.json` only after receive succeeds, using local destination metadata when possible.
 
+## Prune-safe high-watermark logic
+
+After destination pruning, source Timeshift may still list snapshots that were
+intentionally deleted on the destination. `sync.py` avoids re-sending those old
+snapshots by finding a confirmed sync floor:
+
+1. Walk `state.json` newest-to-oldest.
+2. Require the candidate snapshot to still exist in source `timeshift --list`.
+3. Compare Btrfs UUID identity between the source candidate and the destination
+   received subvolume metadata.
+4. Skip normal sync candidates older than or equal to that confirmed floor.
+
+If the newest state entry is not on the source, the search walks backward until
+it finds a source/state/destination UUID match. Specific `--snapshot <name>`
+runs bypass this normal high-watermark skip.
+
 ## Compression logic
 
 Destination compression is best-effort:
 
 1. Set compression property on target root/snapshots root.
 2. Set compression on the per-snapshot receive directory before receive.
-3. Optionally set compression on received subvolume after receive.
+3. Do not set compression on read-only received subvolumes. If after-receive
+   compression is explicitly enabled, sync.py checks read-only state first and
+   skips the property change when the received subvolume is read-only.
 
 This should not break incremental sync because the incremental chain depends on
 snapshot parent relationships and the received parent staying unchanged.

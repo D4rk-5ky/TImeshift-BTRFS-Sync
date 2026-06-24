@@ -71,36 +71,53 @@ def mark_subvolume_synced(
     parent_source_path: str | None,
     send_path: str,
     received_meta: SubvolumeMeta | None,
+    original_meta: SubvolumeMeta | None = None,
+    send_meta: SubvolumeMeta | None = None,
 ) -> None:
-    """Record one successful send/receive in state."""
+    """Record one successful send/receive in state.
+
+    `original_meta` describes the Timeshift snapshot path, for example
+    /timeshift-btrfs/snapshots/<name>/@. `send_meta` describes the exact
+    subvolume that was streamed with `btrfs send`, which can be a read-only
+    source cache snapshot. Keeping both UUIDs lets later runs safely choose a
+    high-watermark floor after destination pruning without adding tombstone
+    entries for every pruned snapshot.
+    """
 
     snapshots = state.setdefault("snapshots", {})
     snap_state = snapshots.setdefault(snapshot.name, {"name": snapshot.name, "tags": snapshot.tags, "comment": snapshot.comment, "created": snapshot.created, "path": str(Path("snapshots") / snapshot.name), "subvolumes": {}})
     snap_state["tags"] = snapshot.tags
     snap_state["comment"] = snapshot.comment
     snap_state["created"] = snapshot.created
-    # Prefer explicit source metadata when we have it. In the fast path we do
-    # not read remote source UUID metadata for every send. After `btrfs receive`,
-    # the local destination `Received UUID` is the UUID of the source subvolume
-    # that was sent, so we can still save the useful source identity using only
-    # local metadata.
-    inferred_source_uuid = subvolume.uuid or (received_meta.received_uuid if received_meta else None)
+    # The actual streamed source identity is the UUID of the send path. If the
+    # source Timeshift snapshot was writable, send_path points at a read-only
+    # cache snapshot and that cache UUID is what the destination records as
+    # Received UUID.
+    send_source_uuid = (send_meta.uuid if send_meta else None) or (received_meta.received_uuid if received_meta else None) or subvolume.uuid
+    original_source_uuid = (original_meta.uuid if original_meta else None) or subvolume.uuid
 
     snap_state.setdefault("subvolumes", {})[subvolume.name] = {
         "status": "ok",
         "name": subvolume.name,
         "source_path": subvolume.path,
         "send_path": send_path,
-        "source_uuid": inferred_source_uuid,
-        "source_parent_uuid": subvolume.parent_uuid,
-        "source_received_uuid": subvolume.received_uuid,
+        # Backward-compatible name. New code treats this as the exact source
+        # UUID that was streamed, not necessarily the writable Timeshift source
+        # subvolume UUID.
+        "source_uuid": send_source_uuid,
+        "send_source_uuid": send_source_uuid,
+        "original_source_uuid": original_source_uuid,
+        "source_parent_uuid": (send_meta.parent_uuid if send_meta else None) or subvolume.parent_uuid,
+        "source_received_uuid": (send_meta.received_uuid if send_meta else None) or subvolume.received_uuid,
+        "original_source_parent_uuid": original_meta.parent_uuid if original_meta else subvolume.parent_uuid,
+        "original_source_received_uuid": original_meta.received_uuid if original_meta else subvolume.received_uuid,
         "destination_path": str(destination_path),
         "destination_uuid": received_meta.uuid if received_meta else None,
         "destination_parent_uuid": received_meta.parent_uuid if received_meta else None,
         "destination_received_uuid": received_meta.received_uuid if received_meta else None,
         "parent_snapshot": parent_snapshot,
         "parent_source_path": parent_source_path,
-        "source_uuid_inferred_from_destination_received_uuid": bool(subvolume.uuid is None and received_meta and received_meta.received_uuid),
+        "source_uuid_inferred_from_destination_received_uuid": bool(send_meta is None and subvolume.uuid is None and received_meta and received_meta.received_uuid),
     }
 
 

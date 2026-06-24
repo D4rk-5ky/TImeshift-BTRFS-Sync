@@ -21,14 +21,43 @@ Corrected sequence:
 21st zip -> 0.2.1
 22nd zip -> 0.2.2
 23rd zip -> 0.2.3
-24th zip -> 0.2.5
+24th zip -> 0.2.4
+25th zip -> 0.2.5
+26th zip -> 0.2.6
+27th zip -> 0.2.7
 ```
 
-This build is the 24th zip in the corrected sequence, so its version is `0.2.5`.
+This build is the 27th zip in the corrected sequence, so its version is `0.2.7`.
 
-The next zip should be `0.2.5`.
+The next zip should be `0.2.8`.
+
+## 0.2.7
+
+- Stopped trying to set destination compression on read-only received subvolumes.
+- Changed `destination.set_compression_after_receive` default to `false`.
+- If after-receive compression is explicitly enabled, read-only received subvolumes are detected and skipped safely.
+- Added prune-safe high-watermark sync: after pruning old destination snapshots, normal sync uses the newest UUID-confirmed state/source match as a floor and skips older source snapshots instead of re-sending them.
+- If the newest state snapshot is not present on the source, the app walks backward in `state.json` until it finds a source snapshot that exists and matches by Btrfs UUID.
+- New state entries store both `original_source_uuid` and `send_source_uuid`, so writable Timeshift snapshots sent through read-only cache can be verified correctly later.
+
+## 0.2.6
+
+- Added optional MQTT status notifications using `paho-mqtt`.
+- Added `timeshift_btrfs_sync/mqtt.py`; all MQTT publishing logic lives there.
+- Added `[mqtt]` config section with optional username/password/password_file.
+- Added Home-Assistant-friendly JSON payloads for success and failure.
+- Failure JSON includes exit code, error text, and latest captured stderr tail.
+- Added optional dependency extra: `python3 -m pip install -e '.[mqtt]'.`
 
 ## 0.2.5
+
+- Mirrored captured command stderr to the terminal, while suppressing expected probe stderr.
+- Added `destination.cleanup_incomplete_receive = true` to recover from interrupted receives.
+- Automatically deletes incomplete destination Btrfs subvolumes that are not recorded in state.json, then retries the transfer.
+- Added a separator after superseded source cache cleanup before the next send/receive block.
+- Suppressed expected `Directory not empty` stderr when trying to delete a cache parent that still contains another cached subvolume.
+
+## 0.2.4
 
 - Audited command flags, config options, README documentation, and `config.example.toml`.
 - Expanded argparse `--help` text for every command flag.

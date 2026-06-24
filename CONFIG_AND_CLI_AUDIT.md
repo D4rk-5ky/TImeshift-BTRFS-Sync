@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.2.5
+# Config and CLI audit for v0.2.7
 
 This file records the audit requested after v0.2.3.
 
@@ -6,7 +6,7 @@ This file records the audit requested after v0.2.3.
 
 - All argparse command flags are present in `python3 -m timeshift_btrfs_sync --help` or the matching subcommand help.
 - All argparse command flags are described in `README.md` under **Complete CLI command reference**.
-- All config options parsed by `timeshift_btrfs_sync/config.py` are present in `config.example.toml`.
+- All config options parsed by `timeshift_btrfs_sync/config.py`, including `[mqtt]`, are present in `config.example.toml`.
 - All config options are described in `README.md` under **Complete config option reference**.
 - `init-config` now writes the same complete commented example as `config.example.toml`.
 
@@ -70,6 +70,22 @@ This file records the audit requested after v0.2.3.
 - `state_file`
 - `lock_file`
 
+### `[mqtt]`
+
+- `enabled`
+- `host`
+- `port`
+- `topic`
+- `username`
+- `password`
+- `password_file`
+- `client_id`
+- `qos`
+- `retain`
+- `timeout`
+- `notify_on_success`
+- `notify_on_failure`
+
 ### `[ssh]`
 
 - `host`
@@ -105,6 +121,7 @@ This file records the audit requested after v0.2.3.
 - `sudo`
 - `btrfs_command`
 - `create_target_root`
+- `cleanup_incomplete_receive`
 - `compression`
 - `set_compression_before_receive`
 - `set_compression_after_receive`
@@ -150,3 +167,19 @@ python3 -m timeshift_btrfs_sync show-state --help
 - Added and documented `destination.cleanup_incomplete_receive`.
 - Confirmed `config.example.toml` parses with the new option.
 - `init-config` now writes the updated full config example.
+
+
+## 0.2.6 audit addition
+
+- Added and documented every `[mqtt]` config option.
+- Confirmed `config.example.toml` includes the full `[mqtt]` section.
+- Confirmed `init-config` writes the same full commented config including `[mqtt]`.
+- Confirmed MQTT support is optional: paho-mqtt is imported only when publishing is enabled.
+
+
+## 0.2.7 audit addition
+
+- Confirmed no new config or CLI flags were added for high-watermark sync; it is automatic normal sync behavior.
+- Confirmed `destination.set_compression_after_receive` remains documented and present in `config.example.toml`, but now defaults to `false`.
+- Confirmed `config.example.toml` parses with the new default.
+- Confirmed `init-config` writes the same full commented config example.

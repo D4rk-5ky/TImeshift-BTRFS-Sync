@@ -405,6 +405,179 @@ def _verify_incremental_parent(
     raise SyncError(message)
 
 
+
+def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: str) -> set[str]:
+    """Return UUID values that may safely identify the remote path.
+
+    State from newer versions has both original_source_uuid and
+    send_source_uuid. Older state may only have source_uuid and
+    destination_received_uuid. For the exact send_path, destination_received_uuid
+    is a strong identifier because Btrfs receive stores the UUID of the streamed
+    source subvolume there. For the original Timeshift path, original_source_uuid
+    is the strong identifier when available.
+    """
+
+    values: set[str] = set()
+    send_path = state_subvol.get("send_path")
+
+    def add_key(key: str) -> None:
+        value = state_subvol.get(key)
+        if isinstance(value, str) and value and value != "-":
+            values.add(value)
+
+    if path == send_path:
+        add_key("send_source_uuid")
+        add_key("source_uuid")
+        add_key("destination_received_uuid")
+
+    if path == source_path:
+        add_key("original_source_uuid")
+        # For direct sends, source_path and send_path are the same path. Older
+        # states also used source_uuid for direct sends, so allow those values
+        # only when the saved send path is missing or is the original path.
+        if not send_path or send_path == source_path:
+            add_key("send_source_uuid")
+            add_key("source_uuid")
+            add_key("destination_received_uuid")
+
+    return values
+
+
+def _remote_path_matches_state_uuid(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    state_subvol: dict,
+    source_subvol: SubvolumeMeta,
+    subvolume_name: str,
+) -> tuple[bool, str]:
+    """Check whether a source path still matches a synced destination UUID.
+
+    The high-watermark/prune skip must not be based only on names. It verifies
+    the source candidate against the received destination identity. This keeps an
+    old pruned snapshot from being re-sent while still protecting against using a
+    similarly named snapshot from another OS/source.
+    """
+
+    destination_path_text = state_subvol.get("destination_path")
+    if not isinstance(destination_path_text, str) or not destination_path_text:
+        return False, "state has no destination_path"
+    destination_path = Path(destination_path_text)
+    local_received_uuid: str | None = None
+    try:
+        local_meta = btrfs.local_subvolume_show(
+            destination_path,
+            config.destination.sudo,
+            subvolume_name,
+            config.destination.btrfs_command,
+        )
+        local_received_uuid = local_meta.received_uuid
+    except Exception as exc:
+        return False, f"cannot read destination metadata for {destination_path}: {exc}"
+
+    source_path = source_subvol.path
+    candidate_paths: list[str] = []
+    send_path = state_subvol.get("send_path")
+    if isinstance(send_path, str) and send_path:
+        candidate_paths.append(send_path)
+    if source_path not in candidate_paths:
+        candidate_paths.append(source_path)
+
+    failures: list[str] = []
+    for candidate_path in candidate_paths:
+        remote_meta = btrfs.remote_try_subvolume_show(
+            ssh,
+            config.source.sudo,
+            config.source.btrfs_command,
+            candidate_path,
+            subvolume_name,
+        )
+        if not remote_meta or not remote_meta.uuid:
+            failures.append(f"{candidate_path}: not found or no UUID")
+            continue
+
+        expected = _state_uuid_values_for_path(state_subvol, path=candidate_path, source_path=source_path)
+        if local_received_uuid:
+            expected.add(local_received_uuid)
+
+        if remote_meta.uuid in expected:
+            return True, f"{candidate_path} UUID matches destination received_uuid/state"
+
+        failures.append(f"{candidate_path}: UUID {remote_meta.uuid} did not match expected state/destination UUIDs")
+
+    return False, "; ".join(failures)
+
+
+def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, source_by_name: dict[str, SnapshotMeta]) -> tuple[str | None, str]:
+    """Return newest state snapshot that still exists on source and matches UUIDs.
+
+    After destination pruning, old source snapshots may still exist on the source
+    side. Without a floor, sync would see those pruned snapshots as missing and
+    send them again. Instead of adding a long list of tombstones, we walk
+    state.json newest-to-oldest and find the newest snapshot that:
+
+    * is still listed by `timeshift --list` on the source,
+    * is fully synced locally for the configured subvolumes,
+    * has matching Btrfs UUID identity between source and destination.
+
+    Source snapshots older than or equal to this confirmed floor are skipped by
+    normal sync. If the newest state entry no longer exists on the source, the
+    search automatically walks backward until it finds a safe matching anchor.
+    """
+
+    state_snapshots = state.get("snapshots", {})
+    if not state_snapshots:
+        return None, "state is empty"
+
+    source_names = set(source_by_name.keys())
+    checked_missing = 0
+    checked_mismatch: list[str] = []
+
+    for name in sorted(state_snapshots.keys(), reverse=True):
+        if name not in source_names:
+            checked_missing += 1
+            continue
+        if not snapshot_is_synced(state, name, config.source.subvolumes):
+            continue
+
+        source_snapshot = source_by_name[name]
+        state_snapshot = state_snapshots.get(name, {})
+        state_subvolumes = state_snapshot.get("subvolumes", {})
+
+        reasons: list[str] = []
+        ok = True
+        for subvolume_name in config.source.subvolumes:
+            source_subvol = source_snapshot.subvolumes.get(subvolume_name)
+            state_subvol = state_subvolumes.get(subvolume_name)
+            if not source_subvol or not state_subvol:
+                ok = False
+                reasons.append(f"{subvolume_name}: missing source or state subvolume")
+                break
+            sub_ok, reason = _remote_path_matches_state_uuid(
+                config,
+                ssh,
+                state_subvol=state_subvol,
+                source_subvol=source_subvol,
+                subvolume_name=subvolume_name,
+            )
+            reasons.append(f"{subvolume_name}: {reason}")
+            if not sub_ok:
+                ok = False
+                break
+
+        if ok:
+            if checked_missing:
+                return name, f"newest state snapshot was not on source; walked back {checked_missing} entr{'y' if checked_missing == 1 else 'ies'} and confirmed UUIDs"
+            return name, "newest state/source snapshot confirmed by UUIDs"
+
+        checked_mismatch.append(f"{name}: {'; '.join(reasons)}")
+
+    if checked_mismatch:
+        return None, "no state/source snapshot passed UUID confirmation; latest mismatch: " + checked_mismatch[0]
+    if checked_missing:
+        return None, f"no state snapshot still exists on source; checked {checked_missing} missing entr{'y' if checked_missing == 1 else 'ies'}"
+    return None, "no usable fully synced state snapshot found"
+
 def _filesystem_parent_candidates(config: AppConfig, snapshot_name: str, subvolume_name: str, source_names: set[str]) -> list[str]:
     """Find local destination parent candidates by matching snapshot names.
 
@@ -560,10 +733,21 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     ]
     source_by_name = {snap.name: snap for snap in snapshots}
 
+    sync_floor_name: str | None = None
     if only_snapshot:
         snapshots = [snap for snap in snapshots if snap.name == only_snapshot]
         if not snapshots:
             raise SyncError(f"Source snapshot not found: {only_snapshot}")
+    else:
+        sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
+        if sync_floor_name:
+            print(f"Sync floor: confirmed {sync_floor_name} ({sync_floor_reason})")
+            print("Source snapshots older than or equal to this floor are skipped, so pruned destination snapshots are not re-sent.")
+            _human_rule("----")
+        elif state.get("snapshots"):
+            print(f"Sync floor: none confirmed ({sync_floor_reason})")
+            print("The app will not skip old source snapshots by high-watermark because UUID confirmation failed.")
+            _human_rule("----")
 
     transferred = 0
 
@@ -573,7 +757,12 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     # repeat the same remote/local metadata comparison.
     verified_parent_subvolumes: set[str] = set()
 
+    skipped_by_floor = 0
     for snapshot in sorted(snapshots, key=lambda s: s.sort_key()):
+        if sync_floor_name and snapshot.name <= sync_floor_name:
+            skipped_by_floor += 1
+            continue
+
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
             continue
@@ -637,11 +826,10 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 _human_rule("---")
                 continue
 
-            # Do not run remote `btrfs subvolume show` for every current send.
-            # The send path was already made safe by _ensure_source_send_path(),
-            # and after receive the local destination `Received UUID` tells us
-            # which source UUID arrived. That local metadata is enough for
-            # future parent-guard checks.
+            # Save the exact path that will be streamed. After receive, state is
+            # updated with both original-source and send-path UUID metadata so a
+            # later run can establish a prune-safe high-watermark without keeping
+            # tombstones for every deleted destination snapshot.
             subvolume.send_path = current_send_path
 
             # Create the local receive directory only after parent selection.
@@ -694,18 +882,40 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             _human_rule("---")
 
             received_meta = None
+            original_meta = None
+            send_meta = None
             if dest_path.exists():
-                # After receive, optionally set compression on the received
-                # subvolume itself. This is best-effort and should not affect
-                # incremental parent validity.
-                if config.destination.set_compression_after_receive:
-                    btrfs.set_local_compression(dest_path, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
                 try:
                     received_meta = btrfs.local_subvolume_show(dest_path, config.destination.sudo, subvol_name, config.destination.btrfs_command)
                     received_meta.readonly = btrfs.local_readonly(dest_path, config.destination.sudo, config.destination.btrfs_command)
                 except Exception:
                     received_meta = None
-            mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta)
+
+                # A received Timeshift/Btrfs snapshot is normally read-only.
+                # Setting the compression property on a read-only subvolume fails,
+                # so the safe/default behavior is to set compression on the receive
+                # parent before receive and skip after-receive property changes when
+                # the received subvolume is read-only.
+                if config.destination.set_compression_after_receive:
+                    if received_meta and received_meta.readonly is True:
+                        print(f"  {subvol_name}: destination is read-only; skipping after-receive compression property")
+                    else:
+                        btrfs.set_local_compression(dest_path, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
+
+            # Save both the original Timeshift source UUID and the exact send-path
+            # UUID. When source cache is used, those are different subvolumes. This
+            # metadata lets later runs establish a prune-safe high-watermark without
+            # maintaining tombstones for every deleted destination snapshot.
+            try:
+                original_meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, subvolume.path, subvol_name)
+            except Exception:
+                original_meta = None
+            try:
+                send_meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, current_send_path, subvol_name)
+            except Exception:
+                send_meta = None
+
+            mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta, original_meta=original_meta, send_meta=send_meta)
             save_state(config.state_file, state)
 
             # Source-side read-only cache snapshots are temporary. After a
@@ -724,5 +934,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             transferred += 1
 
     _human_rule("----")
+    if skipped_by_floor:
+        print(f"Skipped {skipped_by_floor} source snapshot(s) at or below confirmed sync floor.")
     print("No missing subvolumes to sync." if transferred == 0 else f"Synced {transferred} subvolume(s).")
     return transferred

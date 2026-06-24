@@ -53,6 +53,7 @@ class RunLogger:
         self._btrfs_out_fh: IO[str] = self.btrfs_out_path.open("a", encoding="utf-8", buffering=1)
         self._err_fh: IO[str] = self.err_path.open("a", encoding="utf-8", buffering=1)
         self._lock = threading.Lock()
+        self._stderr_tail = ""
 
         self.info(f"Logging started: {timestamp}")
         self.info(f"LOG file: {self.log_path}")
@@ -75,6 +76,20 @@ class RunLogger:
         with self._lock:
             fh.write(text)
             fh.flush()
+
+    def _remember_stderr(self, text: str, *, max_chars: int = 4000) -> None:
+        """Keep a small tail of stderr for failure notifications."""
+
+        if not text:
+            return
+        with self._lock:
+            self._stderr_tail = (self._stderr_tail + text)[-max_chars:]
+
+    def last_stderr_tail(self, max_chars: int = 4000) -> str:
+        """Return the newest stderr text remembered for MQTT/error reports."""
+
+        with self._lock:
+            return self._stderr_tail[-max_chars:]
 
     def _line(self, fh: IO[str], text: str) -> None:
         """Write exactly one logical line."""
@@ -99,9 +114,11 @@ class RunLogger:
         self._line(self._btrfs_out_fh, text)
 
     def err(self, text: str = "") -> None:
-        """Write an error/stderr line to .err."""
+        """Write an error/stderr line to .err and remember its tail."""
 
-        self._line(self._err_fh, text)
+        line = text if text.endswith("\n") else text + "\n"
+        self._remember_stderr(line)
+        self._write(self._err_fh, line)
 
     def command(
         self,
@@ -180,7 +197,9 @@ class RunLogger:
         if to_err:
             if data and not data.endswith("\n"):
                 data += "\n"
-            self._write(self._err_fh, f"[{stream_name}] {data}")
+            tagged = f"[{stream_name}] {data}"
+            self._remember_stderr(tagged)
+            self._write(self._err_fh, tagged)
 
 
 _current_logger: RunLogger | None = None

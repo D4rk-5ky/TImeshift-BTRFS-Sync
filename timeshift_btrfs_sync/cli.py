@@ -7,16 +7,18 @@ import argparse
 import json
 import sys
 from . import __version__, btrfs, timeshift
+from .commands import CommandError
 from .config import ConfigError, load_config
 from .lock import FileLock
 from .log import active_logger, create_run_logger
+from .mqtt import build_payload, publish_status
 from .retention import prune
 from .ssh import SSHRunner
 from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.5 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.7 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -39,6 +41,43 @@ prune_after_sync = false
 #   *.btrfs-out = btrfs send/receive verbose output and send/receive commands
 #   *.err = stderr/error output
 log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
+
+
+[mqtt]
+# Optional MQTT notifications for Home Assistant or another MQTT consumer.
+# This feature uses the paho-mqtt Python module. Install optional dependency with:
+#   python3 -m pip install -e '.[mqtt]'
+#
+# If enabled = false, paho-mqtt is not required and nothing is published.
+enabled = false
+
+# MQTT broker address and port. For Home Assistant add-on broker this is often
+# the HA host/IP and port 1883.
+host = "homeassistant.local"
+port = 1883
+
+# Topic where JSON status messages are published.
+# Home Assistant can use this topic in an MQTT sensor or automation trigger.
+topic = "timeshift-btrfs-sync/kubuntu-timeshift/status"
+
+# Optional MQTT authentication. Use either password or password_file, not both.
+# username = "mqtt-user"
+# password = "mqtt-password"
+# password_file = "/root/.config/ts-btrfs-mqtt.password"
+
+# Optional fixed MQTT client id. Blank/omitted creates one from the local hostname.
+# client_id = "ts-btrfs-kubuntu-timeshift"
+
+# MQTT publish options.
+# qos must be 0, 1, or 2. retain=true lets Home Assistant see the last known status
+# immediately after restart, but retain=false avoids stale retained status messages.
+qos = 0
+retain = false
+timeout = 10
+
+# Control whether success and/or failure messages are sent.
+notify_on_success = true
+notify_on_failure = true
 
 # Optional internal metadata paths. Omit these to use defaults under target_root:
 #   <target_root>/.ts-btrfs-sync/state.json
@@ -185,8 +224,11 @@ compression = "zstd"
 # Before receive, set compression on the destination snapshot parent directory.
 set_compression_before_receive = true
 
-# After receive, try to set compression property on the received subvolume too.
-set_compression_after_receive = true
+# After receive, optionally try to set compression on the received subvolume.
+# Default false because received Btrfs snapshots are normally read-only, and
+# setting properties on a read-only subvolume fails. Leave false unless you
+# intentionally make received snapshots writable before setting properties.
+set_compression_after_receive = false
 
 [stream]
 # Optional mbuffer between SSH send and local receive.
@@ -244,12 +286,62 @@ protected_snapshots = []
 '''
 
 
-def _with_logging(config, command_name: str, callback):
-    """Run a command with optional .log/.mbuffer/.btrfs-out/.err file logging.
+def _failure_exit_code(exc: BaseException) -> int:
+    """Map common failures to the same exit codes main() returns."""
 
-    If config.log_dir is None, this is just a direct callback call. If log_dir
-    is set, log.py creates the directory and timestamped run files. Exceptions
-    are copied to .err before being re-raised to main().
+    if isinstance(exc, CommandError):
+        return exc.returncode
+    if isinstance(exc, BlockingIOError):
+        return 3
+    if isinstance(exc, KeyboardInterrupt):
+        return 130
+    return 1
+
+
+def _stderr_tail_for_exception(exc: BaseException, logger) -> str:
+    """Return the best available recent stderr text for failure notifications."""
+
+    if isinstance(exc, CommandError) and exc.stderr:
+        return exc.stderr[-4000:]
+    if logger:
+        return logger.last_stderr_tail()
+    return ""
+
+
+def _publish_mqtt_status(config, command_name: str, *, success: bool, exit_code: int, error: str = "", stderr_tail: str = "") -> None:
+    """Publish optional MQTT status without changing the command exit code."""
+
+    mqtt_config = getattr(config, "mqtt", None)
+    if not mqtt_config or not mqtt_config.enabled:
+        return
+    if success and not mqtt_config.notify_on_success:
+        return
+    if not success and not mqtt_config.notify_on_failure:
+        return
+
+    payload = build_payload(
+        job_name=config.name,
+        command=command_name,
+        state="success" if success else "failure",
+        success=success,
+        exit_code=exit_code,
+        stderr_tail=stderr_tail,
+        error=error,
+        version=__version__,
+    )
+    try:
+        publish_status(mqtt_config, payload)
+    except Exception as mqtt_exc:
+        print(f"WARNING: MQTT notification failed: {mqtt_exc}", file=sys.stderr)
+
+
+def _with_logging(config, command_name: str, callback):
+    """Run a command with optional logging and MQTT notification.
+
+    If config.log_dir is None, this is just a direct callback call plus optional
+    MQTT. If log_dir is set, log.py creates timestamped run files. Exceptions
+    are copied to .err and can also be sent as MQTT failure JSON before being
+    re-raised to main().
     """
 
     logger = create_run_logger(config.log_dir, config.name)
@@ -257,10 +349,32 @@ def _with_logging(config, command_name: str, callback):
         if logger:
             logger.info(f"CLI COMMAND: {command_name}")
         try:
-            return callback()
+            result = int(callback() or 0)
+            _publish_mqtt_status(config, command_name, success=(result == 0), exit_code=result)
+            return result
+        except KeyboardInterrupt as exc:
+            if logger:
+                logger.err("ERROR: Interrupted by user")
+            _publish_mqtt_status(
+                config,
+                command_name,
+                success=False,
+                exit_code=130,
+                error="Interrupted by user",
+                stderr_tail=_stderr_tail_for_exception(exc, logger),
+            )
+            raise
         except Exception as exc:
             if logger:
                 logger.err(f"ERROR: {exc}")
+            _publish_mqtt_status(
+                config,
+                command_name,
+                success=False,
+                exit_code=_failure_exit_code(exc),
+                error=str(exc),
+                stderr_tail=_stderr_tail_for_exception(exc, logger),
+            )
             raise
 
 
