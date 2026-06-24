@@ -16,7 +16,7 @@ from .state import load_state
 from .sync import list_source_snapshots, print_snapshot_table, sync_once
 from .timeshift import create_remote_manual_snapshot
 
-EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.4 config
+EXAMPLE_CONFIG = '''# timeshift-btrfs-sync v0.2.5 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -168,6 +168,13 @@ btrfs_command = "btrfs"
 
 # Whether the app may create target_root and internal metadata directories.
 create_target_root = true
+
+# Interrupted receive cleanup. Keep true. If a previous transfer was cancelled
+# and left a partial destination subvolume that is not in state.json, the app
+# deletes that incomplete Btrfs subvolume and retries the receive. It only
+# deletes paths that are Btrfs subvolumes or empty directories; non-empty normal
+# directories still require manual inspection.
+cleanup_incomplete_receive = true
 
 # Destination Btrfs compression property.
 # Accepted: zstd, lzo, zlib, none, or blank.

@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.2.4
+# Config and CLI audit for v0.2.5
 
 This file records the audit requested after v0.2.3.
 
@@ -143,3 +143,10 @@ python3 -m timeshift_btrfs_sync prune --help
 python3 -m timeshift_btrfs_sync create-manual --help
 python3 -m timeshift_btrfs_sync show-state --help
 ```
+
+
+## 0.2.5 audit addition
+
+- Added and documented `destination.cleanup_incomplete_receive`.
+- Confirmed `config.example.toml` parses with the new option.
+- `init-config` now writes the updated full config example.

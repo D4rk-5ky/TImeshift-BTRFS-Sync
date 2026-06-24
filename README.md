@@ -3,7 +3,7 @@
 >
 > This project is experimental and still being tested. Do **not** rely on it as your only backup system. It may contain bugs that can cause failed backups, broken incremental chains, or data loss. Test only on non-critical data or keep separate verified backups before using it.
 
-# timeshift-btrfs-sync v0.2.4
+# timeshift-btrfs-sync v0.2.5
 
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
@@ -12,10 +12,10 @@ does not accidentally use destination snapshots from another OS/source as parent
 
 ## Version
 
-This is the 23rd zip build in the corrected sequence, so the version is:
+This is the 24th zip build in the corrected sequence, so the version is:
 
 ```text
-0.2.4
+0.2.5
 ```
 
 See `VERSIONING.md` for the count.
@@ -24,6 +24,9 @@ See `VERSIONING.md` for the count.
 
 A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
 
+- Better stderr handling: captured command stderr is mirrored to the terminal unless it is an expected quiet probe.
+- Recovery for interrupted receives: incomplete destination subvolumes can be deleted and retried automatically.
+- Clear separator after source cache cleanup before the next send/receive block.
 - Optional split logging controlled by top-level `log_dir`.
 - Adds `timeshift_btrfs_sync/log.py` so logging logic is kept in one file.
 - Creates per-run `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files when logging is enabled.
@@ -290,6 +293,45 @@ LOCAL RECEIVE: sudo -n btrfs receive ...
 `mbuffer` progress is intentionally written to `.mbuffer`, not `.log`, so the normal
 log does not get flooded during large transfers. Btrfs verbose output is written to
 `.btrfs-out`, so it does not mix with mbuffer progress.
+
+## Interrupted receive recovery
+
+If a transfer is cancelled during `btrfs receive`, the destination can contain a
+partial subvolume that is not recorded in `state.json`. On the next run, the app
+now detects that situation before sending again.
+
+Default config:
+
+```toml
+[destination]
+cleanup_incomplete_receive = true
+```
+
+When enabled, the app does this for an unrecorded destination path such as
+`snapshots/<snapshot>/@`:
+
+```text
+1. Check whether the path is a Btrfs subvolume.
+2. If it is a Btrfs subvolume, delete it with local `btrfs subvolume delete`.
+3. If it is only an empty normal directory, remove the empty directory.
+4. If it is a non-empty normal directory, stop and ask for manual cleanup.
+5. Recreate the receive directory and retry `btrfs receive`.
+```
+
+This avoids treating a partial receive as a valid backup, while also avoiding a
+dangerous automatic `rm -rf`.
+
+The terminal output will show a block like:
+
+```text
+  @: found incomplete destination receive not recorded in state.json
+
+LOCAL INCOMPLETE DELETE: /path/to/target_root/snapshots/2026-06-24_07-53-05/@
+
+  incomplete destination receive removed; retrying transfer
+
+---
+```
 
 ## Destination `target_root` layout and full reset cleanup
 
@@ -754,6 +796,7 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `sudo` | Destination sudo prefix for Btrfs receive/delete/property commands. |
 | `btrfs_command` | Destination Btrfs command name/path. |
 | `create_target_root` | If true, create `target_root` and app metadata folders if missing. |
+| `cleanup_incomplete_receive` | If true, delete and retry incomplete destination receives that are not recorded in state.json. Only Btrfs subvolumes or empty directories are auto-deleted. |
 | `compression` | Destination Btrfs compression property: `zstd`, `lzo`, `zlib`, `none`, or blank. `zstd:3` is normalized to `zstd`. |
 | `set_compression_before_receive` | If true, set compression on the receive parent before `btrfs receive`. |
 | `set_compression_after_receive` | If true, set compression on the received subvolume after receive. |
@@ -785,6 +828,14 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `protected_snapshots` | Snapshot names that are never pruned. |
 
 ## Changelog
+
+### 0.2.5
+
+- Mirrored captured command stderr to the terminal, while suppressing expected probe stderr.
+- Added `destination.cleanup_incomplete_receive = true` to recover from interrupted receives.
+- Automatically deletes incomplete destination Btrfs subvolumes that are not recorded in state.json, then retries the transfer.
+- Added a separator after superseded source cache cleanup before the next send/receive block.
+- Suppressed expected `Directory not empty` stderr when trying to delete a cache parent that still contains another cached subvolume.
 
 ### 0.2.4
 

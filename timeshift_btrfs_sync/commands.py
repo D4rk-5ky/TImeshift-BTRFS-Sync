@@ -71,12 +71,17 @@ def run_local(
     check: bool = True,
     input_text: str | None = None,
     env: dict[str, str] | None = None,
+    log_stderr: bool = True,
+    mirror_stderr: bool = True,
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
     Normal commands are recorded in .log when logging is enabled. Their stderr
-    is also copied to .err. This intentionally does not include transfer stream
-    output; stream output goes to .mbuffer or .btrfs-out through stream_pipeline().
+    is also copied to .err and mirrored to the terminal by default.
+
+    Some probe commands intentionally fail, for example checking whether a cache
+    subvolume already exists. Those callers pass log_stderr=False so expected
+    probe failures do not flood the terminal or .err file.
     """
 
     proc = subprocess.run(
@@ -92,7 +97,14 @@ def run_local(
 
     logger = runlog.get_logger()
     if logger:
-        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr)
+        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr if log_stderr else "")
+
+    # Make normal command stderr visible in the terminal too. Pipeline stderr is
+    # handled separately by stream_pipeline(), so this only affects captured
+    # commands such as btrfs subvolume show/delete and property checks.
+    if log_stderr and mirror_stderr and proc.stderr:
+        print(f"COMMAND STDERR: {shlex.join(cmd)}", file=sys.stderr)
+        print(proc.stderr.rstrip(), file=sys.stderr)
 
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)

@@ -90,7 +90,7 @@ def local_btrfs_cmd(sudo: str, btrfs_command: str, args: list[str]) -> list[str]
 def remote_try_subvolume_show(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str, name: str) -> SubvolumeMeta | None:
     """Return remote subvolume metadata or None if invalid."""
 
-    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]), check=False)
+    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]), check=False, log_stderr=False, mirror_stderr=False)
     if result.returncode != 0:
         return None
     return parse_subvolume_show(result.stdout, name=name, path=path)
@@ -106,7 +106,7 @@ def local_subvolume_show(path: Path, sudo: str, name: str, btrfs_command: str = 
 def remote_readonly(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str) -> bool | None:
     """Check remote subvolume read-only property."""
 
-    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", path, "ro"]), check=False)
+    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", path, "ro"]), check=False, log_stderr=False, mirror_stderr=False)
     if result.returncode != 0:
         return None
     return parse_property_ro(result.stdout)
@@ -115,7 +115,7 @@ def remote_readonly(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str) ->
 def local_readonly(path: Path, sudo: str, btrfs_command: str = "btrfs") -> bool | None:
     """Check local subvolume read-only property."""
 
-    result = run_local(local_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", str(path), "ro"]), check=False)
+    result = run_local(local_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", str(path), "ro"]), check=False, log_stderr=False, mirror_stderr=False)
     if result.returncode != 0:
         return None
     return parse_property_ro(result.stdout)
@@ -221,7 +221,7 @@ def remote_ensure_readonly_send_path(
         return cache_path
 
     # Create per-snapshot parent with btrfs, not mkdir.
-    ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "create", cache_parent]), check=False)
+    ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "create", cache_parent]), check=False, log_stderr=False, mirror_stderr=False)
 
     result = ssh.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "snapshot", "-r", original_path, cache_path]),
@@ -247,7 +247,16 @@ def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
     return normalized_path.startswith(normalized_root + "/")
 
 
-def remote_delete_subvolume(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str, *, check: bool = False):
+def remote_delete_subvolume(
+    ssh: SSHRunner,
+    sudo: str,
+    btrfs_command: str,
+    path: str,
+    *,
+    check: bool = False,
+    log_stderr: bool = True,
+    mirror_stderr: bool = True,
+):
     """Delete a source-side Btrfs subvolume with `btrfs subvolume delete`.
 
     This is used for temporary read-only cache snapshots after they are no
@@ -255,7 +264,12 @@ def remote_delete_subvolume(ssh: SSHRunner, sudo: str, btrfs_command: str, path:
     source-side `btrfs`; no rm/mkdir/cat/helper command is introduced.
     """
 
-    return ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]), check=check)
+    return ssh.run(
+        remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]),
+        check=check,
+        log_stderr=log_stderr,
+        mirror_stderr=mirror_stderr,
+    )
 
 
 def remote_try_delete_cache_subvolume(
@@ -276,7 +290,7 @@ def remote_try_delete_cache_subvolume(
     if not path_is_under_cache(path, cache_root):
         return False
     assert path is not None
-    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False)
+    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False, log_stderr=False, mirror_stderr=False)
     return result.returncode == 0
 
 

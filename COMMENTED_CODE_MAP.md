@@ -187,3 +187,10 @@ btrfs receive -v ...
 ```
 
 The pipeline lets that Btrfs verbose output pass through live to the terminal. This is operation/detail logging, not byte progress; mbuffer remains the main progress display for throughput and totals.
+
+
+## 0.2.5 notes
+
+- `sync.py` now includes interrupted receive cleanup controlled by `destination.cleanup_incomplete_receive`.
+- `commands.py` mirrors captured stderr to the terminal, except for expected quiet probes.
+- Source cache cleanup now prints a separator before the next transfer block.

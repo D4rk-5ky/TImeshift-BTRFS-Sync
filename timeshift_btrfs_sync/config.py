@@ -62,6 +62,12 @@ class DestinationConfig:
     sudo: str = "sudo -n"
     btrfs_command: str = "btrfs"
     create_target_root: bool = True
+
+    # If a previous transfer was interrupted, btrfs receive can leave a partial
+    # destination subvolume that is not recorded in state.json. When this is
+    # true, the app deletes that incomplete destination subvolume and retries.
+    cleanup_incomplete_receive: bool = True
+
     compression: str | None = None
     set_compression_before_receive: bool = True
     set_compression_after_receive: bool = True
@@ -268,6 +274,7 @@ def load_config(path: str | Path) -> AppConfig:
         sudo=str(destination_raw.get("sudo", "sudo -n")),
         btrfs_command=str(destination_raw.get("btrfs_command", "btrfs")),
         create_target_root=_as_bool(destination_raw.get("create_target_root"), "destination.create_target_root", True),
+        cleanup_incomplete_receive=_as_bool(destination_raw.get("cleanup_incomplete_receive"), "destination.cleanup_incomplete_receive", True),
         compression=_compression_value(destination_raw.get("compression")),
         set_compression_before_receive=_as_bool(destination_raw.get("set_compression_before_receive"), "destination.set_compression_before_receive", True),
         set_compression_after_receive=_as_bool(destination_raw.get("set_compression_after_receive"), "destination.set_compression_after_receive", True),

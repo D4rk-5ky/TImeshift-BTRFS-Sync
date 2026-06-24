@@ -233,11 +233,74 @@ def _cleanup_superseded_source_cache(
             config.source.btrfs_command,
             parent_cache_dir,
             check=False,
+            log_stderr=False,
+            mirror_stderr=False,
         )
         if parent_result.returncode == 0:
             print()
             print(f"SOURCE CACHE PARENT DELETE: {parent_cache_dir}")
+        elif parent_result.stderr and "directory not empty" not in parent_result.stderr.lower():
+            print()
+            print("WARNING: source cache parent cleanup failed; leaving parent in place")
+            print(parent_result.stderr.strip())
+    _human_rule("---")
+
+
+def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, subvolume_name: str) -> None:
+    """Delete an incomplete destination receive before retrying.
+
+    If the user presses Ctrl+C or SSH drops while `btrfs receive` is running,
+    the destination can be left with a partially received subvolume. It is not in
+    state.json, so it is unsafe to treat as completed. The safest automatic
+    recovery is to delete that incomplete Btrfs subvolume and receive it again.
+
+    Only Btrfs subvolumes are deleted automatically. If the path is a normal
+    non-empty directory, the app refuses and asks for manual cleanup.
+    """
+
+    if not dest_path.exists():
+        return
+    if not config.destination.cleanup_incomplete_receive:
+        raise SyncError(f"Destination path already exists but is not recorded as synced: {dest_path}")
+
     _human_blank()
+    print(f"  {subvolume_name}: found incomplete destination receive not recorded in state.json")
+    print()
+    print(f"LOCAL INCOMPLETE DELETE: {dest_path}")
+    print()
+
+    try:
+        # Confirm it is a Btrfs subvolume before deleting it. This avoids using
+        # the backup tool as a dangerous rm -rf replacement.
+        btrfs.local_subvolume_show(dest_path, config.destination.sudo, subvolume_name, config.destination.btrfs_command)
+        btrfs.delete_local_subvolume(dest_path, config.destination.sudo, config.destination.btrfs_command)
+    except Exception as exc:
+        # If it is just an empty ordinary directory, removing it is safe. If it
+        # contains files, stop and let the user inspect it manually.
+        try:
+            if dest_path.is_dir() and not any(dest_path.iterdir()):
+                dest_path.rmdir()
+            else:
+                raise
+        except Exception:
+            raise SyncError(
+                "Destination path exists but is not a deletable Btrfs subvolume "
+                "or empty directory. Clean it manually before retrying:\n"
+                f"  {dest_path}\n"
+                f"Original cleanup error: {exc}"
+            ) from exc
+
+    # Remove the now-empty snapshot folder if possible. It will be recreated just
+    # before btrfs receive.
+    try:
+        parent = dest_path.parent
+        if parent.exists() and parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except Exception:
+        pass
+
+    print("  incomplete destination receive removed; retrying transfer")
+    _human_rule("---")
 
 
 def _read_remote_send_metadata(config: AppConfig, ssh: SSHRunner, path: str, subvolume_name: str) -> SubvolumeMeta:
@@ -537,7 +600,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 _human_blank()
                 continue
             if dest_path.exists() and not dry_run:
-                raise SyncError(f"Destination path already exists but is not recorded as synced: {dest_path}")
+                _cleanup_incomplete_destination_receive(config, dest_path, subvol_name)
 
             parent_name, parent_send_path = _select_parent(
                 config,

@@ -85,10 +85,28 @@ class SSHRunner:
 
         return self.config.base_command() + [remote_command]
 
-    def run(self, remote_command: str, *, check: bool = True) -> Completed:
-        """Run a remote command and capture stdout/stderr."""
+    def run(
+        self,
+        remote_command: str,
+        *,
+        check: bool = True,
+        log_stderr: bool = True,
+        mirror_stderr: bool = True,
+    ) -> Completed:
+        """Run a remote command and capture stdout/stderr.
 
-        return run_local(self.command(remote_command), check=check, env=self.config.environment())
+        log_stderr/mirror_stderr are disabled for expected negative probes such
+        as "does this cache subvolume already exist?" so those probes do not
+        spam the terminal or .err log.
+        """
+
+        return run_local(
+            self.command(remote_command),
+            check=check,
+            env=self.config.environment(),
+            log_stderr=log_stderr,
+            mirror_stderr=mirror_stderr,
+        )
 
     def environment(self) -> dict[str, str] | None:
         """Return SSH environment for streaming pipeline calls."""

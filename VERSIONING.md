@@ -21,14 +21,14 @@ Corrected sequence:
 21st zip -> 0.2.1
 22nd zip -> 0.2.2
 23rd zip -> 0.2.3
-24th zip -> 0.2.4
+24th zip -> 0.2.5
 ```
 
-This build is the 24th zip in the corrected sequence, so its version is `0.2.4`.
+This build is the 24th zip in the corrected sequence, so its version is `0.2.5`.
 
 The next zip should be `0.2.5`.
 
-## 0.2.4
+## 0.2.5
 
 - Audited command flags, config options, README documentation, and `config.example.toml`.
 - Expanded argparse `--help` text for every command flag.
