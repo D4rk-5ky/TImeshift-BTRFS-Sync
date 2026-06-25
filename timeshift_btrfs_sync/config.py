@@ -87,10 +87,6 @@ class SourceConfig:
     # send while still preventing the initial "wrong OS/source" mistake.
     verify_incremental_parent_once_per_run: bool = True
 
-    # Safety option. When false, the app refuses incremental send if existing
-    # destination snapshots cannot be proven to match the current source.
-    allow_incremental_without_parent_match: bool = False
-
     send_compressed_data: bool = False
     send_proto: int | None = None
 
@@ -273,6 +269,16 @@ def load_config(path: str | Path) -> AppConfig:
     source_raw = raw.get("source", {})
     if not isinstance(source_raw, dict):
         raise ConfigError("[source] must be a TOML table")
+    removed_source_options = {"allow_incremental_without_parent_match"}
+    removed_source_present = sorted(removed_source_options.intersection(source_raw))
+    if removed_source_present:
+        names = ", ".join(f"source.{name}" for name in removed_source_present)
+        raise ConfigError(
+            f"Removed unsafe incremental option(s) still present: {names}. "
+            "This escape hatch was removed in 0.5.4. Incremental sends now "
+            "require a matching source/destination parent, or the app must do "
+            "a full send into an empty/separate destination target_root."
+        )
     source = SourceConfig(
         snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
@@ -285,7 +291,6 @@ def load_config(path: str | Path) -> AppConfig:
         verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
         verify_incremental_parent=_as_bool(source_raw.get("verify_incremental_parent"), "source.verify_incremental_parent", True),
         verify_incremental_parent_once_per_run=_as_bool(source_raw.get("verify_incremental_parent_once_per_run"), "source.verify_incremental_parent_once_per_run", True),
-        allow_incremental_without_parent_match=_as_bool(source_raw.get("allow_incremental_without_parent_match"), "source.allow_incremental_without_parent_match", False),
         send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
         send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),
     )
@@ -304,7 +309,8 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError(
             f"Removed destination compression option(s) still present: {names}. "
             "These were removed in 0.4.12; configure destination Btrfs compression "
-            "outside this app with mount options or filesystem properties."
+            "outside this app by mounting the receiving Btrfs filesystem/subvolume "
+            "with compression enabled."
         )
     target_root = _as_path(destination_raw.get("target_root"), "destination.target_root")
     destination = DestinationConfig(

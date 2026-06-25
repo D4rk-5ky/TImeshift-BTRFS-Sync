@@ -513,16 +513,14 @@ def _verify_incremental_parent(
         return
 
     message = (
-        f"Refusing incremental send: parent metadata mismatch for {parent_name}/{subvolume_name}.\n"
-        f"This can happen if the destination contains snapshots from another OS/source.\n"
+        f"Refusing incremental send: source/destination parent mismatch for {parent_name}/{subvolume_name}.\n"
+        f"The selected destination parent does not match the current source parent.\n"
+        f"This can happen if the destination contains snapshots from another OS/source, "
+        f"or if state/cache data no longer matches the source.\n"
         f"Details: {reason}\n"
-        f"Use a separate destination target_root or an empty destination for this source."
+        f"Use a separate empty target_root for a new full backup, or repair the state/cache "
+        f"so a matching parent can be proven."
     )
-    if config.source.allow_incremental_without_parent_match:
-        _human_blank()
-        print("WARNING: " + message.replace("\n", " "))
-        _human_blank()
-        return
     raise SyncError(message)
 
 
@@ -807,11 +805,12 @@ def _select_parent(
 
     # No usable parent was found. If the destination is not empty, this may be a
     # user mistake such as pointing another OS at an existing backup location.
-    if _destination_has_existing_snapshots(config) and not state.get("snapshots") and not config.source.allow_incremental_without_parent_match:
+    if _destination_has_existing_snapshots(config) and not state.get("snapshots"):
         raise SyncError(
-            "Destination already contains snapshots, but state.json has no usable parent. "
+            "Destination already contains snapshots, but state.json has no usable matching parent. "
             "Refusing to guess because this could mix snapshots from different OS installs. "
-            "Use an empty/separate target_root or enable allow_incremental_without_parent_match only if you understand the risk."
+            "Use an empty/separate target_root for a new full backup, or restore/repair state.json "
+            "so a matching source/destination parent can be proven."
         )
     return None, None
 

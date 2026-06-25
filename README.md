@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.12
+# timeshift-btrfs-sync v0.5.4
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -33,7 +33,7 @@ The safe defaults are intentionally conservative:
 - Incremental parents are verified with Btrfs UUID metadata before use.
 - Automatic source-side manual snapshot creation can require a UUID-confirmed source identity first.
 - Normal/user-created Timeshift on-demand snapshots are not pruned unless explicitly enabled.
-- The app does not manage destination Btrfs compression; use mount options or filesystem properties outside the app if needed.
+- The app does not manage destination Btrfs compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want compressed destination storage.
 
 The source machine only needs passwordless sudo for Btrfs and Timeshift:
 
@@ -75,6 +75,9 @@ Normal sync flow:
 Fast discovery is used by default. It avoids Btrfs metadata checks for every old snapshot and delays those checks until a subvolume is actually going to be sent. Use `list-source --verify-btrfs` or `source.verify_subvolumes_at_discovery = true` when you want slower up-front checks.
 
 ## Incremental parent guard
+
+The old unsafe escape hatch to continue after a parent mismatch has been removed. With `source.verify_incremental_parent = true` (the default and recommended setting), the selected source parent must match the destination parent. If the destination is empty or separate, the app can do a full send. If the destination already contains snapshots but no matching parent can be proven, the app refuses to send instead of guessing. There is no config option to continue after the parent guard reports a mismatch.
+
 
 Incremental Btrfs send uses:
 
@@ -165,11 +168,13 @@ The app does not estimate a progress bar from Btrfs disk-usage values because th
 
 ## Destination filesystem compression
 
-The app no longer sets destination Btrfs compression properties. Destination compression should be configured outside the app with your normal Btrfs mount options or filesystem/property policy.
+The app does not set destination Btrfs compression properties. If you want received backup snapshots to be stored compressed on the receiving end, mount the receiving Btrfs filesystem/subvolume with compression enabled before running the app.
 
-`source.send_compressed_data = true` only controls the Btrfs send stream. It does not configure destination compression.
+For example, configure the receiving mount outside this app with a Btrfs mount option such as `compress=zstd` or `compress=zstd:<level>` in `/etc/fstab`, then use that mounted path as `destination.target_root`.
 
-If an old config still contains `destination.compression`, `destination.set_compression_before_receive`, or `destination.set_compression_after_receive`, the app now refuses to start and tells you to remove those obsolete keys.
+`source.send_compressed_data = true` only controls the Btrfs send stream. It can send already-compressed source extents efficiently when supported, but it does not configure destination compression. Destination compression is decided by how the receiving Btrfs filesystem/subvolume is mounted or configured outside the app.
+
+If an old config still contains `destination.compression`, `destination.set_compression_before_receive`, or `destination.set_compression_after_receive`, the app refuses to start and tells you to remove those obsolete keys.
 
 
 ## Installation and executable builds
@@ -223,7 +228,7 @@ Or generate it:
 ts-btrfs init-config --path ./config.toml
 ```
 
-`config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true`, `allow_incremental_without_parent_match = false`, `manual_snapshot.require_verified_source = true`, and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior.
+`config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true`, `manual_snapshot.require_verified_source = true`, and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match.
 
 ## Command reference
 
@@ -396,13 +401,12 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | `snapshot_root` | Source Timeshift snapshot root. | The app builds `<snapshot_root>/<snapshot>/<subvolume>` from this. |
 | `subvolumes` | Subvolume names expected inside each Timeshift snapshot, usually `@` and `@home`. | Controls what gets sent for each Timeshift snapshot. |
 | `verify_subvolumes_at_discovery` | Verifies every listed snapshot/subvolume during discovery. | Slower but useful when validating a new layout. Keep false for fast normal dry-runs. |
-| `verify_incremental_parent` | Verifies parent UUID before incremental send. | Important safety guard against mixing backup chains. |
+| `verify_incremental_parent` | Verifies parent UUID before incremental send. | Important safety guard against mixing backup chains. Keep true. Parent mismatch is a hard error. |
 | `verify_incremental_parent_once_per_run` | Verifies only the first parent per subvolume name during a run, then trusts the chain created by that run. | Reduces repeated metadata checks while keeping the initial safety check. |
-| `allow_incremental_without_parent_match` | Allows incremental send when parent identity cannot be proven. | Dangerous escape hatch. Keep false unless manually recovering and you understand the risk. |
 | `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |
 | `cleanup_superseded_cache` | Deletes old cache snapshots after newer successful sends supersede them. | Prevents the source cache from growing forever while keeping the newest parent. |
-| `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression. |
+| `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want destination compression. |
 | `send_proto` | Adds `btrfs send --proto <N>`. | Needed only when you intentionally want a specific Btrfs send protocol version. |
 
 ### `[destination]`

@@ -222,9 +222,9 @@ runs bypass this normal high-watermark skip.
 
 ## Compression logic
 
-Destination compression is intentionally not managed by this app. Use Btrfs mount options or filesystem properties outside the app when you want compression on the destination pool.
+Destination compression is intentionally not managed by this app. If compressed destination storage is wanted, mount the receiving Btrfs filesystem/subvolume with compression enabled before running the app.
 
-`source.send_compressed_data` only changes the generated `btrfs send` command by adding `--compressed-data`; it does not set any destination compression property.
+`source.send_compressed_data` only changes the generated `btrfs send` command by adding `--compressed-data`; it does not set any destination compression property or mount option.
 
 
 ## Btrfs verbose output

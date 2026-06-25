@@ -50,15 +50,32 @@ Corrected sequence:
 50th zip -> 0.4.10
 51st zip -> 0.4.11
 52nd zip -> 0.4.12
+53rd zip -> 0.5.3
+54th zip -> 0.5.4
 ```
 
-This build is version `0.4.12`.
+This build is version `0.5.4`.
 
-The version line was intentionally bumped to `0.4.0` at user request. Normal patch releases now continue from the 0.4.x line.
+The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, and this release increments that by `0.0.1` to `0.5.4`.
 
 
 ## Changelog
 
+
+### 0.5.4
+
+- Removed unsafe config option `source.allow_incremental_without_parent_match`.
+- Old configs that still contain `source.allow_incremental_without_parent_match` now fail with a clear `ConfigError` telling the user to remove it.
+- Incremental parent metadata mismatches are now always hard failures. The app no longer has code that can warn and continue when the selected parent cannot be proven to match the source.
+- If destination snapshots exist but `state.json` has no usable matching parent, the app now errors and tells the user to use an empty/separate `target_root` for a new full backup or repair state/cache so a matching parent can be proven.
+- Updated `config.example.toml`, `ts-btrfs.toml`, README, and audit docs to remove the unsafe option and document the safer behavior.
+
+### 0.5.3
+
+- Bumped project version from `0.4.12` to `0.5.3` at user request.
+- Added clearer documentation that the app no longer manages destination compression.
+- Documented that if compressed destination storage is wanted, the receiving Btrfs filesystem/subvolume must be mounted with compression enabled before running the app, for example with `compress=zstd` or `compress=zstd:<level>` in `/etc/fstab`.
+- Kept old removed destination compression config keys rejected with a clear config error.
 
 ### 0.4.12
 

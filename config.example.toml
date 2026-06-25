@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.12 config
+# timeshift-btrfs-sync v0.5.4 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -209,7 +209,8 @@ verify_subvolumes_at_discovery = false
 # Safety option. Keep true. Before using an existing destination snapshot as an
 # incremental parent, the app compares current source Btrfs UUID metadata with
 # destination `received_uuid` metadata. This prevents accidentally mixing
-# snapshots from another OS/source into the same backup target.
+# snapshots from another OS/source into the same backup target. Parent mismatch
+# is always a hard error; there is no unsafe override.
 verify_incremental_parent = true
 
 # Performance/safety balance. When true, the first incremental parent for each
@@ -217,10 +218,6 @@ verify_incremental_parent = true
 # same run trust the chain that this process just created, avoiding repeated
 # remote/local UUID checks for every single incremental send.
 verify_incremental_parent_once_per_run = true
-
-# Dangerous escape hatch. Keep false. If true, the app may continue when it
-# cannot prove that the selected incremental parent matches the current source.
-allow_incremental_without_parent_match = false
 
 # Source-side read-only cache for writable Timeshift snapshots.
 # Create only the top-level cache_root manually once on the source.
@@ -241,8 +238,10 @@ cleanup_superseded_cache = true
 # Optional Btrfs send compressed-data mode.
 # true adds: btrfs send --compressed-data
 # This preserves already-compressed source extents when supported.
-# Destination compression is intentionally not configured by this app; use your
-# destination filesystem mount options/properties outside the app if needed.
+# Destination compression is intentionally not configured by this app.
+# If you want compressed destination storage, mount the receiving Btrfs
+# filesystem/subvolume with compression enabled, for example compress=zstd
+# or compress=zstd:<level>, before running this app.
 send_compressed_data = true
 
 # Optional Btrfs send protocol version.

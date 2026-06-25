@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.4.12
+# Config and CLI audit for v0.5.4
 
 This file records the audit requested after v0.2.3.
 
@@ -120,7 +120,6 @@ This file records the audit requested after v0.2.3.
 - `verify_subvolumes_at_discovery`
 - `verify_incremental_parent`
 - `verify_incremental_parent_once_per_run`
-- `allow_incremental_without_parent_match`
 - `send_compressed_data`
 - `send_proto`
 
@@ -170,6 +169,13 @@ python3 -m timeshift_btrfs_sync show-state --help
 
 
 
+
+## 0.5.4 audit addition
+
+- Bumped project version from `0.4.12` to `0.5.4` at user request.
+- Added documentation that destination compression is outside the app: users who want compressed destination storage must mount the receiving Btrfs filesystem/subvolume with compression enabled before running the app.
+- Confirmed removed destination compression config keys remain rejected so old configs do not silently imply that the app manages destination compression.
+
 ## 0.4.12 audit addition
 
 - Removed destination compression config options from `config.example.toml` and `ts-btrfs.toml`.
@@ -196,7 +202,7 @@ python3 -m timeshift_btrfs_sync show-state --help
 ## 0.2.8 audit addition
 
 - Confirmed no new config or CLI flags were added for high-watermark sync; it is automatic normal sync behavior.
-- Superseded by v0.4.12: destination compression options were later removed from config and code.
+- Superseded by v0.5.4: destination compression options were later removed from config and code.
 - Confirmed `config.example.toml` parses with the new default.
 - Confirmed `init-config` writes the same full commented config example.
 
@@ -332,3 +338,8 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Confirmed all captured command stderr is copied to `.err` and mirrored to the terminal, even for expected negative probes.
 - Confirmed pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is copied to `.err` live.
 - Confirmed mbuffer output is also copied to `.mbuffer`, and Btrfs verbose output is also copied to `.btrfs-out` when enabled.
+
+
+## Removed config options
+
+- `source.allow_incremental_without_parent_match` was removed in 0.5.4. Incremental parent mismatches are now hard errors.
