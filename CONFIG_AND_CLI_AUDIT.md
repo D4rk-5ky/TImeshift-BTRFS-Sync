@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.2.16
+# Config and CLI audit for v0.4.5
 
 This file records the audit requested after v0.2.3.
 
@@ -270,3 +270,26 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Updated `init-config` so it writes the same config.
 - Confirmed the example parses as valid TOML.
 
+
+## 0.4.4 simplified docs audit
+
+- Replaced `README.md` with the simplified version supplied by the user.
+- Replaced `VERSIONING.md` with the version-history-focused version supplied by the user.
+- Kept detailed config and CLI audit information in this file instead of expanding README.md again.
+- Confirmed no CLI flags or config options changed.
+- Confirmed `config.example.toml` still parses and `init-config` still writes the same config.
+
+
+## 0.4.4 short README audit
+
+- README was shortened to focus on current behavior, how features work, and why they are needed.
+- Detailed version history remains in VERSIONING.md.
+- config.example.toml remains the complete commented config reference.
+
+
+## 0.4.5 README reference audit
+
+- README keeps the shorter current-behavior style and avoids changelog/history clutter.
+- README includes a compact command reference for every argparse flag.
+- README includes a compact config reference for every option present in `config.example.toml`.
+- No CLI flags or config options changed.

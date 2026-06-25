@@ -40,16 +40,23 @@ Corrected sequence:
 40th zip -> 0.2.20
 41st zip -> 0.4.1
 42nd zip -> 0.4.2
+43rd zip -> 0.4.4
+44th zip -> 0.4.5
 ```
 
-This build is version `0.4.2`.
+This build is version `0.4.5`.
 
 The version line was intentionally bumped to `0.4.0` at user request. Normal patch releases now continue from the 0.4.x line.
 
 
 ## Changelog
 
-### 0.4.2
+### 0.4.5
+
+- README update: kept the short current-behavior style while adding compact explanations for every CLI flag and every `config.example.toml` option.
+- No functional code changes.
+
+### 0.4.4
 
 - Updated `config.example.toml` and `init-config` output to the new safe-default baseline supplied by the user.
 - Defaults now keep dry-run safety enabled, prune disabled unless explicitly requested, source identity checks enabled, manual snapshot guard enabled, normal on-demand cleanup disabled, and read-only destination property writes disabled.
