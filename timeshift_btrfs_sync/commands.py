@@ -106,12 +106,12 @@ def run_local(
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
-    Normal commands are recorded in .log when logging is enabled. Their stderr
-    is also copied to .err and mirrored to the terminal by default.
+    Normal commands are recorded in .log when logging is enabled. Every byte of
+    stderr is always copied to .err and mirrored to the terminal when present.
 
-    Some probe commands intentionally fail, for example checking whether a cache
-    subvolume already exists. Those callers pass log_stderr=False so expected
-    probe failures do not flood the terminal or .err file.
+    The log_stderr/mirror_stderr parameters are kept for compatibility with older
+    callers, but stderr is no longer suppressible. Even expected probe failures
+    are visible, because hiding stderr made real troubleshooting harder.
     """
 
     proc = subprocess.run(
@@ -127,22 +127,22 @@ def run_local(
 
     logger = runlog.get_logger()
     if logger:
-        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr if log_stderr else "")
+        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr)
 
     # Make normal command stderr visible in the terminal too. Pipeline stderr is
     # handled separately by stream_pipeline(), so this only affects captured
     # commands such as btrfs subvolume show/delete and property checks.
-    if log_stderr and mirror_stderr and proc.stderr:
-        print(f"COMMAND STDERR: {shlex.join(cmd)}", file=sys.stderr)
-        print(proc.stderr.rstrip(), file=sys.stderr)
+    if proc.stderr:
+        print(f"COMMAND STDERR: {shlex.join(cmd)}", file=runlog.terminal_stderr())
+        print(proc.stderr.rstrip(), file=runlog.terminal_stderr())
 
     # Some tools, including Timeshift, may print useful failure details to
     # stdout instead of stderr. Do not mirror stdout for every successful
     # command because that would make normal output noisy, but allow selected
     # callers to expose stdout when a command fails.
     if check and proc.returncode != 0 and mirror_stdout_on_failure and proc.stdout:
-        print(f"COMMAND STDOUT: {shlex.join(cmd)}", file=sys.stderr)
-        print(proc.stdout.rstrip(), file=sys.stderr)
+        print(f"COMMAND STDOUT: {shlex.join(cmd)}", file=runlog.terminal_stderr())
+        print(proc.stdout.rstrip(), file=runlog.terminal_stderr())
 
     if check and proc.returncode != 0:
         raise CommandError(cmd, proc.returncode, proc.stdout, proc.stderr)
@@ -180,7 +180,7 @@ def stream_pipeline(
       * command/control output goes to .log
       * mbuffer progress/summary goes to .mbuffer and terminal
       * btrfs verbose send/receive output goes to .btrfs-out and terminal
-      * stderr/error output goes to .err on failure
+      * every stderr stream goes to .err and terminal as it appears
       * .log is not flooded with mbuffer or verbose Btrfs output
     """
 
@@ -190,14 +190,15 @@ def stream_pipeline(
         # Print each pipeline command as its own readable block. The blank lines
         # make it much easier to see when a transfer changes from one subvolume
         # to the next.
-        print(file=sys.stderr)
-        print("REMOTE SEND:", shlex.join(left_cmd), file=sys.stderr)
-        print(file=sys.stderr)
+        term_err = runlog.terminal_stderr()
+        print(file=term_err)
+        print("REMOTE SEND:", shlex.join(left_cmd), file=term_err)
+        print(file=term_err)
         if middle_cmd:
-            print("STREAM BUFFER:", shlex.join(middle_cmd), file=sys.stderr)
-            print(file=sys.stderr)
-        print("LOCAL RECEIVE:", shlex.join(right_cmd), file=sys.stderr)
-        print(file=sys.stderr)
+            print("STREAM BUFFER:", shlex.join(middle_cmd), file=term_err)
+            print(file=term_err)
+        print("LOCAL RECEIVE:", shlex.join(right_cmd), file=term_err)
+        print(file=term_err)
 
     if logger:
         logger.pipeline_commands(left_cmd, right_cmd, middle_cmd)
@@ -242,37 +243,37 @@ def stream_pipeline(
     right_out_chunks: list[str] = []
     right_err_chunks: list[str] = []
 
-    # Remote btrfs send stderr is shown live only when btrfs verbose is enabled.
-    # If not shown live, it is still captured for .err and CommandError.
+    # Remote btrfs send stderr is always shown live and logged to .err.
+    # When btrfs verbose is enabled it is also copied to .btrfs-out.
     threads.append(runlog.tee_pipe_to_log(
         left.stderr,
         stream_name="remote-send-stderr",
-        terminal=sys.stderr if passthrough_left_stderr else None,
+        terminal=runlog.terminal_stderr(),
         to_mbuffer=False,
         to_btrfs_out=bool(logger and passthrough_left_stderr),
-        to_err=False,
+        to_err=True,
         capture=left_err_chunks,
     ))
 
-    # mbuffer writes normal progress to stderr. We want it on screen and in .mbuffer,
-    # but not in .log and not in .err unless the whole pipeline fails.
+    # mbuffer writes progress to stderr. It stays in .mbuffer, and because it is
+    # stderr it is also copied to terminal and .err.
     if middle and middle.stderr is not None:
         threads.append(runlog.tee_pipe_to_log(
             middle.stderr,
             stream_name="mbuffer",
-            terminal=sys.stderr if verbose else None,
+            terminal=runlog.terminal_stderr(),
             to_mbuffer=bool(logger),
             to_btrfs_out=False,
-            to_err=False,
+            to_err=True,
             capture=middle_err_chunks,
         ))
 
-    # btrfs receive stdout/stderr is shown live only in verbose mode. Otherwise
-    # it is captured quietly for error reporting.
+    # btrfs receive stdout is only shown in verbose mode. btrfs receive stderr is
+    # always shown live and logged to .err; with verbose it is also in .btrfs-out.
     threads.append(runlog.tee_pipe_to_log(
         right.stdout,
         stream_name="local-receive-stdout",
-        terminal=sys.stdout if passthrough_right_stdout else None,
+        terminal=runlog.terminal_stdout() if passthrough_right_stdout else None,
         to_mbuffer=False,
         to_btrfs_out=bool(logger and passthrough_right_stdout),
         to_err=False,
@@ -281,10 +282,10 @@ def stream_pipeline(
     threads.append(runlog.tee_pipe_to_log(
         right.stderr,
         stream_name="local-receive-stderr",
-        terminal=sys.stderr if passthrough_right_stderr else None,
+        terminal=runlog.terminal_stderr(),
         to_mbuffer=False,
         to_btrfs_out=bool(logger and passthrough_right_stderr),
-        to_err=False,
+        to_err=True,
         capture=right_err_chunks,
     ))
 
@@ -302,9 +303,7 @@ def stream_pipeline(
     if left_return != 0 or middle_return != 0 or right_return != 0:
         stderr = _join_text(left_err_chunks) + _join_text(middle_err_chunks) + _join_text(right_err_chunks)
         stdout = _join_text(right_out_chunks)
-        if logger and stderr:
-            logger.err("PIPELINE STDERR:")
-            logger.err(stderr)
+        # Stderr has already been mirrored live to .err by the stream readers.
         pipe_text = shlex.join(left_cmd)
         if middle_cmd:
             pipe_text += " | " + shlex.join(middle_cmd)

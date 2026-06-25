@@ -45,14 +45,39 @@ Corrected sequence:
 45th zip -> 0.4.5
 46th zip -> 0.4.6
 47th zip -> 0.4.7
+48th zip -> 0.4.8
+49th zip -> 0.4.9
+50th zip -> 0.4.10
+51st zip -> 0.4.11
 ```
 
-This build is version `0.4.7`.
+This build is version `0.4.11`.
 
 The version line was intentionally bumped to `0.4.0` at user request. Normal patch releases now continue from the 0.4.x line.
 
 
 ## Changelog
+
+### 0.4.11
+
+- Fixed source cache existence detection to use `btrfs subvolume list -o <cache_root>`.
+- Prevents false positives where a normal Timeshift snapshot path like `timeshift-btrfs/snapshots/<date>/@` was mistaken for a cache path `<cache_root>/<date>/@`.
+- This ensures writable new snapshots really get a read-only cache snapshot before `btrfs send`, avoiding empty-stream failures from sending a non-existent cache path.
+- Added the missing `_failure_exit_code()` helper so the original send/receive failure is not masked by a secondary notification error.
+
+### 0.4.10
+
+- Stderr is now unconditional: every external-command stderr stream is mirrored to the terminal and written to `.err` when file logging is enabled.
+- Expected negative probes, including cache-existence checks, readonly-property checks, and best-effort cache-parent deletes, are no longer hidden from terminal or `.err`.
+- Pipeline stderr is also written live to `.err`: remote `btrfs send` stderr, local `btrfs receive` stderr, and `mbuffer` stderr.
+- `mbuffer` output is still also written to `.mbuffer`, and Btrfs verbose output is still also written to `.btrfs-out` when enabled.
+
+### 0.4.8
+
+- Made `sync --dry-run` strict: it no longer runs destination preparation, creates the destination snapshot/state/lock directories, or sets destination compression properties.
+- `sync --dry-run` and `prune --dry-run` no longer create or take the lock file; the lock is only used for real runs.
+- File logging now starts immediately after config loading and before command work begins.
+- While logging is active, normal app stdout is copied to `.log` and normal app stderr is copied to `.err`. Transfer streams remain split into `.mbuffer` and `.btrfs-out` so progress/verbose output does not flood `.log`.
 
 ### 0.4.7
 

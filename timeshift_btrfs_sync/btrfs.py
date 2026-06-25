@@ -90,7 +90,7 @@ def local_btrfs_cmd(sudo: str, btrfs_command: str, args: list[str]) -> list[str]
 def remote_try_subvolume_show(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str, name: str) -> SubvolumeMeta | None:
     """Return remote subvolume metadata or None if invalid."""
 
-    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]), check=False, log_stderr=False, mirror_stderr=False)
+    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]), check=False)
     if result.returncode != 0:
         return None
     return parse_subvolume_show(result.stdout, name=name, path=path)
@@ -106,7 +106,7 @@ def local_subvolume_show(path: Path, sudo: str, name: str, btrfs_command: str = 
 def remote_readonly(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str) -> bool | None:
     """Check remote subvolume read-only property."""
 
-    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", path, "ro"]), check=False, log_stderr=False, mirror_stderr=False)
+    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", path, "ro"]), check=False)
     if result.returncode != 0:
         return None
     return parse_property_ro(result.stdout)
@@ -115,7 +115,7 @@ def remote_readonly(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str) ->
 def local_readonly(path: Path, sudo: str, btrfs_command: str = "btrfs") -> bool | None:
     """Check local subvolume read-only property."""
 
-    result = run_local(local_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", str(path), "ro"]), check=False, log_stderr=False, mirror_stderr=False)
+    result = run_local(local_btrfs_cmd(sudo, btrfs_command, ["property", "get", "-ts", str(path), "ro"]), check=False)
     if result.returncode != 0:
         return None
     return parse_property_ro(result.stdout)
@@ -159,6 +159,143 @@ def readonly_cache_path(cache_root: str, snapshot_name: str, subvolume_name: str
     """Return Timeshift-like source read-only cache path."""
 
     return str(Path(readonly_cache_parent_path(cache_root, snapshot_name)) / _validate_cache_subvolume_name(subvolume_name))
+
+
+def _parse_subvolume_list_paths(output: str) -> list[str]:
+    """Extract path fields from `btrfs subvolume list` output."""
+
+    paths: list[str] = []
+    for line in output.splitlines():
+        match = re.search(r"\bpath\s+(.+)$", line.strip())
+        if match:
+            paths.append(match.group(1).strip().rstrip("/"))
+    return paths
+
+
+def _cache_path_suffix_candidates(cache_root: str, path: str) -> set[str]:
+    """Build possible Btrfs-list suffixes for a cache path.
+
+    `btrfs subvolume list <path>` prints paths relative to the Btrfs filesystem
+    root, not necessarily the absolute mount path used in the config. Because
+    the app does not know the source mount point, compare by conservative
+    suffixes derived from both the configured cache root and the path below it.
+    """
+
+    root_path = Path(cache_root)
+    target_path = Path(path)
+    candidates: set[str] = set()
+
+    try:
+        rel = target_path.relative_to(root_path)
+    except ValueError:
+        rel = Path(target_path.name)
+
+    rel_text = str(rel).strip("/")
+    if rel_text:
+        candidates.add(rel_text)
+
+    root_parts = [part for part in root_path.parts if part not in {"/", ""}]
+    for index in range(len(root_parts)):
+        tail = "/".join(root_parts[index:]).strip("/")
+        if not tail:
+            continue
+        candidates.add(f"{tail}/{rel_text}".strip("/"))
+
+    abs_text = str(target_path).strip("/")
+    if abs_text:
+        candidates.add(abs_text)
+    return {candidate.rstrip("/") for candidate in candidates if candidate}
+
+
+def _subvolume_list_contains_cache_path(output: str, cache_root: str, path: str) -> bool:
+    """Return True if `btrfs subvolume list` appears to contain `path`."""
+
+    listed_paths = _parse_subvolume_list_paths(output)
+    candidates = _cache_path_suffix_candidates(cache_root, path)
+    for listed in listed_paths:
+        listed = listed.strip("/").rstrip("/")
+        if listed in candidates:
+            return True
+        for candidate in candidates:
+            if listed.endswith("/" + candidate):
+                return True
+    return False
+
+
+def remote_cache_subvolume_exists(
+    ssh: SSHRunner,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str | None,
+    path: str,
+) -> bool:
+    """Check whether a cache subvolume exists without probing the missing path.
+
+    This must avoid two different traps:
+
+    * `btrfs subvolume show <missing-cache-path>` prints noisy expected stderr
+      when a cache child such as @home has not been created yet.
+    * `btrfs subvolume list <cache_root>` without `-o` may list every subvolume
+      in the filesystem. A normal Timeshift snapshot path like
+      `timeshift-btrfs/snapshots/<date>/@` then has the same suffix as the
+      wanted cache path `<date>/@`, causing a false positive.
+
+    Use `btrfs subvolume list -o <cache_root>` so Btrfs restricts the result to
+    descendants of the configured cache root. Then suffix matching is safe for
+    both possible output styles: relative paths such as `<date>/@` and full
+    filesystem-relative paths such as `timeshift-btrfs/.ts-btrfs-sync/send-cache/<date>/@`.
+    """
+
+    if not cache_root or not path_is_under_cache(path, cache_root):
+        return False
+    result = ssh.run(
+        remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", cache_root]),
+        check=False,
+    )
+    if result.returncode != 0:
+        return False
+    return _subvolume_list_contains_cache_path(result.stdout, cache_root, path)
+
+
+def remote_ensure_cache_parent(
+    ssh: SSHRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str,
+    cache_parent: str,
+) -> None:
+    """Ensure the per-snapshot cache parent exists as a Btrfs subvolume.
+
+    The cache layout is `<cache_root>/<snapshot-name>/@` and optionally
+    `<cache_root>/<snapshot-name>/@home`. When @ is prepared first it creates
+    the date parent; when @home is prepared later, the parent already exists and
+    that must be treated as normal, not as a failing condition.
+    """
+
+    if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_parent):
+        return
+
+    result = ssh.run(
+        remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "create", cache_parent]),
+        check=False,
+    )
+    if result.returncode == 0:
+        return
+
+    # Race/previous-subvolume case: another subvolume path may have created the
+    # date parent just before this command. Re-check with the non-probing list
+    # helper and continue if it really exists as a Btrfs subvolume.
+    if "target path already exists" in result.stderr.lower():
+        if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_parent):
+            return
+        raise RuntimeError(
+            "Source cache parent path already exists but is not detected as a Btrfs subvolume:\n"
+            f"  {cache_parent}\n"
+            "This may be a stale ordinary directory in the cache root. Inspect it manually."
+        )
+
+    raise RuntimeError("Failed to create source cache parent subvolume.\n" + result.stderr.strip())
 
 
 def remote_ensure_readonly_send_path(
@@ -217,19 +354,35 @@ def remote_ensure_readonly_send_path(
 
     cache_parent = readonly_cache_parent_path(cache_root, snapshot_name)
     cache_path = readonly_cache_path(cache_root, snapshot_name, subvolume_name)
-    if remote_try_subvolume_show(ssh, sudo, btrfs_command, cache_path, subvolume_name):
+
+    # Check for an existing cache snapshot without probing the missing path
+    # directly. Missing @home under an existing date parent is normal when @ was
+    # prepared first, so avoid noisy expected "No such file" stderr here.
+    if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_path):
         return cache_path
 
-    # Create per-snapshot parent with btrfs, not mkdir.
-    ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "create", cache_parent]), check=False, log_stderr=False, mirror_stderr=False)
+    remote_ensure_cache_parent(
+        ssh,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        cache_root=cache_root,
+        cache_parent=cache_parent,
+    )
 
     result = ssh.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "snapshot", "-r", original_path, cache_path]),
         check=False,
     )
-    if result.returncode != 0:
-        raise RuntimeError("Failed to create read-only source cache snapshot.\n" + result.stderr.strip())
-    return cache_path
+    if result.returncode == 0:
+        return cache_path
+
+    # If another attempt created the target between the list check and the
+    # snapshot command, accept it only after Btrfs confirms that the target is a
+    # cache subvolume.
+    if "target path already exists" in result.stderr.lower():
+        if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_path):
+            return cache_path
+    raise RuntimeError("Failed to create read-only source cache snapshot.\n" + result.stderr.strip())
 
 
 def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
@@ -290,7 +443,7 @@ def remote_try_delete_cache_subvolume(
     if not path_is_under_cache(path, cache_root):
         return False
     assert path is not None
-    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False, log_stderr=False, mirror_stderr=False)
+    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False)
     return result.returncode == 0
 
 

@@ -96,9 +96,9 @@ class SSHRunner:
     ) -> Completed:
         """Run a remote command and capture stdout/stderr.
 
-        log_stderr/mirror_stderr are disabled for expected negative probes such
-        as "does this cache subvolume already exist?" so those probes do not
-        spam the terminal or .err log.
+        Stderr is always mirrored to the terminal and to .err when file logging
+        is enabled. The log_stderr/mirror_stderr arguments are kept only for
+        compatibility with older callers and no longer suppress stderr.
         """
 
         return run_local(

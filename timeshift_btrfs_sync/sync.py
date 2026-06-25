@@ -328,28 +328,46 @@ def _cleanup_superseded_source_cache(
         return
 
     # The cache layout is <cache_root>/<snapshot-name>/<subvolume>. The
-    # per-snapshot parent was created with `btrfs subvolume create`. After @ and
-    # @home have both been deleted, deleting the parent succeeds. If another
-    # cached subvolume still exists, Btrfs refuses the delete; that is expected
-    # and safely ignored.
+    # per-snapshot parent was created with `btrfs subvolume create`. Only delete
+    # that date parent after every configured cached child below it is gone.
+    # This avoids trying to delete the date parent after @ while @home still
+    # needs it, and also avoids expected "Directory not empty" stderr.
     parent_cache_dir = str(Path(parent_send_path).parent)
     if btrfs.path_is_under_cache(parent_cache_dir, config.source.cache_root):
-        parent_result = btrfs.remote_delete_subvolume(
-            ssh,
-            config.source.sudo,
-            config.source.btrfs_command,
-            parent_cache_dir,
-            check=False,
-            log_stderr=False,
-            mirror_stderr=False,
-        )
-        if parent_result.returncode == 0:
+        remaining_children: list[str] = []
+        for configured_subvol in config.source.subvolumes:
+            child_path = str(Path(parent_cache_dir) / configured_subvol)
+            if btrfs.remote_cache_subvolume_exists(
+                ssh,
+                config.source.sudo,
+                config.source.btrfs_command,
+                config.source.cache_root,
+                child_path,
+            ):
+                remaining_children.append(configured_subvol)
+
+        if remaining_children:
             print()
-            print(f"SOURCE CACHE PARENT DELETE: {parent_cache_dir}")
-        elif parent_result.stderr and "directory not empty" not in parent_result.stderr.lower():
-            print()
-            print("WARNING: source cache parent cleanup failed; leaving parent in place")
-            print(parent_result.stderr.strip())
+            print(
+                "SOURCE CACHE PARENT KEEP: "
+                f"{parent_cache_dir} still contains cached {', '.join(remaining_children)}"
+            )
+        else:
+            parent_result = btrfs.remote_delete_subvolume(
+                ssh,
+                config.source.sudo,
+                config.source.btrfs_command,
+                parent_cache_dir,
+                check=False,
+            )
+            if parent_result.returncode == 0:
+                print()
+                print(f"SOURCE CACHE PARENT DELETE: {parent_cache_dir}")
+            else:
+                print()
+                print("WARNING: source cache parent cleanup failed; leaving parent in place")
+                if parent_result.stderr.strip():
+                    print(parent_result.stderr.strip())
     _human_rule("---")
 
 
@@ -810,7 +828,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     later snapshots in the same run can become incremental.
     """
 
-    prepare_destination(config)
+    if dry_run:
+        print("Strict dry-run: destination preparation is skipped; no target directories or compression properties are created/changed.")
+        _human_rule("----")
+    else:
+        prepare_destination(config)
 
     # Create one SSH runner. The same runner config supplies the SSH command and
     # optional SSHPASS environment for normal commands and streaming sends.

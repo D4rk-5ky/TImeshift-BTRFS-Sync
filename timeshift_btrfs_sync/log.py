@@ -213,6 +213,70 @@ class RunLogger:
             self._write(self._err_fh, tagged)
 
 
+
+class TeeTextIO:
+    """Terminal stream wrapper that also writes normal app output to run logs.
+
+    This is used only while a command is running with file logging enabled.
+    stdout is copied to the normal .log file. stderr is copied to .err and kept
+    as the latest stderr tail for failure notifications.
+
+    Streaming transfer output from mbuffer/Btrfs bypasses this wrapper and is
+    written to .mbuffer/.btrfs-out directly. Stderr from those processes is also
+    written to .err so the error log contains every stderr source.
+    """
+
+    def __init__(self, wrapped, logger: RunLogger, stream_kind: str):
+        self._wrapped = wrapped
+        self._logger = logger
+        self._stream_kind = stream_kind
+        self.encoding = getattr(wrapped, "encoding", "utf-8")
+        self.errors = getattr(wrapped, "errors", "replace")
+
+    def write(self, data):
+        if not isinstance(data, str):
+            data = str(data)
+        self._wrapped.write(data)
+        self._wrapped.flush()
+        if data:
+            if self._stream_kind == "stdout":
+                self._logger._write(self._logger._log_fh, data)
+            else:
+                self._logger._remember_stderr(data)
+                self._logger._write(self._logger._err_fh, data)
+        return len(data)
+
+    def flush(self):
+        self._wrapped.flush()
+
+    def isatty(self):
+        return bool(getattr(self._wrapped, "isatty", lambda: False)())
+
+    def fileno(self):
+        return self._wrapped.fileno()
+
+    def writable(self):
+        return True
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+_terminal_stdout = sys.stdout
+_terminal_stderr = sys.stderr
+
+
+def terminal_stdout():
+    """Return the real terminal stdout, bypassing the run-log tee wrapper."""
+
+    return _terminal_stdout
+
+
+def terminal_stderr():
+    """Return the real terminal stderr, bypassing the run-log tee wrapper."""
+
+    return _terminal_stderr
+
 _current_logger: RunLogger | None = None
 
 
@@ -224,15 +288,37 @@ def get_logger() -> RunLogger | None:
 
 @contextmanager
 def active_logger(logger: RunLogger | None) -> Iterator[None]:
-    """Temporarily install a run logger as the process-wide logger."""
+    """Temporarily install a run logger and tee app output to files.
 
-    global _current_logger
-    old = _current_logger
+    The logger is activated immediately after the config is loaded. While it is
+    active, normal stdout from the app is copied to .log and normal stderr is
+    copied to .err. Transfer streams still use dedicated logging paths so
+    mbuffer progress goes to .mbuffer and Btrfs verbose output goes to
+    .btrfs-out without flooding .log/.err.
+    """
+
+    global _current_logger, _terminal_stdout, _terminal_stderr
+    old_logger = _current_logger
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    old_terminal_stdout = _terminal_stdout
+    old_terminal_stderr = _terminal_stderr
+
     _current_logger = logger
+    if logger:
+        _terminal_stdout = old_stdout
+        _terminal_stderr = old_stderr
+        sys.stdout = TeeTextIO(old_stdout, logger, "stdout")
+        sys.stderr = TeeTextIO(old_stderr, logger, "stderr")
     try:
         yield
     finally:
-        _current_logger = old
+        if logger:
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+            _terminal_stdout = old_terminal_stdout
+            _terminal_stderr = old_terminal_stderr
+        _current_logger = old_logger
         if logger:
             logger.close()
 

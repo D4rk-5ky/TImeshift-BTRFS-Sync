@@ -250,7 +250,7 @@ The pipeline lets that Btrfs verbose output pass through live to the terminal. T
 ## 0.2.5 notes
 
 - `sync.py` now includes interrupted receive cleanup controlled by `destination.cleanup_incomplete_receive`.
-- `commands.py` mirrors captured stderr to the terminal, except for expected quiet probes.
+- `commands.py` mirrors all captured stderr to the terminal and `.err`, including expected negative probes.
 - Source cache cleanup now prints a separator before the next transfer block.
 
 
@@ -262,3 +262,18 @@ Manual snapshot creation intentionally omits explicit `--tags O`. Timeshift defa
 ## timeshift_btrfs_sync/mail.py
 
 Contains all optional SMTP email notification logic. It uses Python standard library `smtplib` and `email.message`, builds success/failure status payloads, supports optional username/password or password_file, STARTTLS, implicit SMTP SSL, and sends plain-text status emails.
+
+
+## 0.4.8 behavior notes
+
+- `timeshift_btrfs_sync/cli.py` resolves dry-run before taking the lock. Dry-run sync/prune paths skip `FileLock` so they do not create lock/state directories.
+- `timeshift_btrfs_sync/sync.py` calls `prepare_destination()` only for real sync runs. Strict dry-run prints the plan without creating destination folders or setting compression properties.
+- `timeshift_btrfs_sync/log.py` now tees normal app stdout to `.log` and normal app stderr to `.err` while a run logger is active. Transfer streams still bypass this tee for specialized logs, but their stderr is also copied to `.err`.
+
+
+## 0.4.10 stderr logging audit
+
+- `timeshift_btrfs_sync/commands.py` no longer suppresses stderr for expected negative probes.
+- All captured command stderr is mirrored to the terminal and written to `.err` when file logging is enabled.
+- Pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is written live to `.err`.
+- `mbuffer` stderr is still also written to `.mbuffer`, and Btrfs verbose stderr is still also written to `.btrfs-out` when enabled.

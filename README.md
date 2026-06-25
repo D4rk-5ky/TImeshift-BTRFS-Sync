@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.7
+# timeshift-btrfs-sync v0.4.11
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -28,7 +28,7 @@ Version history is kept in [`VERSIONING.md`](VERSIONING.md). The complete commen
 
 The safe defaults are intentionally conservative:
 
-- `default_dry_run = true` previews changes unless `--run` is passed.
+- `default_dry_run = true` previews changes unless `--run` is passed. In strict dry-run mode the app does not prepare the destination, create lock/state directories, run `btrfs receive`, or delete/prune snapshots.
 - Destination pruning only deletes when `--run --yes-delete` is used.
 - Incremental parents are verified with Btrfs UUID metadata before use.
 - Automatic source-side manual snapshot creation can require a UUID-confirmed source identity first.
@@ -101,6 +101,8 @@ sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
 sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
 ```
 
+The app checks cache paths with `btrfs subvolume list -o <cache_root>` so normal Timeshift snapshot paths with the same date/name are not mistaken for existing cache snapshots.
+
 The newest cache snapshot is kept because it is the next incremental parent. Older superseded cache snapshots are deleted only after a newer send succeeds.
 
 ## Optional automatic on-demand snapshots
@@ -142,13 +144,13 @@ Normal/user-created Timeshift on-demand snapshots are kept unless `retention.cle
 
 ## Logging and notifications
 
-Set top-level `log_dir` to enable split per-run logs:
+Set top-level `log_dir` to enable split per-run logs. Logging starts immediately after the config is loaded and before command work begins. Normal app stdout is copied to `.log`. **All external-command stderr is mirrored to the terminal and written to `.err`**, including expected probe failures, mbuffer stderr, and Btrfs send/receive stderr. Transfer streams are still split into their specialized logs so they are easier to read:
 
 ```text
 *.log        normal command/control output
-*.err        stderr/error output
-*.mbuffer    mbuffer progress and summary
-*.btrfs-out  Btrfs send/receive verbose output
+*.err        every stderr stream and error output
+*.mbuffer    mbuffer progress and summary, also stderr-copy goes to .err
+*.btrfs-out  Btrfs send/receive verbose output, also stderr-copy goes to .err
 ```
 
 Email notifications can attach these log files when `mail.attach_logs = true`. Missing files and 0-byte files are skipped. `mail.max_attachment_bytes` can limit attachment size.
@@ -265,7 +267,7 @@ Pulls missing source snapshot subvolumes to the destination.
 | Flag | What it does | Why it may be needed |
 |---|---|---|
 | `--config`, `-c` | Loads the chosen TOML config. | Needed for all source, destination, stream, retention, and notification settings. |
-| `--dry-run` | Prints the sync/prune plan without receiving or deleting anything. | Safest way to inspect what the app intends to do. |
+| `--dry-run` | Prints the sync/prune plan without destination preparation, lock creation, receiving, state writing, manual snapshot creation, or deletion. | Safest way to inspect what the app intends to do without touching the destination, except optional log files. |
 | `--run` | Performs real send/receive work. | Required for actual backup changes. |
 | `--limit LIMIT` | Transfers at most this many subvolumes. | Useful for first live testing, for example `--run --limit 1`. |
 | `--snapshot SNAPSHOT` | Syncs only one Timeshift snapshot name. | Useful for targeted testing or retrying one known snapshot. Automatic manual snapshot creation is skipped. |
@@ -280,7 +282,7 @@ Applies destination retention without syncing first.
 | Flag | What it does | Why it may be needed |
 |---|---|---|
 | `--config`, `-c` | Loads the chosen TOML config. | Needed for destination and retention settings. |
-| `--dry-run` | Shows what would be deleted. | Use before real pruning to verify retention behavior. |
+| `--dry-run` | Shows what would be deleted without creating a lock file, saving state, or deleting anything. | Use before real pruning to verify retention behavior. |
 | `--run` | Allows pruning to run for real if `--yes-delete` is also present. | Required for actual deletion. |
 | `--yes-delete` | Confirms real deletion. | Prevents accidental destructive retention cleanup. |
 
@@ -311,9 +313,9 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | Option | What it does | Why it may be needed |
 |---|---|---|
 | `name` | Human-readable job name used in output, notifications, and log filenames. | Helps recognize which backup job sent a mail/MQTT message or produced a log. |
-| `default_dry_run` | Makes commands preview by default unless `--run` is passed. | Safe default to avoid accidental sends or deletes. |
+| `default_dry_run` | Makes commands preview by default unless `--run` is passed. Dry-run skips destination preparation, lock creation, receives, state writes, manual snapshot creation, and prune deletion. | Safe default to avoid accidental writes or deletes while checking the plan. |
 | `prune_after_sync` | Automatically runs the prune step after successful sync. | Useful for scheduled jobs, but real deletion still requires `--run --yes-delete`. |
-| `log_dir` | Directory for split per-run log files; blank/omitted disables file logging. | Needed for persistent debug logs and email log attachments. The directory is created automatically. |
+| `log_dir` | Directory for split per-run log files; blank/omitted disables file logging. The log directory is created before command work begins. | Needed for persistent debug logs and email log attachments. This is the one intentional dry-run write when file logging is enabled. |
 | `state_file` | Optional custom path for `state.json`; default is under `<target_root>/.ts-btrfs-sync/`. | Use only when you need app metadata outside `target_root`. |
 | `lock_file` | Optional custom path for the lock file; default is under `<target_root>/.ts-btrfs-sync/`. | Prevents two jobs from writing the same target at the same time. |
 

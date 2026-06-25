@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.4.7
+# Config and CLI audit for v0.4.11
 
 This file records the audit requested after v0.2.3.
 
@@ -300,7 +300,7 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Added optional `pyinstaller` dependency extra in `pyproject.toml`.
 - Added `tools/pyinstaller_entry.py` as a small executable build entry point.
 - Added `scripts/build_pyinstaller.py` with `--mode onedir`, `--mode onefile`, and `--mode both`.
-- README documented recommended onedir and one-file build commands; those details were moved to INSTALL.md in 0.4.7.
+- README documented recommended onedir and one-file build commands; those details were moved to INSTALL.md in 0.4.11.
 - MQTT remains optional; use `python3 -m pip install -e '.[mqtt,pyinstaller]'` and `--with-mqtt` for MQTT-capable executables.
 
 
@@ -310,3 +310,19 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - README links to `INSTALL.md` for installation and PyInstaller executable builds.
 - PyInstaller helper commands remain documented in `INSTALL.md`.
 - No CLI/config behavior changed.
+
+
+## 0.4.8 audit note
+
+- No new config options or CLI flags were added.
+- Confirmed `sync --dry-run` is strict: it skips `prepare_destination()`, does not create the destination lock file, does not receive data, does not save state, and prune runs in dry-run mode only.
+- Confirmed `prune --dry-run` does not create/take the lock file and does not save state.
+- Confirmed file logging is activated immediately after config loading and before command work begins.
+- Confirmed normal app stdout is copied to `.log`.
+
+## 0.4.11 audit note
+
+- No new config options or CLI flags were added.
+- Confirmed all captured command stderr is copied to `.err` and mirrored to the terminal, even for expected negative probes.
+- Confirmed pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is copied to `.err` live.
+- Confirmed mbuffer output is also copied to `.mbuffer`, and Btrfs verbose output is also copied to `.btrfs-out` when enabled.
