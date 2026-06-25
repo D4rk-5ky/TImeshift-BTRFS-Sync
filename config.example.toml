@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.2.19 config
+# timeshift-btrfs-sync v0.4.2 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -94,6 +94,15 @@ to_addrs = ["admin@example.com"]
 subject_prefix = "[timeshift-btrfs-sync]"
 include_json = true
 
+# Attach split run logs to the email when top-level log_dir is enabled.
+# The app attaches only files that exist for this run, in this order:
+#   .log, .err, .mbuffer, .btrfs-out
+attach_logs = true
+
+# Optional safety cap for each attachment in bytes. 0 means no size cap.
+# This can be useful if btrfs_verbose creates a very large .btrfs-out file.
+max_attachment_bytes = 0
+
 # Control whether success and/or failure messages are sent.
 notify_on_success = true
 notify_on_failure = true
@@ -147,7 +156,7 @@ extra_args = ["-o", "BatchMode=yes"]
 # explicit --tags O even though the help text lists O as valid.
 # Dry-run only prints what would happen. If --snapshot is used, automatic
 # creation is skipped because that command is a targeted sync.
-enabled = false
+enabled = true
 
 # Independent cleanup for app-created on-demand snapshots.
 # This only affects tag O snapshots whose saved Timeshift comment contains marker.
@@ -233,7 +242,7 @@ cleanup_superseded_cache = true
 # true adds: btrfs send --compressed-data
 # This preserves already-compressed source extents when supported. It is not the
 # same thing as choosing destination compression.
-send_compressed_data = false
+send_compressed_data = true
 
 # Optional Btrfs send protocol version.
 # Example: send_proto = 2 adds: btrfs send --proto 2
@@ -270,7 +279,7 @@ cleanup_incomplete_receive = true
 # Accepted: zstd, lzo, zlib, none, or blank.
 # zstd:3 is accepted but normalized to zstd because `btrfs property set` does
 # not set compression levels. Use mount options for exact levels.
-compression = "zstd"
+compression = "none"
 
 # Before receive, set compression on the destination snapshot parent directory.
 set_compression_before_receive = true
@@ -287,7 +296,7 @@ set_compression_after_receive = false
 #   ssh source 'btrfs send ...' | btrfs receive ...
 # true pipeline:
 #   ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
-use_mbuffer = false
+use_mbuffer = true
 
 # mbuffer command and memory buffer size.
 mbuffer_command = "mbuffer"
@@ -318,10 +327,10 @@ btrfs_verbose = false
 #
 # Important: `prune_after_sync = true` or `--prune` only enables the prune step.
 # Real deletion still requires `--run --yes-delete`.
-hourly = 6
+hourly = 36
 daily = 7
 weekly = 4
-monthly = 6
+monthly = 12
 boot = 5
 # Retention count for normal/user-created Timeshift on-demand snapshots.
 # This is ignored unless cleanup_ondemand = true.

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.2.19
+# timeshift-btrfs-sync v0.4.2
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -31,14 +31,14 @@ MIT License. See [`LICENSE`](LICENSE).
 Destination-pull sync for Timeshift Btrfs snapshots over SSH.
 
 This build keeps fast discovery, but adds an incremental parent guard so the app
-does not accidentally use destination snapshots from another OS/source as parents. This build also adds optional MQTT and email status notifications.
+does not accidentally use destination snapshots from another OS/source as parents. This build also adds optional MQTT and email status notifications, including optional email attachments for the split run logs.
 
 ## Version
 
 This build version is:
 
 ```text
-0.2.19
+0.4.2
 ```
 
 See `VERSIONING.md` for the count.
@@ -60,6 +60,7 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - New state entries store both the original Timeshift source UUID and the exact send-path UUID, which matters when writable snapshots are sent through a read-only cache.
 - Optional MQTT success/failure notifications using `paho-mqtt`.
 - Optional email success/failure notifications using Python standard library `smtplib` / `email`.
+- Optional email attachments for the run `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files when file logging is enabled.
 - Adds `timeshift_btrfs_sync/mqtt.py` so MQTT logic is kept in one file.
 - Adds `timeshift_btrfs_sync/mail.py` so email logic is kept in one file.
 - MQTT and email failure notifications include the config `name`, command, exit code, error text, and latest stderr tail.
@@ -91,19 +92,21 @@ A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major func
 - Clear documentation that pruning needs `--yes-delete` before any real deletion happens.
 
 
-## 0.2.19 README warning/disclaimer order
+## Mail log attachments
 
-The README now starts in this order:
+Email notifications can now attach the split run log files when top-level `log_dir` is enabled.
+
+The attached files are, if they exist for the run:
 
 ```text
-# Project name
-AI-assisted / vibe-coded warning
-Disclaimer
-Data Loss Warning
-License
+*.log
+*.err
+*.mbuffer
+*.btrfs-out
 ```
 
-The project license remains MIT.
+This keeps the email body short while still giving you the detailed normal log,
+error log, mbuffer progress log, and Btrfs verbose-output log for debugging.
 
 ## 0.2.17 Timeshift on-demand tag workaround
 
@@ -570,7 +573,7 @@ file so it is easy to recognize in Home Assistant:
   "timestamp": "2026-06-24T10:40:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.19"
+  "version": "0.4.2"
 }
 ```
 
@@ -591,7 +594,7 @@ stderr text that the app captured:
   "timestamp": "2026-06-24T10:41:00+00:00",
   "host": "backup-host",
   "app": "timeshift-btrfs-sync",
-  "version": "0.2.19"
+  "version": "0.4.2"
 }
 ```
 
@@ -706,6 +709,8 @@ subject_prefix = "[timeshift-btrfs-sync]"
 notify_on_success = true
 notify_on_failure = true
 include_json = true
+attach_logs = true
+max_attachment_bytes = 0
 ```
 
 For implicit SMTP SSL, use port 465 and set:
@@ -718,6 +723,20 @@ starttls = false
 Success mail includes the job name from the top-level `name` config, the command,
 exit code, host, timestamp, and optional JSON payload. Failure mail includes the
 same fields plus the error text and latest captured stderr tail.
+
+When `mail.attach_logs = true` and top-level `log_dir` is set, the email also
+attaches the split run log files that exist for that run:
+
+```text
+.log
+.err
+.mbuffer
+.btrfs-out
+```
+
+Set `mail.max_attachment_bytes` to a positive byte count to skip very large
+attachments, for example if `btrfs_verbose = true` creates a huge `.btrfs-out`
+file. The default `0` means no size cap.
 
 ## Interrupted receive recovery
 
@@ -1233,6 +1252,8 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `subject_prefix` | Prefix for success/failure email subjects. |
 | `timeout` | SMTP connect/send timeout in seconds. |
 | `include_json` | If true, append the JSON status payload to the plain-text email body. |
+| `attach_logs` | If true, attach the run `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files when `log_dir` is enabled and the files exist. |
+| `max_attachment_bytes` | Optional per-file attachment size cap in bytes. `0` means no size cap. |
 | `notify_on_success` | If true, send email after a successful command. |
 | `notify_on_failure` | If true, send email after a failed command. |
 
@@ -1321,6 +1342,22 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `protected_snapshots` | Snapshot names that are never pruned. |
 
 ## Changelog
+
+### 0.4.2
+
+- Updated `config.example.toml` and `init-config` output to the new safe-default baseline supplied by the user.
+- Defaults now keep dry-run safety enabled, prune disabled unless explicitly requested, source identity checks enabled, manual snapshot guard enabled, normal on-demand cleanup disabled, and read-only destination property writes disabled.
+
+### 0.4.1
+
+- Version bump from `0.2.20` to `0.4.1`.
+- No functional changes from `0.2.20`; this is the same mail-log-attachment build under the new version number.
+
+### 0.2.20
+
+- Added optional mail attachments for split run log files when `log_dir` is enabled.
+- Mail can attach `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files if they exist for the run.
+- Added `mail.attach_logs` and `mail.max_attachment_bytes` config options.
 
 ### 0.2.19
 
@@ -1499,3 +1536,8 @@ Every option below is also present in `config.example.toml`. Options commented o
 - Added more explanatory comments/docstrings around functions, commands, config sections, and performance options.
 - Added `VERSIONING.md` explaining the zip count and corrected version sequence.
 
+
+
+### Mail attachment empty-file guard
+
+Mail notifications skip 0-byte `.log`, `.err`, `.mbuffer`, and `.btrfs-out` attachments. Skipped empty files are listed in the email body.

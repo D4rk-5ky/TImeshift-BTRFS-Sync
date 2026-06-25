@@ -230,6 +230,13 @@ when available, and `timeshift_btrfs_sync.timeshift.create_remote_manual_snapsho
 asks the command runner to mirror stdout when the create command fails.
 
 
+## 0.4.1 version bump audit
+
+- Bumped package version from `0.2.20` to `0.4.1`.
+- Updated `pyproject.toml`, `timeshift_btrfs_sync/__init__.py`, README version text, config header, generated config text, MQTT JSON examples, and VERSIONING.md.
+- No CLI flags or config options changed.
+
+
 ## 0.2.19 audit note
 
 Docs-only README front matter update. No CLI flags or config options changed.
@@ -246,3 +253,20 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Added `MailConfig` parsing and validation in `config.py`.
 - Added success/failure mail notification calls in `cli.py`.
 - Verified mail disabled does not require any third-party Python dependency.
+
+## 0.2.20 mail attachment audit
+
+- Added `[mail].attach_logs` to `config.example.toml` and README.
+- Added `[mail].max_attachment_bytes` to `config.example.toml` and README.
+- Added `MailConfig.attach_logs` and `MailConfig.max_attachment_bytes`.
+- Added mail attachment support in `timeshift_btrfs_sync/mail.py` using Python standard library `email.message` attachments.
+- Added `RunLogger.attachment_paths()` so the mail layer can attach `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files if they exist.
+- Updated `cli.py` so success/failure mail notifications receive current run log paths when `log_dir` is enabled.
+- Confirmed no new CLI flags were needed; attachment behavior is controlled in config.
+
+## 0.4.2 safe config defaults audit
+
+- Replaced `config.example.toml` with the user-provided safe-default baseline.
+- Updated `init-config` so it writes the same config.
+- Confirmed the example parses as valid TOML.
+

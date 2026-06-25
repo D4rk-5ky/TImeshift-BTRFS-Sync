@@ -430,6 +430,9 @@ def load_config(path: str | Path) -> AppConfig:
     mail_timeout = mail_raw.get("timeout", 10)
     if not isinstance(mail_timeout, int) or mail_timeout <= 0:
         raise ConfigError("mail.timeout must be a positive integer")
+    mail_max_attachment_bytes = mail_raw.get("max_attachment_bytes", 0)
+    if not isinstance(mail_max_attachment_bytes, int) or mail_max_attachment_bytes < 0:
+        raise ConfigError("mail.max_attachment_bytes must be a non-negative integer")
     mail_password = mail_raw.get("password") if isinstance(mail_raw.get("password"), str) and mail_raw.get("password") else None
     mail_password_file = mail_raw.get("password_file") if isinstance(mail_raw.get("password_file"), str) and mail_raw.get("password_file") else None
     if mail_password and mail_password_file:
@@ -466,6 +469,8 @@ def load_config(path: str | Path) -> AppConfig:
         notify_on_success=_as_bool(mail_raw.get("notify_on_success"), "mail.notify_on_success", True),
         notify_on_failure=_as_bool(mail_raw.get("notify_on_failure"), "mail.notify_on_failure", True),
         include_json=_as_bool(mail_raw.get("include_json"), "mail.include_json", True),
+        attach_logs=_as_bool(mail_raw.get("attach_logs"), "mail.attach_logs", True),
+        max_attachment_bytes=mail_max_attachment_bytes,
     )
 
     state_file = _as_path(raw.get("state_file", str(target_root / ".ts-btrfs-sync" / "state.json")), "state_file")

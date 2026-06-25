@@ -11,8 +11,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 import json
+import mimetypes
 import socket
 import smtplib
 
@@ -25,6 +26,10 @@ class MailConfig:
     is made without login. password_file is supported so passwords do not have
     to be stored directly in config.toml. Use either password or password_file,
     not both.
+
+    attach_logs attaches the run's split log files when file logging is enabled:
+    .log, .err, .mbuffer, and .btrfs-out. max_attachment_bytes can optionally
+    prevent very large verbose logs from being attached. Set it to 0 for no cap.
     """
 
     enabled: bool = False
@@ -42,6 +47,8 @@ class MailConfig:
     notify_on_success: bool = True
     notify_on_failure: bool = True
     include_json: bool = True
+    attach_logs: bool = True
+    max_attachment_bytes: int = 0
 
     def resolved_password(self) -> str | None:
         """Return password from config value or password_file."""
@@ -98,7 +105,7 @@ def _subject(config: MailConfig, payload: dict[str, Any]) -> str:
     return f"{state}: {job}"
 
 
-def _body(config: MailConfig, payload: dict[str, Any]) -> str:
+def _body(config: MailConfig, payload: dict[str, Any], *, attached: list[Path], skipped: list[str]) -> str:
     """Create a plain-text email body from the status payload."""
 
     lines = [
@@ -115,12 +122,59 @@ def _body(config: MailConfig, payload: dict[str, Any]) -> str:
         lines += ["", "Error:", str(payload.get("error"))]
     if payload.get("stderr"):
         lines += ["", "Last stderr:", str(payload.get("stderr"))]
+    if attached:
+        lines += ["", "Attached log files:"]
+        lines += [f"- {path.name}" for path in attached]
+    if skipped:
+        lines += ["", "Log files not attached:"]
+        lines += [f"- {item}" for item in skipped]
     if config.include_json:
         lines += ["", "JSON payload:", json.dumps(payload, indent=2, sort_keys=True)]
     return "\n".join(lines).rstrip() + "\n"
 
 
-def send_status(config: MailConfig, payload: dict[str, Any]) -> None:
+def _filter_attachments(config: MailConfig, paths: Iterable[str | Path] | None) -> tuple[list[Path], list[str]]:
+    """Return existing attachment paths and human-readable skipped reasons."""
+
+    attached: list[Path] = []
+    skipped: list[str] = []
+    if not config.attach_logs or not paths:
+        return attached, skipped
+
+    seen: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        if path in seen:
+            continue
+        seen.add(path)
+        if not path.exists():
+            continue
+        if not path.is_file():
+            skipped.append(f"{path.name}: not a regular file")
+            continue
+        size = path.stat().st_size
+        if size == 0:
+            skipped.append(f"{path.name}: empty file, not attached")
+            continue
+        if config.max_attachment_bytes > 0 and size > config.max_attachment_bytes:
+            skipped.append(f"{path.name}: {size} bytes exceeds mail.max_attachment_bytes={config.max_attachment_bytes}")
+            continue
+        attached.append(path)
+    return attached, skipped
+
+
+def _attach_file(msg: EmailMessage, path: Path) -> None:
+    """Attach one file to an EmailMessage."""
+
+    content_type, _encoding = mimetypes.guess_type(path.name)
+    if content_type is None:
+        content_type = "text/plain"
+    maintype, subtype = content_type.split("/", 1)
+    data = path.read_bytes()
+    msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=path.name)
+
+
+def send_status(config: MailConfig, payload: dict[str, Any], *, attachments: Iterable[str | Path] | None = None) -> None:
     """Send one optional SMTP status email.
 
     Sending errors are raised to the caller. CLI code catches them and prints a
@@ -137,11 +191,16 @@ def send_status(config: MailConfig, payload: dict[str, Any]) -> None:
     if not config.to_addrs:
         raise RuntimeError("mail.to_addrs must contain at least one address when mail.enabled = true")
 
+    attached, skipped = _filter_attachments(config, attachments)
+
     msg = EmailMessage()
     msg["From"] = config.from_addr
     msg["To"] = ", ".join(config.to_addrs)
     msg["Subject"] = _subject(config, payload)
-    msg.set_content(_body(config, payload))
+    msg.set_content(_body(config, payload, attached=attached, skipped=skipped))
+
+    for path in attached:
+        _attach_file(msg, path)
 
     if config.smtp_ssl:
         smtp_cls = smtplib.SMTP_SSL

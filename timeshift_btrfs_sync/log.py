@@ -70,6 +70,17 @@ class RunLogger:
         self._btrfs_out_fh.close()
         self._err_fh.close()
 
+    def attachment_paths(self) -> list[Path]:
+        """Return run log files in the order useful for mail attachments.
+
+        The files are returned only if they currently exist. The order is:
+        .log, .err, .mbuffer, .btrfs-out. This keeps email attachments easy to
+        scan and matches the names shown in README.md.
+        """
+
+        paths = [self.log_path, self.err_path, self.mbuffer_path, self.btrfs_out_path]
+        return [path for path in paths if path.exists()]
+
     def _write(self, fh: IO[str], text: str) -> None:
         """Write text safely from possible stream-reader threads."""
 
