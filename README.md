@@ -43,54 +43,6 @@ This build version is:
 
 See `VERSIONING.md` for the count.
 
-## What this version adds
-
-A dedicated file, `COMMENTED_CODE_MAP.md`, explains each source file, major function area, and generated command.
-
-- README front matter is now ordered as project name, AI-assisted warning, disclaimer, data-loss warning, and MIT license.
-- Optional `[manual_snapshot]` config section to create a source Timeshift on-demand/tag `O` snapshot before normal sync.
-- Manual snapshot creation now omits explicit `--tags O` because Timeshift already defaults to on-demand and some Timeshift versions reject explicit `O`.
-- New safety guard: before creating an automatic manual snapshot, the app first runs `timeshift --list` and requires a UUID-confirmed match against `state.json` by default.
-- Manual snapshot comments include a configurable marker so app-created snapshots can be recognized later.
-- App-created on-demand cleanup is controlled by `[manual_snapshot].cleanup_enabled` and `retention_count`.
-- Normal/user-created Timeshift on-demand cleanup is controlled separately by `[retention].cleanup_ondemand`.
-- Prune-safe high-watermark sync: after destination pruning, the app skips older source snapshots at or below the newest UUID-confirmed state/source match instead of sending them again.
-- If the newest state snapshot is no longer listed on the source, the app walks backward through `state.json` until it finds a source snapshot that still exists and matches by Btrfs UUID.
-- Destination compression is no longer applied to read-only received subvolumes; after-receive compression is disabled by default and skipped if the subvolume is read-only.
-- New state entries store both the original Timeshift source UUID and the exact send-path UUID, which matters when writable snapshots are sent through a read-only cache.
-- Optional MQTT success/failure notifications using `paho-mqtt`.
-- Optional email success/failure notifications using Python standard library `smtplib` / `email`.
-- Optional email attachments for the run `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files when file logging is enabled.
-- Adds `timeshift_btrfs_sync/mqtt.py` so MQTT logic is kept in one file.
-- Adds `timeshift_btrfs_sync/mail.py` so email logic is kept in one file.
-- MQTT and email failure notifications include the config `name`, command, exit code, error text, and latest stderr tail.
-- Better stderr handling: captured command stderr is mirrored to the terminal unless it is an expected quiet probe.
-- Recovery for interrupted receives: incomplete destination subvolumes can be deleted and retried automatically.
-- Clear separator after source cache cleanup before the next send/receive block.
-- Optional split logging controlled by top-level `log_dir`.
-- Adds `timeshift_btrfs_sync/log.py` so logging logic is kept in one file.
-- Creates per-run `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files when logging is enabled.
-- Keeps mbuffer progress out of `.log` and writes it to `.mbuffer`.
-- Writes Btrfs send/receive command blocks to `.log`, `.mbuffer`, and `.btrfs-out` so each stream log is readable by itself.
-- Source cache cleanup that deletes superseded read-only cache snapshots after a newer successful send.
-- Keeps the newest source cache snapshot per subvolume so future incremental sends still have a valid parent.
-- Human-readable transfer output with blank lines and separators between snapshots/subvolumes.
-- Prints `REMOTE SEND`, optional `STREAM BUFFER`, and `LOCAL RECEIVE` as separate blocks before each transfer.
-- Lets `mbuffer` progress/summary output display live during transfers.
-- Optional Btrfs verbose output with `btrfs send -v` and `btrfs receive -v`.
-- Optional `mbuffer` in the send/receive pipeline.
-- SSH compression choice with `ssh -C`.
-- SSH cipher choice with `ssh -c <cipher>`.
-- Destination Btrfs compression property setting.
-- Optional `btrfs send --compressed-data`.
-- Fast discovery mode that avoids per-snapshot Btrfs checks during planning.
-- Incremental parent guard that compares current source UUID with destination received_uuid before using a parent.
-- Parent-guard cache: verify the first incremental parent per subvolume in a run, then trust the chain created by this process.
-- Faster state updates: after receive, update metadata from local destination `Received UUID` instead of remote source UUID checks for every current send.
-- Comments/docstrings explaining sections, functions, commands, and code paths.
-- Clear documentation that `target_root` creates both `snapshots/` and `.ts-btrfs-sync/`, and both must be cleaned when fully resetting a backup.
-- Clear documentation that pruning needs `--yes-delete` before any real deletion happens.
-
 
 ## Mail log attachments
 
@@ -108,115 +60,6 @@ The attached files are, if they exist for the run:
 This keeps the email body short while still giving you the detailed normal log,
 error log, mbuffer progress log, and Btrfs verbose-output log for debugging.
 
-## 0.2.17 Timeshift on-demand tag workaround
-
-Timeshift documents `--tags {O,B,H,D,W,M}` and says the default tag is `O`,
-but some Timeshift versions have a CLI bug where explicit `--tags O` fails
-with:
-
-```text
-E: Unknown value specified for option --tags (O).
-E: Expected values: O, B, H, D, W, M
-```
-
-This build avoids the bug by not passing `--tags O` for app-created manual
-snapshots. A plain Timeshift create command defaults to an on-demand/tag `O`
-snapshot, so the command is now:
-
-```bash
-sudo -n timeshift --create --scripted --comments "ts-btrfs-sync automatic on-demand snapshot"
-```
-
-This keeps the snapshot as on-demand while avoiding the Timeshift CLI validator
-bug.
-
-## 0.2.16 cleaner manual snapshot command logging
-
-Manual Timeshift snapshot creation still uses safe shell quoting, but the
-`--comments` value is now quoted with remote-safe double quotes instead of
-nested single quotes. This makes the displayed/logged SSH command much easier
-to read.
-
-Example shown in logs now looks like this:
-
-```bash
-sshpass -e ssh -i /root/.ssh/btrbk-source-password btrbk-source@10.0.0.52 'sudo -n timeshift --create --scripted --comments "ts-btrfs-sync automatic on-demand snapshot"'
-```
-
-Comments with double quotes, dollar signs, backticks, backslashes, or line
-breaks are still escaped before being sent to the remote shell.
-
-
-## 0.2.16 manual snapshot create diagnostics
-
-If source Timeshift refuses to create the app-owned manual/on-demand snapshot,
-the app now shows more of the real Timeshift output. Some Timeshift failures are
-reported on stdout instead of stderr, so manual snapshot creation now mirrors
-stdout on failure and includes both stdout and stderr in the final error.
-
-This does not relax the source identity safety check. The order remains:
-
-```text
-1. Read source Timeshift list.
-2. Confirm source identity against state.json by Btrfs UUID.
-3. Only then ask Timeshift to create the app-owned on-demand snapshot.
-```
-
-If this step fails, copy the displayed `COMMAND STDOUT` / `COMMAND STDERR` lines.
-Those lines are the important part; the SSH command line alone normally only
-shows that Timeshift returned exit code 1.
-
-## 0.2.14 verified manual snapshot source guard
-
-Automatic source-side manual snapshot creation is now safer. When
-`manual_snapshot.enabled = true`, the default is also:
-
-```toml
-[manual_snapshot]
-require_verified_source = true
-```
-
-Before creating the new Timeshift tag `O` snapshot, the app now:
-
-```text
-1. Runs sudo -n timeshift --list first.
-2. Walks state.json newest-to-oldest.
-3. Finds the newest state snapshot that still exists in the source list.
-4. Confirms source/destination identity by Btrfs UUID / received_uuid.
-5. Only then runs timeshift --create.
-6. Reads timeshift --list again so the new snapshot can be synced.
-```
-
-If the newest state entry is no longer present on the source, the app walks
-backward until it finds a source snapshot that still exists and matches by UUID.
-
-If no UUID-confirmed source anchor is found, the app refuses to create the
-manual snapshot. This prevents creating stale snapshots on the wrong mounted OS,
-wrong `snapshot_root`, or wrong source host.
-
-For a first-ever sync with no trusted state yet, leave
-`manual_snapshot.enabled = false` for the first normal sync, or explicitly set
-`manual_snapshot.require_verified_source = false` only if you accept that risk.
-
-The same verification guard is also applied to the one-off `create-manual`
-command by default, because that command also creates a source-side Timeshift
-snapshot.
-
-## 0.2.13 independent on-demand retention controls
-
-- Added independent cleanup control for app-created on-demand snapshots: `[manual_snapshot].cleanup_enabled`.
-- Added independent cleanup control for normal/user-created Timeshift on-demand snapshots: `[retention].cleanup_ondemand`.
-- `manual_snapshot.enabled` only controls whether the app creates a new source Timeshift tag `O` snapshot before sync.
-- `manual_snapshot.cleanup_enabled` only controls pruning of app-created tag `O` snapshots recognized by the configured marker.
-- `retention.cleanup_ondemand` only controls pruning of normal/user-created Timeshift tag `O` snapshots.
-- Default safety behavior: normal/user-created on-demand snapshots are **not** pruned unless `cleanup_ondemand = true`.
-- The `create-manual` command still exists for one-off manual creation from the CLI.
-
-## 0.2.11 documentation fix
-
-- Restored the Home Assistant MQTT/Pushover example to the UI/exported automation style using `triggers:`, `actions:`, and MQTT `options:`.
-- Removed the legacy singular `trigger:` / `action:` example from the README.
-- Kept the note that `trigger.payload_json` requires a real MQTT JSON trigger; manual **Run actions** tests may not provide it.
 
 ## Source sudo remains minimal
 
@@ -237,14 +80,6 @@ What those lines allow:
 - `sudo -n btrfs subvolume snapshot -r ...` for read-only send-cache snapshots.
 - `sudo -n btrfs subvolume delete ...` for deleting superseded send-cache snapshots after successful sends.
 - `sudo -n btrfs send ...` for full/incremental streams.
-
-What those lines do **not** directly allow:
-
-- `sudo mkdir`
-- `sudo cat`
-- `sudo find`
-- `sudo python`
-- source-side helper scripts
 
 
 ## Optional automatic on-demand snapshot before sync
@@ -313,22 +148,6 @@ retention.cleanup_ondemand       prune normal/user-created Timeshift tag O snaps
 Default safety behavior keeps normal/user-created on-demand snapshots unless you
 explicitly set `cleanup_ondemand = true`. Real deletion still requires prune to
 run in non-dry-run mode and `--yes-delete`.
-
-## Fast discovery for many snapshots
-
-Older builds used to do Btrfs metadata checks for every snapshot/subvolume during
-discovery:
-
-```bash
-sudo -n btrfs subvolume show <snapshot>/@
-sudo -n btrfs property get -ts <snapshot>/@ ro
-sudo -n btrfs subvolume show <snapshot>/@home
-sudo -n btrfs property get -ts <snapshot>/@home ro
-```
-
-With 24 snapshots and `@` + `@home`, that can easily become around 96 remote
-Btrfs commands before anything is transferred. On some systems that can take
-minutes.
 
 The new default is fast discovery:
 
@@ -446,7 +265,7 @@ When source Timeshift snapshots are writable (`ro=false`), the app creates tempo
 
 ```toml
 [source]
-cache_root = "/media/darkyere/OS-Root/timeshift-btrfs/.ts-btrfs-sync/send-cache"
+cache_root = "/media/<UserName>/OS-Root/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 cleanup_superseded_cache = true
 ```
@@ -494,7 +313,7 @@ The app also tries to delete the now-empty per-snapshot cache parent folder. If 
 File logging is optional and controlled by top-level `log_dir` in `config.toml`:
 
 ```toml
-log_dir = "/media/darkyere/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync/logs"
+log_dir = "/media/<UserName>/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync/logs"
 ```
 
 If `log_dir` is blank or omitted, the app only prints to the terminal. If it is
@@ -783,19 +602,19 @@ The destination setting:
 
 ```toml
 [destination]
-target_root = "/media/darkyere/btrbk/KubuntuBTRFSRAID0/"
+target_root = "/media/<UserName>/btrbk/KubuntuBTRFSRAID0/"
 ```
 
 means the app owns this backup job folder:
 
 ```text
-/media/darkyere/btrbk/KubuntuBTRFSRAID0/
+/media/<UserName>/btrbk/KubuntuBTRFSRAID0/
 ```
 
 Inside that folder, the app creates **two important folders**:
 
 ```text
-/media/darkyere/btrbk/KubuntuBTRFSRAID0/
+/media/<UserName>/btrbk/KubuntuBTRFSRAID0/
 ├── snapshots/
 └── .ts-btrfs-sync/
 ```
@@ -824,17 +643,17 @@ Example reset shape, adjust paths before using:
 
 ```bash
 # 1. Inspect what is there first.
-sudo btrfs subvolume list /media/darkyere/btrbk/KubuntuBTRFSRAID0
+sudo btrfs subvolume list /media/<UserName>/btrbk/KubuntuBTRFSRAID0
 
 # 2. Delete received subvolumes under snapshots/.
 # Example only. Delete the exact paths that exist on your destination.
-sudo btrfs subvolume delete /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@home
-sudo btrfs subvolume delete /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@
+sudo btrfs subvolume delete /media/<UserName>/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@home
+sudo btrfs subvolume delete /media/<UserName>/btrbk/KubuntuBTRFSRAID0/snapshots/2026-06-23_07-10-24/@
 
 # 3. After all Btrfs subvolumes below snapshots/ are gone,
 # remove the ordinary folders and app metadata.
-sudo rm -rf /media/darkyere/btrbk/KubuntuBTRFSRAID0/snapshots
-sudo rm -rf /media/darkyere/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync
+sudo rm -rf /media/<UserName>/btrbk/KubuntuBTRFSRAID0/snapshots
+sudo rm -rf /media/<UserName>/btrbk/KubuntuBTRFSRAID0/.ts-btrfs-sync
 ```
 
 After that, the next real sync starts as a new backup chain and the first send is full.
@@ -1072,23 +891,6 @@ What it does:
 - Optionally adds `--proto 2` if configured.
 - Attempts to preserve compressed source extents when supported.
 - This is separate from destination compression.
-
-## Prune-safe high-watermark sync
-
-When destination pruning deletes old received snapshots, the same old snapshots may still exist on the source in `timeshift --list`. The app should **not** send those old pruned snapshots again.
-
-Instead of storing a long tombstone list, the app now finds a confirmed sync floor from `state.json`:
-
-```text
-1. Walk state.json newest-to-oldest.
-2. Find the newest state snapshot that still exists in source `timeshift --list`.
-3. Confirm Btrfs UUID identity between source and destination.
-4. Skip source snapshots older than or equal to that confirmed floor.
-```
-
-If the newest state entry is no longer present on the source, the app automatically walks backward until it finds an older snapshot that is still present and UUID-confirmed. If no UUID-confirmed floor can be found, the app refuses to use the high-watermark skip and continues with the normal parent guard behavior.
-
-This means if you keep 6 hourly snapshots on the destination but the source still has 12, the next normal sync continues from the newest confirmed received snapshot instead of re-sending the 6 older pruned ones.
 
 ## Usual test flow
 
@@ -1340,201 +1142,6 @@ Every option below is also present in `config.example.toml`. Options commented o
 | `keep_latest` | Always keep newest synced snapshot. |
 | `keep_latest_common_parent` | Keep newest likely common parent for incremental safety. |
 | `protected_snapshots` | Snapshot names that are never pruned. |
-
-## Changelog
-
-### 0.4.2
-
-- Updated `config.example.toml` and `init-config` output to the new safe-default baseline supplied by the user.
-- Defaults now keep dry-run safety enabled, prune disabled unless explicitly requested, source identity checks enabled, manual snapshot guard enabled, normal on-demand cleanup disabled, and read-only destination property writes disabled.
-
-### 0.4.1
-
-- Version bump from `0.2.20` to `0.4.1`.
-- No functional changes from `0.2.20`; this is the same mail-log-attachment build under the new version number.
-
-### 0.2.20
-
-- Added optional mail attachments for split run log files when `log_dir` is enabled.
-- Mail can attach `.log`, `.err`, `.mbuffer`, and `.btrfs-out` files if they exist for the run.
-- Added `mail.attach_logs` and `mail.max_attachment_bytes` config options.
-
-### 0.2.19
-
-- Reordered the README front section to put project name first, then the AI-assisted warning, disclaimer, data-loss warning, and license.
-- Expanded the disclaimer and data-loss warning text.
-- Added an explicit MIT license section near the top of the README.
-
-### 0.2.17
-
-- Manual Timeshift snapshot creation no longer passes explicit `--tags O`.
-- Timeshift defaults manual creates to on-demand/tag `O`, and some versions reject explicit `O` despite listing it as valid.
-- The generated command is now `timeshift --create --scripted --comments <comment>`.
-
-### 0.2.16
-
-- Manual Timeshift snapshot creation now uses readable remote-safe double-quote escaping for the `--comments` value.
-- This avoids noisy nested single-quote escapes in terminal output and log files.
-
-### 0.2.14
-
-- Added `manual_snapshot.require_verified_source`, default `true`.
-- Automatic manual snapshot creation now runs `timeshift --list` first and verifies the configured source against `state.json` with Btrfs UUID metadata before creating a new Timeshift snapshot.
-- If the newest state snapshot is not on the source, the app walks backward through state until it finds a source snapshot that still exists and matches by UUID.
-- If no UUID-confirmed source anchor exists, the app refuses to create a manual snapshot instead of risking creation on the wrong mounted OS/source.
-- The same guard also applies to the one-off `create-manual` command by default.
-
-### 0.2.13
-
-- Added independent cleanup controls for app-created and normal/user-created on-demand snapshots.
-- `manual_snapshot.cleanup_enabled` controls pruning of app-created tag `O` snapshots recognized by marker.
-- `retention.cleanup_ondemand` controls pruning of normal/user-created Timeshift tag `O` snapshots.
-- Default safety behavior keeps normal/user-created on-demand snapshots unless explicitly allowed.
-
-### 0.2.12
-
-- Added `[manual_snapshot]` config section.
-- `sync --run` can create a source Timeshift tag `O` snapshot before sync.
-- The created snapshot uses a configurable comment and marker.
-- Added marker-based app-created on-demand retention with default count 10.
-
-### 0.2.9
-
-- Stopped trying to set destination compression on read-only received subvolumes.
-- Changed `destination.set_compression_after_receive` default to `false`.
-- If after-receive compression is explicitly enabled, read-only received subvolumes are detected and skipped safely.
-- Added prune-safe high-watermark sync: after pruning old destination snapshots, normal sync uses the newest UUID-confirmed state/source match as a floor and skips older source snapshots instead of re-sending them.
-- If the newest state snapshot is not present on the source, the app walks backward in `state.json` until it finds a source snapshot that exists and matches by Btrfs UUID.
-- New state entries store both `original_source_uuid` and `send_source_uuid`, so writable Timeshift snapshots sent through read-only cache can be verified correctly later.
-
-### 0.2.6
-
-- Added optional MQTT status notifications using `paho-mqtt`.
-- Added optional email status notifications using Python standard library `smtplib` / `email`.
-- Added `timeshift_btrfs_sync/mqtt.py` so MQTT logic is isolated in one file.
-- Added `timeshift_btrfs_sync/mail.py` so email logic is isolated in one file.
-- Added `[mqtt]` config section with optional username/password/password_file.
-- Success payloads include config `name`, command, exit code, timestamp, host, app, and version.
-- Failure payloads include the same fields plus error text and the latest captured stderr tail.
-- Added optional dependency extra: `python3 -m pip install -e '.[mqtt]'`.
-
-### 0.2.5
-
-- Mirrored captured command stderr to the terminal, while suppressing expected probe stderr.
-- Added `destination.cleanup_incomplete_receive = true` to recover from interrupted receives.
-- Automatically deletes incomplete destination Btrfs subvolumes that are not recorded in state.json, then retries the transfer.
-- Added a separator after superseded source cache cleanup before the next send/receive block.
-- Suppressed expected `Directory not empty` stderr when trying to delete a cache parent that still contains another cached subvolume.
-
-### 0.2.4
-
-- Audited all CLI flags, config options, README coverage, and `config.example.toml`.
-- Expanded `python3 -m timeshift_btrfs_sync --help` and all subcommand help text.
-- Added complete CLI and config reference sections to the README.
-- Added `state_file` and `lock_file` to `config.example.toml`.
-- Added `CONFIG_AND_CLI_AUDIT.md`.
-
-### 0.2.3
-
-- Documentation-only update.
-- Added a dedicated README section explaining pruning, `prune_after_sync`, `--prune`, `--run`, and `--yes-delete`.
-- Updated `config.example.toml` comments so it is clear that prune settings do not delete without `--yes-delete`.
-
-### 0.2.2
-
-- Split the old combined `.out` transfer log into `.mbuffer` and `.btrfs-out`.
-- `.mbuffer` stores mbuffer progress/summary plus the transfer command header.
-- `.btrfs-out` stores Btrfs send/receive verbose output plus send/receive command lines.
-- `.log` remains for normal command/control output and `.err` remains for stderr/error output.
-
-### 0.2.1
-
-- Fixed mbuffer live progress output after adding Btrfs verbose/logging support.
-- Changed the stream reader from `readline()` to chunked `os.read()` so carriage-return progress lines from mbuffer are shown immediately.
-- `stream.btrfs_verbose` now controls only Btrfs send/receive verbose passthrough, not whether mbuffer progress is visible.
-- No config change needed.
-
-### 0.2.0
-
-- Added optional split logging controlled by top-level `log_dir`.
-- Added `timeshift_btrfs_sync/log.py` for all file logging logic.
-- Added timestamped per-run `.log`, `.out`, and `.err` files.
-- Normal captured command output goes to `.log`.
-- Transfer/mbuffer output goes to `.out` so `.log` is not flooded.
-- Errors/stderr are copied to `.err`.
-- Send/receive command blocks are included in both `.log` and `.out`.
-
-### 0.1.9
-
-- Added optional `stream.btrfs_verbose = true`.
-- Adds `-v` to `btrfs send` and `btrfs receive` when enabled.
-- Lets Btrfs verbose output pass through live to the terminal during transfers.
-- Documents that Btrfs verbose output is operation/detail logging, while `mbuffer` remains the useful throughput/total progress display.
-
-### 0.1.8
-
-- Added source-side cleanup for superseded read-only cache snapshots.
-- Keeps the newest cache snapshot per subvolume so future incremental sends still have a valid parent.
-- Cleanup uses only `sudo -n btrfs subvolume delete ...` on the source.
-- Added `source.cleanup_superseded_cache = true` config option.
-
-### 0.1.7
-
-- Made transfer output more human-readable.
-- Added blank lines between status messages, send commands, mbuffer commands, receive commands, and transfer blocks.
-- Added visual separators after each send/receive block.
-- Allowed mbuffer progress and summary lines to be shown live on the terminal during real transfers.
-
-### 0.1.6
-
-- Documented that `destination.target_root` creates both `snapshots/` and `.ts-btrfs-sync/`.
-- Added full reset cleanup notes explaining that both folders must be removed before starting a new full sync.
-- Clarified that received snapshots are Btrfs subvolumes and should be deleted with `btrfs subvolume delete`, not plain `rm -rf`.
-- No intended code behavior change.
-
-### 0.1.5
-
-- Optimized incremental parent guard to verify once per subvolume name per run by default.
-- Reuses saved parent `send_path` from `state.json` when possible.
-- Stops reading remote source UUID metadata for every current send; state is updated from local destination `Received UUID` after receive.
-- Keeps `source.verify_incremental_parent = true` as the safety default.
-
-### 0.1.4
-
-- Renamed the example source SSH/sudo user to `ts-btrfs-sync-user` everywhere.
-- No intended code behavior change.
-
-### 0.1.3
-
-- Fixed read-only detection so `btrfs subvolume show` `Flags: readonly` is honored.
-- Improved `ro=true` / `ro=false` parsing from `btrfs property get`.
-- Avoided overwriting a known read-only result with an unknown property result.
-- Manual Timeshift snapshots that are already read-only should now send directly instead of creating a cache snapshot.
-
-### 0.1.2
-
-- Fixed the empty destination folder guard.
-- Empty in-progress snapshot directories no longer count as existing backups.
-- The receive directory is created after parent selection, just before `btrfs receive`.
-
-### 0.1.1
-
-- Added incremental parent guard.
-- Fast discovery still skips Btrfs metadata checks for all snapshots.
-- Real incremental sends now verify only the selected parent by comparing source UUID with destination received_uuid.
-- Added config options `source.verify_incremental_parent` and `source.allow_incremental_without_parent_match`.
-
-### 0.1.0
-
-- Added fast discovery mode with `source.verify_subvolumes_at_discovery = false` by default.
-- Dry-run/listing no longer need to run Btrfs show/property checks for every snapshot/subvolume unless explicitly enabled.
-- Btrfs read-only checks are delayed until a subvolume is actually going to be sent.
-
-### 0.0.9
-
-- Corrected project version number from the over-large experimental `0.4.0`.
-- Added more explanatory comments/docstrings around functions, commands, config sections, and performance options.
-- Added `VERSIONING.md` explaining the zip count and corrected version sequence.
 
 
 
