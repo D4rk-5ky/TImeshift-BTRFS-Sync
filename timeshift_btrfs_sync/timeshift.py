@@ -82,12 +82,6 @@ def list_remote_snapshots(
             meta = btrfs.remote_try_subvolume_show(ssh, sudo, btrfs_command, path, subvol)
             if not meta:
                 continue
-            # Keep readonly=True if `subvolume show` already detected `Flags: readonly`.
-            # Some systems return no useful output from `property get`, so do not
-            # overwrite a known value with None.
-            prop_ro = btrfs.remote_readonly(ssh, sudo, btrfs_command, path)
-            if prop_ro is not None:
-                meta.readonly = prop_ro
             snap.subvolumes[subvol] = meta
     return snapshots
 

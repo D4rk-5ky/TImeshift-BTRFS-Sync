@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.5.4
+# timeshift-btrfs-sync v0.5.7
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -66,8 +66,9 @@ Normal sync flow:
 2. Parse Timeshift snapshot names and tags.
 3. Build expected paths from source.snapshot_root and source.subvolumes.
 4. Skip snapshots already received or older than the confirmed sync floor.
-5. Use full send when no valid parent exists.
+5. Use full send only when the destination has no snapshots yet.
 6. Use incremental send when a UUID-confirmed parent is available.
+7. Error out if the destination already has snapshots but no matching parent can be proven.
 7. Receive into <target_root>/snapshots/<snapshot>/<subvolume>.
 8. Save metadata to state.json after each successful receive.
 ```
@@ -76,7 +77,7 @@ Fast discovery is used by default. It avoids Btrfs metadata checks for every old
 
 ## Incremental parent guard
 
-The old unsafe escape hatch to continue after a parent mismatch has been removed. With `source.verify_incremental_parent = true` (the default and recommended setting), the selected source parent must match the destination parent. If the destination is empty or separate, the app can do a full send. If the destination already contains snapshots but no matching parent can be proven, the app refuses to send instead of guessing. There is no config option to continue after the parent guard reports a mismatch.
+The old unsafe escape hatch to continue after a parent mismatch has been removed. The `source.verify_incremental_parent` option has also been removed because incremental parent verification is now mandatory. If the destination has no snapshots at all, the app can start with a normal full sync. If matching snapshots exist, the app uses an incremental send after proving the source parent matches the destination parent. If the destination already contains snapshots but no matching parent can be proven, the app refuses to send and tells the user to use an empty/separate backup directory for a new full sync or repair the existing backup state/cache.
 
 
 Incremental Btrfs send uses:
@@ -106,7 +107,7 @@ sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolum
 
 The app checks cache paths with `btrfs subvolume list -o <cache_root>` so normal Timeshift snapshot paths with the same date/name are not mistaken for existing cache snapshots.
 
-The newest cache snapshot is kept because it is the next incremental parent. Older superseded cache snapshots are deleted only after a newer send succeeds.
+The newest cache snapshot is kept because it is the next incremental parent. Older superseded cache snapshots are deleted only after a newer send succeeds. After deleting one child cache snapshot, the app checks `btrfs subvolume list -o <cache_root>/<snapshot-name>` and deletes the timestamp cache parent only when no child subvolumes remain.
 
 ## Optional automatic on-demand snapshots
 
@@ -401,7 +402,6 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | `snapshot_root` | Source Timeshift snapshot root. | The app builds `<snapshot_root>/<snapshot>/<subvolume>` from this. |
 | `subvolumes` | Subvolume names expected inside each Timeshift snapshot, usually `@` and `@home`. | Controls what gets sent for each Timeshift snapshot. |
 | `verify_subvolumes_at_discovery` | Verifies every listed snapshot/subvolume during discovery. | Slower but useful when validating a new layout. Keep false for fast normal dry-runs. |
-| `verify_incremental_parent` | Verifies parent UUID before incremental send. | Important safety guard against mixing backup chains. Keep true. Parent mismatch is a hard error. |
 | `verify_incremental_parent_once_per_run` | Verifies only the first parent per subvolume name during a run, then trusts the chain created by that run. | Reduces repeated metadata checks while keeping the initial safety check. |
 | `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |

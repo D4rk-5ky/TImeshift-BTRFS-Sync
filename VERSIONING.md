@@ -52,15 +52,40 @@ Corrected sequence:
 52nd zip -> 0.4.12
 53rd zip -> 0.5.3
 54th zip -> 0.5.4
+55th zip -> 0.5.5
+56th zip -> 0.5.6
+57th zip -> 0.5.7
 ```
 
-This build is version `0.5.4`.
+This build is version `0.5.7`.
 
-The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, and this release increments that by `0.0.1` to `0.5.4`.
+The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, and this release increments that by `0.0.1` to `0.5.7`.
 
 
 ## Changelog
 
+
+### 0.5.7
+
+- Fixed source send-cache parent cleanup when a cache date parent still contains another cached child subvolume, such as @home after @ was cleaned.
+- Added a Btrfs-only child subvolume emptiness check using `btrfs subvolume list -o <cache-parent>` before deleting `<cache_root>/<snapshot-name>`.
+- The cleanup now keeps the cache parent if any descendant subvolume remains, including unexpected leftovers from older/interrupted runs, instead of attempting a delete that fails with `Directory not empty`.
+- The cleanup also keeps the parent if the child-subvolume check cannot be completed, which is safer and avoids noisy expected failures.
+
+### 0.5.6
+
+- Removed the source/destination read-only helper code that called the separate Btrfs read-only property command.
+- Read-only state now comes only from `btrfs subvolume show`, using the same command that already reads UUID, parent UUID, received UUID, and `Flags: readonly`.
+- `remote_ensure_readonly_send_path()`, discovery metadata, selected send metadata, and received destination metadata no longer perform a second read-only property probe.
+- If `btrfs subvolume show` does not show `Flags: readonly`, the app treats the source as needing a read-only cache snapshot instead of running a second read-only probe.
+- Updated embedded/example config comments and docs to describe subvolume-show-only read-only detection.
+
+### 0.5.5
+
+- Removed config option `source.verify_incremental_parent`; parent verification is now mandatory and cannot be disabled.
+- Old configs that still contain `source.verify_incremental_parent` now fail with a clear `ConfigError` telling the user to remove it.
+- `_select_parent()` now allows a full send only when the destination has no snapshots at all. If destination snapshots exist but no matching parent can be proven, sync fails with a clear wrong-target/new-directory error.
+- Updated `config.example.toml`, `ts-btrfs.toml`, README, CLI embedded config, and audit docs to remove the option and document mandatory behavior.
 
 ### 0.5.4
 
@@ -95,7 +120,7 @@ The version line was intentionally bumped to `0.4.0` at user request. Version `0
 ### 0.4.10
 
 - Stderr is now unconditional: every external-command stderr stream is mirrored to the terminal and written to `.err` when file logging is enabled.
-- Expected negative probes, including cache-existence checks, readonly-property checks, and best-effort cache-parent deletes, are no longer hidden from terminal or `.err`.
+- Expected negative probes, including cache-existence checks, cache-existence checks, and best-effort cache-parent deletes, are no longer hidden from terminal or `.err`.
 - Pipeline stderr is also written live to `.err`: remote `btrfs send` stderr, local `btrfs receive` stderr, and `mbuffer` stderr.
 - `mbuffer` output is still also written to `.mbuffer`, and Btrfs verbose output is still also written to `.btrfs-out` when enabled.
 
@@ -292,7 +317,7 @@ The version line was intentionally bumped to `0.4.0` at user request. Version `0
 - Optimized incremental parent guard to verify once per subvolume name per run by default.
 - Reuses saved parent `send_path` from `state.json` when possible.
 - Stops reading remote source UUID metadata for every current send; state is updated from local destination `Received UUID` after receive.
-- Keeps `source.verify_incremental_parent = true` as the safety default.
+- Keeps parent verification enabled by default through `source.verify_incremental_parent = true`. This option was later removed in 0.5.5 when verification became mandatory.
 
 ### 0.1.4
 
@@ -302,8 +327,7 @@ The version line was intentionally bumped to `0.4.0` at user request. Version `0
 ### 0.1.3
 
 - Fixed read-only detection so `btrfs subvolume show` `Flags: readonly` is honored.
-- Improved `ro=true` / `ro=false` parsing from `btrfs property get`.
-- Avoided overwriting a known read-only result with an unknown property result.
+- Manual Timeshift snapshots that are already read-only should now send directly instead of creating a cache snapshot.
 - Manual Timeshift snapshots that are already read-only should now send directly instead of creating a cache snapshot.
 
 ### 0.1.2
@@ -322,7 +346,7 @@ The version line was intentionally bumped to `0.4.0` at user request. Version `0
 ### 0.1.0
 
 - Added fast discovery mode with `source.verify_subvolumes_at_discovery = false` by default.
-- Dry-run/listing no longer need to run Btrfs show/property checks for every snapshot/subvolume unless explicitly enabled.
+- Dry-run/listing no longer need to run Btrfs subvolume-show checks for every snapshot/subvolume unless explicitly enabled.
 - Btrfs read-only checks are delayed until a subvolume is actually going to be sent.
 
 ### 0.0.9

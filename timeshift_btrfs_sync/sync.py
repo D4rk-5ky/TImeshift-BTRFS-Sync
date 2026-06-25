@@ -3,10 +3,10 @@
 The important performance/safety rule in this version is:
 
 * Discovery is fast and only uses Timeshift names plus configured subvolume
-  names. It does not run `btrfs subvolume show` and `btrfs property get` for
-  every snapshot.
+  names. It does not run `btrfs subvolume show` for every snapshot unless
+  source.verify_subvolumes_at_discovery is enabled.
 * Before the first real incremental send for each subvolume name in a run, the
-  selected parent is verified with Btrfs metadata on both sides. Later
+  selected parent is always verified with Btrfs metadata on both sides. Later
   incrementals in the same run reuse that verified chain and only refresh local
   destination metadata after receive.
 """
@@ -61,7 +61,7 @@ def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_in
     """Discover source Timeshift snapshots.
 
     `include_btrfs_info=False` is the fast path: it parses Timeshift snapshot
-    names/tags and constructs @/@home paths without running btrfs show/property
+    names/tags and constructs @/@home paths without running btrfs subvolume-show
     for every snapshot. Btrfs checks are then delayed until an actual send or a
     selected incremental-parent verification.
     """
@@ -325,24 +325,28 @@ def _cleanup_superseded_source_cache(
 
     # The cache layout is <cache_root>/<snapshot-name>/<subvolume>. The
     # per-snapshot parent was created with `btrfs subvolume create`. Only delete
-    # that date parent after every configured cached child below it is gone.
-    # This avoids trying to delete the date parent after @ while @home still
-    # needs it, and also avoids expected "Directory not empty" stderr.
+    # that date parent after *no* child subvolumes remain below it. Check the
+    # actual Btrfs subvolume list under the date parent instead of assuming only
+    # the configured subvolume names exist. This avoids deleting the parent
+    # after @ while @home is still waiting, and it also protects unexpected
+    # leftovers from interrupted or older runs.
     parent_cache_dir = str(Path(parent_send_path).parent)
     if btrfs.path_is_under_cache(parent_cache_dir, config.source.cache_root):
-        remaining_children: list[str] = []
-        for configured_subvol in config.source.subvolumes:
-            child_path = str(Path(parent_cache_dir) / configured_subvol)
-            if btrfs.remote_cache_subvolume_exists(
-                ssh,
-                config.source.sudo,
-                config.source.btrfs_command,
-                config.source.cache_root,
-                child_path,
-            ):
-                remaining_children.append(configured_subvol)
+        remaining_children = btrfs.remote_cache_child_subvolumes(
+            ssh,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            cache_root=config.source.cache_root,
+            cache_parent=parent_cache_dir,
+        )
 
-        if remaining_children:
+        if remaining_children is None:
+            print()
+            print(
+                "SOURCE CACHE PARENT KEEP: "
+                f"could not verify that {parent_cache_dir} has no child subvolumes"
+            )
+        elif remaining_children:
             print()
             print(
                 "SOURCE CACHE PARENT KEEP: "
@@ -434,11 +438,6 @@ def _read_remote_send_metadata(config: AppConfig, ssh: SSHRunner, path: str, sub
     meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, path, subvolume_name)
     if not meta:
         raise SyncError(f"Source send path is not a Btrfs subvolume or cannot be read: {path}")
-    # Keep readonly=True if `subvolume show` already detected `Flags: readonly`.
-    # Do not overwrite a known value with None from a failed/unsupported property read.
-    prop_ro = btrfs.remote_readonly(ssh, config.source.sudo, config.source.btrfs_command, path)
-    if prop_ro is not None:
-        meta.readonly = prop_ro
     return meta
 
 
@@ -779,38 +778,39 @@ def _select_parent(
         if not parent_send_path:
             parent_send_path = _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
 
-        if config.source.verify_incremental_parent:
-            already_verified = bool(
-                verified_parent_subvolumes is not None
-                and config.source.verify_incremental_parent_once_per_run
-                and subvolume_name in verified_parent_subvolumes
+        already_verified = bool(
+            verified_parent_subvolumes is not None
+            and config.source.verify_incremental_parent_once_per_run
+            and subvolume_name in verified_parent_subvolumes
+        )
+        if already_verified:
+            _human_blank()
+            print(f"  {subvolume_name}: parent guard already verified earlier in this run; trusting incremental chain")
+            _human_blank()
+        else:
+            _verify_incremental_parent(
+                config,
+                ssh,
+                parent_name=parent_name,
+                parent_subvol=parent_subvol,
+                parent_send_path=parent_send_path,
+                subvolume_name=subvolume_name,
+                state_parent=parent_state,
             )
-            if already_verified:
-                _human_blank()
-                print(f"  {subvolume_name}: parent guard already verified earlier in this run; trusting incremental chain")
-                _human_blank()
-            else:
-                _verify_incremental_parent(
-                    config,
-                    ssh,
-                    parent_name=parent_name,
-                    parent_subvol=parent_subvol,
-                    parent_send_path=parent_send_path,
-                    subvolume_name=subvolume_name,
-                    state_parent=parent_state,
-                )
-                if verified_parent_subvolumes is not None:
-                    verified_parent_subvolumes.add(subvolume_name)
+            if verified_parent_subvolumes is not None:
+                verified_parent_subvolumes.add(subvolume_name)
         return parent_name, parent_send_path
 
-    # No usable parent was found. If the destination is not empty, this may be a
-    # user mistake such as pointing another OS at an existing backup location.
-    if _destination_has_existing_snapshots(config) and not state.get("snapshots"):
+    # No usable parent was found. Full send is allowed only when the destination
+    # has no snapshots at all. If snapshots already exist in the backup target,
+    # refusing is safer than mixing a new full-send chain into the wrong folder.
+    if _destination_has_existing_snapshots(config):
         raise SyncError(
-            "Destination already contains snapshots, but state.json has no usable matching parent. "
-            "Refusing to guess because this could mix snapshots from different OS installs. "
-            "Use an empty/separate target_root for a new full backup, or restore/repair state.json "
-            "so a matching source/destination parent can be proven."
+            "Destination already contains snapshots, but no usable matching incremental parent "
+            "was found for the current source snapshot. Refusing to guess because this could "
+            "mix snapshots from different OS installs or backup chains. Use an empty/separate "
+            "target_root for a new full backup, or restore/repair state.json/source cache so a "
+            "matching source/destination parent can be proven."
         )
     return None, None
 
@@ -949,7 +949,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 print(f"    source: {current_send_path}")
                 print()
                 print(f"    dest:   {dest_path}")
-                if parent_name and config.source.verify_incremental_parent:
+                if parent_name:
                     print()
                     if config.source.verify_incremental_parent_once_per_run:
                         print("    safety: real run verifies the first incremental parent per subvolume, then trusts the chain")
@@ -1022,7 +1022,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             if dest_path.exists():
                 try:
                     received_meta = btrfs.local_subvolume_show(dest_path, config.destination.sudo, subvol_name, config.destination.btrfs_command)
-                    received_meta.readonly = btrfs.local_readonly(dest_path, config.destination.sudo, config.destination.btrfs_command)
                 except Exception:
                     received_meta = None
 

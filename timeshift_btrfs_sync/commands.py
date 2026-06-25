@@ -131,7 +131,7 @@ def run_local(
 
     # Make normal command stderr visible in the terminal too. Pipeline stderr is
     # handled separately by stream_pipeline(), so this only affects captured
-    # commands such as btrfs subvolume show/delete and property checks.
+    # commands such as btrfs subvolume show/delete.
     if proc.stderr:
         print(f"COMMAND STDERR: {shlex.join(cmd)}", file=runlog.terminal_stderr())
         print(proc.stderr.rstrip(), file=runlog.terminal_stderr())

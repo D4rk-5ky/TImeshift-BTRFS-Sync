@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.5.4 config
+# timeshift-btrfs-sync v0.5.7 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -200,18 +200,16 @@ snapshot_root = "/timeshift-btrfs/snapshots"
 # Subvolumes expected inside each Timeshift snapshot.
 subvolumes = ["@", "@home"]
 
-# Speed option. Default false is fast: discovery does NOT run btrfs show/property
+# Speed option. Default false is fast: discovery does NOT run btrfs subvolume show
 # for every snapshot/subvolume. It trusts the configured naming layout and only
 # checks Btrfs metadata when a subvolume is actually going to be sent.
 # Set true if you want list-source/sync discovery to verify every subvolume up front.
 verify_subvolumes_at_discovery = false
 
-# Safety option. Keep true. Before using an existing destination snapshot as an
-# incremental parent, the app compares current source Btrfs UUID metadata with
-# destination `received_uuid` metadata. This prevents accidentally mixing
-# snapshots from another OS/source into the same backup target. Parent mismatch
-# is always a hard error; there is no unsafe override.
-verify_incremental_parent = true
+# Incremental parent verification is mandatory and no longer configurable.
+# Before using an existing destination snapshot as an incremental parent, the app
+# compares current source Btrfs UUID metadata with destination `received_uuid`
+# metadata. Parent mismatch is always a hard error.
 
 # Performance/safety balance. When true, the first incremental parent for each
 # subvolume name (@, @home) is verified during a run. Later incrementals in the
@@ -231,6 +229,10 @@ create_readonly_cache = true
 # Source cache cleanup. Keep true. After a successful incremental send, the
 # previous source cache snapshot is no longer needed and is deleted with:
 #   sudo -n btrfs subvolume delete <old-cache-subvolume>
+# The timestamp cache parent <cache_root>/<snapshot-name> is deleted only after
+# `btrfs subvolume list -o <cache_root>/<snapshot-name>` confirms that no child
+# subvolumes remain below it. This avoids deleting the parent after @ while
+# @home still exists.
 # The newest/current cache snapshot is kept because it is needed as the parent
 # for the next incremental send, including the next program run.
 cleanup_superseded_cache = true
@@ -261,7 +263,7 @@ send_compressed_data = true
 # `btrfs subvolume delete` before removing the ordinary folders.
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 
-# Local sudo prefix for btrfs receive/delete/property commands.
+# Local sudo prefix for btrfs receive/delete/show commands.
 sudo = "sudo -n"
 btrfs_command = "btrfs"
 

@@ -69,16 +69,11 @@ class SourceConfig:
     # for the next incremental send, including the next program run.
     cleanup_superseded_cache: bool = True
 
-    # Speed option. False means discovery does not run btrfs property/show for
+    # Speed option. False means discovery does not run btrfs subvolume show for
     # every snapshot. The app assumes configured subvolume names exist and only
     # runs Btrfs checks for snapshots that are actually going to be sent.
     verify_subvolumes_at_discovery: bool = False
 
-    # Safety option. When true, an incremental parent is verified by comparing
-    # source Btrfs UUID metadata with local destination received_uuid metadata
-    # before using `btrfs send -p`. This prevents accidentally using snapshots
-    # from another OS/source as parents while keeping discovery fast.
-    verify_incremental_parent: bool = True
 
     # Performance/safety balance. When true, the app verifies the first
     # incremental parent for each subvolume name during a run, then trusts the
@@ -269,15 +264,17 @@ def load_config(path: str | Path) -> AppConfig:
     source_raw = raw.get("source", {})
     if not isinstance(source_raw, dict):
         raise ConfigError("[source] must be a TOML table")
-    removed_source_options = {"allow_incremental_without_parent_match"}
+    removed_source_options = {"allow_incremental_without_parent_match", "verify_incremental_parent"}
     removed_source_present = sorted(removed_source_options.intersection(source_raw))
     if removed_source_present:
         names = ", ".join(f"source.{name}" for name in removed_source_present)
         raise ConfigError(
-            f"Removed unsafe incremental option(s) still present: {names}. "
-            "This escape hatch was removed in 0.5.4. Incremental sends now "
-            "require a matching source/destination parent, or the app must do "
-            "a full send into an empty/separate destination target_root."
+            f"Removed source incremental option(s) still present: {names}. "
+            "Incremental parent verification is now mandatory and no longer configurable. "
+            "Incremental sends require a matching source/destination parent. If the "
+            "destination already contains snapshots but no matching parent can be proven, "
+            "use an empty/separate destination target_root for a new full sync or repair "
+            "state/cache so a matching parent can be proven."
         )
     source = SourceConfig(
         snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
@@ -289,7 +286,6 @@ def load_config(path: str | Path) -> AppConfig:
         create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
         cleanup_superseded_cache=_as_bool(source_raw.get("cleanup_superseded_cache"), "source.cleanup_superseded_cache", True),
         verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
-        verify_incremental_parent=_as_bool(source_raw.get("verify_incremental_parent"), "source.verify_incremental_parent", True),
         verify_incremental_parent_once_per_run=_as_bool(source_raw.get("verify_incremental_parent_once_per_run"), "source.verify_incremental_parent_once_per_run", True),
         send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
         send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),

@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.5.4
+# Config and CLI audit for v0.5.7
 
 This file records the audit requested after v0.2.3.
 
@@ -118,7 +118,6 @@ This file records the audit requested after v0.2.3.
 - `create_readonly_cache`
 - `cleanup_superseded_cache`
 - `verify_subvolumes_at_discovery`
-- `verify_incremental_parent`
 - `verify_incremental_parent_once_per_run`
 - `send_compressed_data`
 - `send_proto`
@@ -202,7 +201,7 @@ python3 -m timeshift_btrfs_sync show-state --help
 ## 0.2.8 audit addition
 
 - Confirmed no new config or CLI flags were added for high-watermark sync; it is automatic normal sync behavior.
-- Superseded by v0.5.4: destination compression options were later removed from config and code.
+- Superseded by v0.5.5: destination compression options were later removed from config and code.
 - Confirmed `config.example.toml` parses with the new default.
 - Confirmed `init-config` writes the same full commented config example.
 
@@ -343,3 +342,5 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 ## Removed config options
 
 - `source.allow_incremental_without_parent_match` was removed in 0.5.4. Incremental parent mismatches are now hard errors.
+- `source.verify_incremental_parent` was removed in 0.5.5. Incremental parent verification is mandatory and no longer configurable.
+- Full send is allowed only when the destination has no snapshots. If destination snapshots exist and no matching parent can be proven, sync errors instead of starting a separate full-send chain in the same target.

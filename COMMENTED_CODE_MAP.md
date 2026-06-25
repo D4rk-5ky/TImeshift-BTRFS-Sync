@@ -90,7 +90,6 @@ snapshot up front; it delays them until send time.
 sudo -n timeshift --list
 sudo -n timeshift --create --scripted --comments "..."
 sudo -n btrfs subvolume show <path>
-sudo -n btrfs property get -ts <path> ro
 sudo -n btrfs subvolume create <cache_root>/<snapshot>
 sudo -n btrfs subvolume snapshot -r <source> <cache>
 sudo -n btrfs subvolume delete <superseded-cache>
@@ -132,7 +131,7 @@ Btrfs checks happen later only for subvolumes that are actually being sent.
 ## Incremental parent guard
 
 Fast discovery avoids metadata checks for every snapshot, but the first selected
-incremental parent for each subvolume name is still checked before real send.
+incremental parent for each subvolume name is still checked before real send. This guard is mandatory and cannot be disabled from config.
 Later incrementals in the same run trust the chain that this process just
 created. The app compares:
 
@@ -153,7 +152,7 @@ or source as the parent for the current source.
 
 ## Source cache cleanup logic
 
-Writable Timeshift snapshots (`ro=false`) need temporary read-only cache
+Writable Timeshift snapshots (`Flags: -`) need temporary read-only cache
 snapshots before `btrfs send`. The app keeps the newest cache snapshot for each
 subvolume because it is the parent for the next incremental send. After a newer
 snapshot has been received successfully, the older parent cache is superseded
@@ -176,7 +175,6 @@ These run locally on the backup machine:
 ```bash
 sudo -n btrfs receive <snapshot_dir>
 sudo -n btrfs subvolume show <received_path>
-sudo -n btrfs property get -ts <received_path> ro
 sudo -n btrfs subvolume delete <old_snapshot_subvolume>
 ```
 
@@ -200,7 +198,7 @@ Incremental send is chosen in `sync.py` using state from `state.json`:
 
 1. Find the newest older snapshot already received for the same subvolume.
 2. Ensure the source still has that parent snapshot/cache path.
-3. Verify the first incremental parent for each subvolume name during the run, unless disabled.
+3. Verify the incremental parent. By default this is done once per subvolume name during the run, then the chain created by the same process is trusted.
 4. Run `btrfs send -p <parent> <current>`.
 5. Update `state.json` only after receive succeeds, using local destination metadata when possible.
 
