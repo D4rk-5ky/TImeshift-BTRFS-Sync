@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.5
+# timeshift-btrfs-sync v0.4.7
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -166,6 +166,22 @@ The app does not estimate a progress bar from Btrfs disk-usage values because th
 Destination compression is set on receive parent directories before receiving when `destination.set_compression_before_receive = true`.
 
 `destination.set_compression_after_receive` defaults to false because received Btrfs subvolumes are normally read-only. For exact compression levels such as `zstd:3`, use Btrfs mount options; `btrfs property set ... compression` accepts compressor names, not levels.
+
+
+## Installation and executable builds
+
+Install instructions, editable install steps, and PyInstaller executable build commands are kept in [`INSTALL.md`](INSTALL.md).
+
+The short version for normal source installs is:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -e .
+ts-btrfs --version
+```
+
+For PyInstaller builds, see the dedicated `INSTALL.md` section for both folder-style and one-file executables.
 
 ## Usual test flow
 

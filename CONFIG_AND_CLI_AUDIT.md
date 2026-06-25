@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.4.5
+# Config and CLI audit for v0.4.7
 
 This file records the audit requested after v0.2.3.
 
@@ -271,7 +271,7 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Confirmed the example parses as valid TOML.
 
 
-## 0.4.4 simplified docs audit
+## 0.4.3 simplified docs audit
 
 - Replaced `README.md` with the simplified version supplied by the user.
 - Replaced `VERSIONING.md` with the version-history-focused version supplied by the user.
@@ -293,3 +293,20 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - README includes a compact command reference for every argparse flag.
 - README includes a compact config reference for every option present in `config.example.toml`.
 - No CLI flags or config options changed.
+
+
+## 0.4.6 PyInstaller build audit
+
+- Added optional `pyinstaller` dependency extra in `pyproject.toml`.
+- Added `tools/pyinstaller_entry.py` as a small executable build entry point.
+- Added `scripts/build_pyinstaller.py` with `--mode onedir`, `--mode onefile`, and `--mode both`.
+- README documented recommended onedir and one-file build commands; those details were moved to INSTALL.md in 0.4.7.
+- MQTT remains optional; use `python3 -m pip install -e '.[mqtt,pyinstaller]'` and `--with-mqtt` for MQTT-capable executables.
+
+
+## 0.4.7 install docs audit
+
+- Added `INSTALL.md`.
+- README links to `INSTALL.md` for installation and PyInstaller executable builds.
+- PyInstaller helper commands remain documented in `INSTALL.md`.
+- No CLI/config behavior changed.

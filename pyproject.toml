@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "timeshift-btrfs-sync"
-version = "0.4.5"
-description = "Destination-pull Btrfs send/receive sync for Timeshift snapshots with SSH, mbuffer, and Btrfs compression options and split logging and optional MQTT and email notifications with log attachments"
+version = "0.4.7"
+description = "Destination-pull Btrfs send/receive sync for Timeshift snapshots with SSH, mbuffer, split logging, notifications, and optional PyInstaller executable builds"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
@@ -27,3 +27,4 @@ packages = ["timeshift_btrfs_sync"]
 
 [project.optional-dependencies]
 mqtt = ["paho-mqtt>=1.6"]
+pyinstaller = ["pyinstaller>=6.0"]

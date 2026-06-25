@@ -40,16 +40,34 @@ Corrected sequence:
 40th zip -> 0.2.20
 41st zip -> 0.4.1
 42nd zip -> 0.4.2
-43rd zip -> 0.4.4
-44th zip -> 0.4.5
+43rd zip -> 0.4.3
+44th zip -> 0.4.4
+45th zip -> 0.4.5
+46th zip -> 0.4.6
+47th zip -> 0.4.7
 ```
 
-This build is version `0.4.5`.
+This build is version `0.4.7`.
 
 The version line was intentionally bumped to `0.4.0` at user request. Normal patch releases now continue from the 0.4.x line.
 
 
 ## Changelog
+
+### 0.4.7
+
+- Added `INSTALL.md` with separate install instructions.
+- Moved detailed PyInstaller build instructions out of the README and into `INSTALL.md`.
+- README now links to `INSTALL.md` instead of carrying the full PyInstaller command reference.
+- No functional code changes.
+
+### 0.4.6
+
+- Added optional PyInstaller build support.
+- Added `scripts/build_pyinstaller.py` helper.
+- Added `tools/pyinstaller_entry.py` entry script.
+- Added `pyinstaller` optional dependency extra.
+- Documented folder-style and one-file executable builds.
 
 ### 0.4.5
 
@@ -57,6 +75,18 @@ The version line was intentionally bumped to `0.4.0` at user request. Normal pat
 - No functional code changes.
 
 ### 0.4.4
+
+- Shortened README to focus on current behavior, how things work, and why they are needed.
+- Kept version/change history in `VERSIONING.md`.
+- No functional code changes.
+
+### 0.4.3
+
+- Replaced the README and `VERSIONING.md` with the user-supplied simplified documentation baseline.
+- Kept full CLI/config detail in the dedicated audit and config files.
+- No functional code changes.
+
+### 0.4.2
 
 - Updated `config.example.toml` and `init-config` output to the new safe-default baseline supplied by the user.
 - Defaults now keep dry-run safety enabled, prune disabled unless explicitly requested, source identity checks enabled, manual snapshot guard enabled, normal on-demand cleanup disabled, and read-only destination property writes disabled.
