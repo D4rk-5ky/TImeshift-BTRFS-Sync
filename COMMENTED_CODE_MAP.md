@@ -12,7 +12,7 @@ functions.
 | `timeshift_btrfs_sync/config.py` | Reads TOML config and validates options. |
 | `timeshift_btrfs_sync/ssh.py` | Builds SSH commands, including identity file, sshpass password mode, SSH compression, and cipher choice. |
 | `timeshift_btrfs_sync/timeshift.py` | Uses `timeshift --list` and `timeshift --create` on the source. |
-| `timeshift_btrfs_sync/btrfs.py` | Builds Btrfs commands for metadata, send, receive, cache snapshots, delete, and compression property. |
+| `timeshift_btrfs_sync/btrfs.py` | Builds Btrfs commands for metadata, send, receive, cache snapshots, and delete. |
 | `timeshift_btrfs_sync/sync.py` | Main sync loop: discover snapshots, choose parent, send/receive, update state. |
 | `timeshift_btrfs_sync/commands.py` | Runs subprocess commands and manages the streaming pipeline with optional mbuffer. |
 | `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files. |
@@ -177,7 +177,6 @@ These run locally on the backup machine:
 sudo -n btrfs receive <snapshot_dir>
 sudo -n btrfs subvolume show <received_path>
 sudo -n btrfs property get -ts <received_path> ro
-sudo -n btrfs property set <path> compression <zstd|lzo|zlib|none>
 sudo -n btrfs subvolume delete <old_snapshot_subvolume>
 ```
 
@@ -223,16 +222,9 @@ runs bypass this normal high-watermark skip.
 
 ## Compression logic
 
-Destination compression is best-effort:
+Destination compression is intentionally not managed by this app. Use Btrfs mount options or filesystem properties outside the app when you want compression on the destination pool.
 
-1. Set compression property on target root/snapshots root.
-2. Set compression on the per-snapshot receive directory before receive.
-3. Do not set compression on read-only received subvolumes. If after-receive
-   compression is explicitly enabled, sync.py checks read-only state first and
-   skips the property change when the received subvolume is read-only.
-
-This should not break incremental sync because the incremental chain depends on
-snapshot parent relationships and the received parent staying unchanged.
+`source.send_compressed_data` only changes the generated `btrfs send` command by adding `--compressed-data`; it does not set any destination compression property.
 
 
 ## Btrfs verbose output
@@ -267,7 +259,7 @@ Contains all optional SMTP email notification logic. It uses Python standard lib
 ## 0.4.8 behavior notes
 
 - `timeshift_btrfs_sync/cli.py` resolves dry-run before taking the lock. Dry-run sync/prune paths skip `FileLock` so they do not create lock/state directories.
-- `timeshift_btrfs_sync/sync.py` calls `prepare_destination()` only for real sync runs. Strict dry-run prints the plan without creating destination folders or setting compression properties.
+- `timeshift_btrfs_sync/sync.py` calls `prepare_destination()` only for real sync runs. Strict dry-run prints the plan without creating destination folders or internal metadata directories.
 - `timeshift_btrfs_sync/log.py` now tees normal app stdout to `.log` and normal app stderr to `.err` while a run logger is active. Transfer streams still bypass this tee for specialized logs, but their stderr is also copied to `.err`.
 
 

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.11
+# timeshift-btrfs-sync v0.4.12
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -33,7 +33,7 @@ The safe defaults are intentionally conservative:
 - Incremental parents are verified with Btrfs UUID metadata before use.
 - Automatic source-side manual snapshot creation can require a UUID-confirmed source identity first.
 - Normal/user-created Timeshift on-demand snapshots are not pruned unless explicitly enabled.
-- Received read-only snapshots are not modified after receive by default.
+- The app does not manage destination Btrfs compression; use mount options or filesystem properties outside the app if needed.
 
 The source machine only needs passwordless sudo for Btrfs and Timeshift:
 
@@ -163,11 +163,13 @@ MQTT notifications publish simple JSON status to the configured topic. Failure m
 
 The app does not estimate a progress bar from Btrfs disk-usage values because those values can be very different from the real send-stream size.
 
-## Destination compression
+## Destination filesystem compression
 
-Destination compression is set on receive parent directories before receiving when `destination.set_compression_before_receive = true`.
+The app no longer sets destination Btrfs compression properties. Destination compression should be configured outside the app with your normal Btrfs mount options or filesystem/property policy.
 
-`destination.set_compression_after_receive` defaults to false because received Btrfs subvolumes are normally read-only. For exact compression levels such as `zstd:3`, use Btrfs mount options; `btrfs property set ... compression` accepts compressor names, not levels.
+`source.send_compressed_data = true` only controls the Btrfs send stream. It does not configure destination compression.
+
+If an old config still contains `destination.compression`, `destination.set_compression_before_receive`, or `destination.set_compression_after_receive`, the app now refuses to start and tells you to remove those obsolete keys.
 
 
 ## Installation and executable builds
@@ -400,7 +402,7 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |
 | `cleanup_superseded_cache` | Deletes old cache snapshots after newer successful sends supersede them. | Prevents the source cache from growing forever while keeping the newest parent. |
-| `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed extents when supported. Separate from destination compression. |
+| `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression. |
 | `send_proto` | Adds `btrfs send --proto <N>`. | Needed only when you intentionally want a specific Btrfs send protocol version. |
 
 ### `[destination]`
@@ -408,13 +410,10 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | Option | What it does | Why it may be needed |
 |---|---|---|
 | `target_root` | Local backup root. | Required. The app stores received snapshots and metadata under this path. |
-| `sudo` | Destination sudo prefix, normally `sudo -n`. | Required for local `btrfs receive`, subvolume delete, and property commands. |
+| `sudo` | Destination sudo prefix, normally `sudo -n`. | Required for local `btrfs receive` and subvolume delete commands. |
 | `btrfs_command` | Destination Btrfs command name/path. | Use an absolute path if needed by sudo or your distro. |
 | `create_target_root` | Creates target and metadata directories if missing. | Convenient for first setup. Disable if you want missing paths to be an error. |
 | `cleanup_incomplete_receive` | Removes incomplete destination receives not recorded in state. | Allows safe retry after cancelled transfers. Only Btrfs subvolumes or empty dirs are auto-deleted. |
-| `compression` | Destination Btrfs compression property: `zstd`, `lzo`, `zlib`, `none`, or blank. | Sets receive-parent compression behavior. Exact levels should be handled by mount options. |
-| `set_compression_before_receive` | Sets compression on destination parent directories before receive. | Helps new received extents inherit the desired compression property. |
-| `set_compression_after_receive` | Tries to set compression on received subvolumes after receive, skipping read-only ones. | Usually leave false because received snapshots are normally read-only. |
 
 ### `[stream]`
 

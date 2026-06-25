@@ -109,9 +109,6 @@ class DestinationConfig:
     # true, the app deletes that incomplete destination subvolume and retries.
     cleanup_incomplete_receive: bool = True
 
-    compression: str | None = None
-    set_compression_before_receive: bool = True
-    set_compression_after_receive: bool = False
 
 
 @dataclass(slots=True)
@@ -235,29 +232,6 @@ def _string_list(value: Any, field_name: str) -> list[str]:
     return value
 
 
-def _compression_value(value: Any) -> str | None:
-    """Normalize destination compression property value.
-
-    btrfs property supports algorithm names, not levels. zstd:3 is accepted in
-    config for convenience but normalized to zstd.
-    """
-
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ConfigError("destination.compression must be a string")
-    normalized = value.strip().lower()
-    if not normalized or normalized in {"off", "false"}:
-        return None
-    if ":" in normalized:
-        normalized = normalized.split(":", 1)[0]
-    aliases = {"no": "none", "disabled": "none"}
-    normalized = aliases.get(normalized, normalized)
-    if normalized not in {"zstd", "lzo", "zlib", "none"}:
-        raise ConfigError("destination.compression must be zstd, lzo, zlib, none, or blank")
-    return normalized
-
-
 def load_config(path: str | Path) -> AppConfig:
     """Read and validate TOML config."""
 
@@ -319,6 +293,19 @@ def load_config(path: str | Path) -> AppConfig:
     destination_raw = raw.get("destination", {})
     if not isinstance(destination_raw, dict):
         raise ConfigError("[destination] must be a TOML table")
+    removed_destination_options = {
+        "compression",
+        "set_compression_before_receive",
+        "set_compression_after_receive",
+    }
+    removed_present = sorted(removed_destination_options.intersection(destination_raw))
+    if removed_present:
+        names = ", ".join(f"destination.{name}" for name in removed_present)
+        raise ConfigError(
+            f"Removed destination compression option(s) still present: {names}. "
+            "These were removed in 0.4.12; configure destination Btrfs compression "
+            "outside this app with mount options or filesystem properties."
+        )
     target_root = _as_path(destination_raw.get("target_root"), "destination.target_root")
     destination = DestinationConfig(
         target_root=target_root,
@@ -326,9 +313,6 @@ def load_config(path: str | Path) -> AppConfig:
         btrfs_command=str(destination_raw.get("btrfs_command", "btrfs")),
         create_target_root=_as_bool(destination_raw.get("create_target_root"), "destination.create_target_root", True),
         cleanup_incomplete_receive=_as_bool(destination_raw.get("cleanup_incomplete_receive"), "destination.cleanup_incomplete_receive", True),
-        compression=_compression_value(destination_raw.get("compression")),
-        set_compression_before_receive=_as_bool(destination_raw.get("set_compression_before_receive"), "destination.set_compression_before_receive", True),
-        set_compression_after_receive=_as_bool(destination_raw.get("set_compression_after_receive"), "destination.set_compression_after_receive", False),
     )
 
     stream_raw = raw.get("stream", {})

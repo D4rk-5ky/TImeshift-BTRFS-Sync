@@ -121,18 +121,6 @@ def local_readonly(path: Path, sudo: str, btrfs_command: str = "btrfs") -> bool 
     return parse_property_ro(result.stdout)
 
 
-def set_local_compression(path: Path, sudo: str, btrfs_command: str, compression: str | None) -> None:
-    """Set Btrfs compression property on a local file/directory/subvolume.
-
-    This affects future writes through that inode/property path. It does not
-    rewrite already-written extents.
-    """
-
-    if not compression:
-        return
-    run_local(local_btrfs_cmd(sudo, btrfs_command, ["property", "set", str(path), "compression", compression]), check=False)
-
-
 def _validate_cache_snapshot_name(snapshot_name: str) -> str:
     """Reject unsafe cache snapshot names."""
 

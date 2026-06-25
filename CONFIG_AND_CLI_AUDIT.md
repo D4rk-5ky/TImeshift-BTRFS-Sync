@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.4.11
+# Config and CLI audit for v0.4.12
 
 This file records the audit requested after v0.2.3.
 
@@ -131,9 +131,6 @@ This file records the audit requested after v0.2.3.
 - `btrfs_command`
 - `create_target_root`
 - `cleanup_incomplete_receive`
-- `compression`
-- `set_compression_before_receive`
-- `set_compression_after_receive`
 
 ### `[stream]`
 
@@ -172,6 +169,15 @@ python3 -m timeshift_btrfs_sync show-state --help
 ```
 
 
+
+## 0.4.12 audit addition
+
+- Removed destination compression config options from `config.example.toml` and `ts-btrfs.toml`.
+- Removed destination compression parsing from `timeshift_btrfs_sync/config.py`; old removed keys now raise a clear `ConfigError` instead of being silently ignored.
+- Removed destination compression property-setting calls from `timeshift_btrfs_sync/sync.py`.
+- Removed the local compression helper from `timeshift_btrfs_sync/btrfs.py`.
+- Confirmed `init-config` writes the same updated config example.
+
 ## 0.2.5 audit addition
 
 - Added and documented `destination.cleanup_incomplete_receive`.
@@ -190,7 +196,7 @@ python3 -m timeshift_btrfs_sync show-state --help
 ## 0.2.8 audit addition
 
 - Confirmed no new config or CLI flags were added for high-watermark sync; it is automatic normal sync behavior.
-- Confirmed `destination.set_compression_after_receive` remains documented and present in `config.example.toml`, but now defaults to `false`.
+- Superseded by v0.4.12: destination compression options were later removed from config and code.
 - Confirmed `config.example.toml` parses with the new default.
 - Confirmed `init-config` writes the same full commented config example.
 

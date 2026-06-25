@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.4.11 config
+# timeshift-btrfs-sync v0.4.12 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -240,8 +240,9 @@ cleanup_superseded_cache = true
 
 # Optional Btrfs send compressed-data mode.
 # true adds: btrfs send --compressed-data
-# This preserves already-compressed source extents when supported. It is not the
-# same thing as choosing destination compression.
+# This preserves already-compressed source extents when supported.
+# Destination compression is intentionally not configured by this app; use your
+# destination filesystem mount options/properties outside the app if needed.
 send_compressed_data = true
 
 # Optional Btrfs send protocol version.
@@ -275,20 +276,6 @@ create_target_root = true
 # directories still require manual inspection.
 cleanup_incomplete_receive = true
 
-# Destination Btrfs compression property.
-# Accepted: zstd, lzo, zlib, none, or blank.
-# zstd:3 is accepted but normalized to zstd because `btrfs property set` does
-# not set compression levels. Use mount options for exact levels.
-compression = "none"
-
-# Before receive, set compression on the destination snapshot parent directory.
-set_compression_before_receive = true
-
-# After receive, optionally try to set compression on the received subvolume.
-# Default false because received Btrfs snapshots are normally read-only, and
-# setting properties on a read-only subvolume fails. Leave false unless you
-# intentionally make received snapshots writable before setting properties.
-set_compression_after_receive = false
 
 [stream]
 # Optional mbuffer between SSH send and local receive.

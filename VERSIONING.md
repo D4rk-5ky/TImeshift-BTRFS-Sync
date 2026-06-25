@@ -49,14 +49,24 @@ Corrected sequence:
 49th zip -> 0.4.9
 50th zip -> 0.4.10
 51st zip -> 0.4.11
+52nd zip -> 0.4.12
 ```
 
-This build is version `0.4.11`.
+This build is version `0.4.12`.
 
 The version line was intentionally bumped to `0.4.0` at user request. Normal patch releases now continue from the 0.4.x line.
 
 
 ## Changelog
+
+
+### 0.4.12
+
+- Removed destination compression config options: `destination.compression`, `destination.set_compression_before_receive`, and `destination.set_compression_after_receive`.
+- Removed destination compression parsing from `timeshift_btrfs_sync/config.py`; old removed keys now raise a clear `ConfigError` instead of being silently ignored.
+- Removed all sync code that called `btrfs property set ... compression` on destination paths.
+- Removed the now-unused local compression helper from `timeshift_btrfs_sync/btrfs.py`.
+- Updated `config.example.toml`, `ts-btrfs.toml`, README, and audit docs so destination compression is handled outside the app.
 
 ### 0.4.11
 

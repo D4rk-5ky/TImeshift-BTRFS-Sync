@@ -40,7 +40,7 @@ def _human_rule(text: str = "----") -> None:
     print()
 
 def prepare_destination(config: AppConfig) -> None:
-    """Create/validate destination directories and set compression property."""
+    """Create/validate destination directories."""
 
     root = config.destination.target_root
     if root.exists():
@@ -55,10 +55,6 @@ def prepare_destination(config: AppConfig) -> None:
     config.state_file.parent.mkdir(parents=True, exist_ok=True)
     if config.log_dir is not None:
         config.log_dir.mkdir(parents=True, exist_ok=True)
-
-    # Best-effort compression property for future received writes.
-    btrfs.set_local_compression(root, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
-    btrfs.set_local_compression(snapshots_root, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
 
 
 def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
@@ -829,7 +825,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     """
 
     if dry_run:
-        print("Strict dry-run: destination preparation is skipped; no target directories or compression properties are created/changed.")
+        print("Strict dry-run: destination preparation is skipped; no target directories or internal metadata directories are created/changed.")
         _human_rule("----")
     else:
         prepare_destination(config)
@@ -919,8 +915,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         _human_blank()
         if dry_run:
             print(f"  would ensure local directory: {target_dir}")
-            if config.destination.compression:
-                print(f"  would set destination compression property: {config.destination.compression}")
             _human_blank()
 
         for subvol_name in config.source.subvolumes:
@@ -981,9 +975,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # This prevents an empty in-progress directory from being mistaken as
             # an existing backup by the safety guard.
             target_dir.mkdir(parents=True, exist_ok=True)
-            if config.destination.set_compression_before_receive:
-                btrfs.set_local_compression(target_dir, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
-
             _human_blank()
             print(f"  {subvol_name}: {mode} send/receive")
             # Build remote send command. If parent_send_path is set, btrfs send
@@ -999,8 +990,8 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 verbose=config.stream.btrfs_verbose,
             )
 
-            # Build local receive command. Compression properties were set on
-            # the target directory before receive if configured.
+            # Build local receive command. Destination compression is left to
+            # the filesystem mount/property policy outside this app.
             receive_cmd = btrfs.local_receive_cmd(
                 target_dir,
                 config.destination.sudo,
@@ -1035,17 +1026,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                     received_meta.readonly = btrfs.local_readonly(dest_path, config.destination.sudo, config.destination.btrfs_command)
                 except Exception:
                     received_meta = None
-
-                # A received Timeshift/Btrfs snapshot is normally read-only.
-                # Setting the compression property on a read-only subvolume fails,
-                # so the safe/default behavior is to set compression on the receive
-                # parent before receive and skip after-receive property changes when
-                # the received subvolume is read-only.
-                if config.destination.set_compression_after_receive:
-                    if received_meta and received_meta.readonly is True:
-                        print(f"  {subvol_name}: destination is read-only; skipping after-receive compression property")
-                    else:
-                        btrfs.set_local_compression(dest_path, config.destination.sudo, config.destination.btrfs_command, config.destination.compression)
 
             # Save both the original Timeshift source UUID and the exact send-path
             # UUID. When source cache is used, those are different subvolumes. This
