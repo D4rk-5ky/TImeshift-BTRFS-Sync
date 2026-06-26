@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.7.4
+# timeshift-btrfs-sync v0.7.6
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -237,7 +237,7 @@ The packaged `config.example.toml` contains all options with safe defaults. Keep
 
 ## Command reference
 
-All flags are also visible with `python3 -m timeshift_btrfs_sync <command> --help`.
+Top-level help lists every command. Command-specific flags are visible with `ts-btrfs <command> --help` or `python3 -m timeshift_btrfs_sync <command> --help`.
 
 ### Global
 

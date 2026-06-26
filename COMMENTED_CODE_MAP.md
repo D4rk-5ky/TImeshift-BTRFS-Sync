@@ -1,270 +1,166 @@
 # Commented code map
 
-This file explains the project sections and the shell commands the Python code
-builds. The Python source also contains docstrings for modules, classes, and
-functions.
+Compact map of the current codebase. It is kept in sync with the refactored
+helpers and avoids old historical notes.
 
-## Main files
+## Flow
+
+`cli.py` loads config and logging, `sync.py` reads `timeshift --list`, optionally
+creates a manual snapshot and re-reads the list, refreshes mutable state metadata,
+selects verified full/incremental sends, runs the stream pipeline, updates
+`state.json`, then optionally prunes by native Timeshift tags.
+
+## Modules
 
 | File | Purpose |
 | --- | --- |
-| `timeshift_btrfs_sync/cli.py` | Parses CLI commands like `sync`, `prune`, `list-source`, and `test-ssh`. |
-| `timeshift_btrfs_sync/config.py` | Reads TOML config and validates options. |
-| `timeshift_btrfs_sync/ssh.py` | Builds SSH commands, including identity file, sshpass password mode, SSH compression, and cipher choice. |
-| `timeshift_btrfs_sync/timeshift.py` | Uses `timeshift --list` and `timeshift --create` on the source. |
-| `timeshift_btrfs_sync/btrfs.py` | Builds Btrfs commands for metadata, send, receive, cache snapshots, and delete. |
-| `timeshift_btrfs_sync/sync.py` | Main sync loop: discover snapshots, choose parent, send/receive, update state. |
-| `timeshift_btrfs_sync/commands.py` | Runs subprocess commands and manages the streaming pipeline with optional mbuffer. |
-| `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.err`, `.btrfs`, `.mbuffer`, and `.succes` files. |
-| `timeshift_btrfs_sync/mqtt.py` | Owns optional MQTT JSON notifications using `paho-mqtt`. |
-| `timeshift_btrfs_sync/state.py` | Reads/writes `state.json` and finds incremental parents. |
-| `timeshift_btrfs_sync/retention.py` | Plans and applies destination pruning. |
-| `timeshift_btrfs_sync/lock.py` | Prevents overlapping runs with a lock file. |
-| `timeshift_btrfs_sync/models.py` | Dataclasses for snapshots and subvolumes. |
-
-## Split logging logic
-
-All file logging logic lives in `timeshift_btrfs_sync/log.py`. When top-level
-`log_dir` is set, the CLI creates one `RunLogger` for the command and installs
-it as the active logger.
-
-Files created per run:
-
-```text
-*.log = normal commands, return codes, and captured command output
-*.err = real command/pipeline error output
-*.btrfs = send/receive command lines plus Btrfs verbose stream output
-*.mbuffer = transfer command header plus mbuffer progress/summary
-*.succes = readable sync/retention statistics and success mail body
-```
-
-The streaming pipeline in `commands.py` calls `log.py` helper functions so
-mbuffer progress can be shown live on screen and written to `.mbuffer` without
-flooding `.log`. Btrfs verbose output is written separately to `.btrfs`, and readable statistics are written separately to `.succes`.
-
-## MQTT notification logic
-
-All MQTT logic lives in `timeshift_btrfs_sync/mqtt.py`. The module imports
-`paho.mqtt.client` lazily only when `[mqtt] enabled = true`, so normal non-MQTT
-runs do not require paho-mqtt.
-
-Success and failure payloads are JSON with simple top-level fields for Home
-Assistant MQTT sensors or automations:
-
-```text
-state/status = success or failure
-job/name     = config name
-command      = CLI command, for example sync
-exit_code    = command exit code
-error        = exception/error text on failure
-stderr       = newest captured stderr tail on failure
-```
-
-## Manual snapshot config logic
-
-Automatic on-demand snapshot creation is controlled by `[manual_snapshot]` and
-implemented in `sync.py`. When enabled, a normal `sync` run first performs
-source discovery with `timeshift --list` and, by default, requires a
-UUID-confirmed source match from `state.json` before creating a new source
-Timeshift tag `O` snapshot.
-
-The manual snapshot command is built in `timeshift.py` and uses remote-safe
-double-quote escaping for the comment so logs stay readable:
-
-```bash
-sudo -n timeshift --create --scripted --comments "<comment>"
-```
-
-The configured comment should contain `manual_snapshot.marker`. Destination
-pruning uses that marker, when present in saved state comments, to keep the
-newest `manual_snapshot.retention_count` app-created on-demand snapshots. This
-is independent from normal `[retention].cleanup_ondemand`, which controls
-whether user-created Timeshift tag `O` snapshots may be pruned.
-
-## Source-side commands
-
-These are the only commands that need passwordless sudo on the source. In fast
-discovery mode, the app does not run the btrfs metadata commands for every
-snapshot up front; it delays them until send time.
-
-```bash
-sudo -n timeshift --list
-sudo -n timeshift --create --scripted --comments "..."
-sudo -n btrfs subvolume show <path>
-sudo -n btrfs subvolume create <cache_root>/<snapshot>
-sudo -n btrfs subvolume snapshot -r <source> <cache>
-sudo -n btrfs subvolume delete <superseded-cache>
-sudo -n btrfs send [-p <parent>] [--compressed-data] [--proto N] <snapshot>
-```
-
-## Fast discovery logic
-
-Controlled by:
-
-```toml
-[source]
-verify_subvolumes_at_discovery = false
-```
-
-When false, `sync` discovery only does:
-
-```bash
-sudo -n timeshift --list
-```
-
-`list-source` is also fast by default. Use this when you want the slower
-per-subvolume Btrfs verification during listing:
-
-```bash
-ts-btrfs list-source --config ./config.toml --verify-btrfs
-```
-
-Then the app constructs expected paths like:
-
-```text
-<snapshot_root>/<snapshot-name>/@
-<snapshot_root>/<snapshot-name>/@home
-```
-
-Btrfs checks happen later only for subvolumes that are actually being sent.
-
-
-## Incremental parent guard
-
-Fast discovery avoids metadata checks for every snapshot, but the first selected
-incremental parent for each subvolume name is still checked before real send. This guard is mandatory and cannot be disabled from config.
-Later incrementals in the same run trust the chain that this process just
-created. The app compares:
-
-```text
-source parent UUID == destination parent Received UUID
-```
-
-Commands used for the first selected parent for a subvolume during a run:
-
-```bash
-sudo -n btrfs subvolume show <source-parent-send-path>
-sudo -n btrfs subvolume show <destination-parent-subvolume>
-```
-
-This is what prevents accidentally using a destination snapshot from another OS
-or source as the parent for the current source.
-
-
-## Source cache cleanup logic
-
-Writable Timeshift snapshots (`Flags: -`) need temporary read-only cache
-snapshots before `btrfs send`. The app keeps the newest cache snapshot for each
-subvolume because it is the parent for the next incremental send. After a newer
-snapshot has been received successfully, the older parent cache is superseded
-and can be deleted safely.
-
-Cleanup command built by `btrfs.py` and called from `sync.py`:
-
-```bash
-sudo -n btrfs subvolume delete <old-cache-subvolume>
-```
-
-The app also attempts to delete the empty per-snapshot cache parent. If another
-child cache such as `@home` still exists, Btrfs refuses the parent delete and the
-app ignores that expected failure.
-
-## Destination-side commands
-
-These run locally on the backup machine:
-
-```bash
-sudo -n btrfs receive <snapshot_dir>
-sudo -n btrfs subvolume show <received_path>
-sudo -n btrfs subvolume delete <old_snapshot_subvolume>
-```
-
-## Optional stream command
-
-If enabled, mbuffer runs on the destination:
-
-```bash
-mbuffer -m 256M
-```
-
-The pipeline becomes:
-
-```text
-ssh source 'sudo -n btrfs send ...' | mbuffer -m 256M | sudo -n btrfs receive ...
-```
-
-## Incremental logic
-
-Incremental send is chosen in `sync.py` using state from `state.json`:
-
-1. Find the newest older snapshot already received for the same subvolume.
-2. Ensure the source still has that parent snapshot/cache path.
-3. Verify the incremental parent. By default this is done once per subvolume name during the run, then the chain created by the same process is trusted.
-4. Run `btrfs send -p <parent> <current>`.
-5. Update `state.json` only after receive succeeds, using local destination metadata when possible.
-
-## Prune-safe high-watermark logic
-
-After destination pruning, source Timeshift may still list snapshots that were
-intentionally deleted on the destination. `sync.py` avoids re-sending those old
-snapshots by finding a confirmed sync floor:
-
-1. Walk `state.json` newest-to-oldest.
-2. Require the candidate snapshot to still exist in source `timeshift --list`.
-3. Compare Btrfs UUID identity between the source candidate and the destination
-   received subvolume metadata.
-4. Skip normal sync candidates older than or equal to that confirmed floor.
-
-If the newest state entry is not on the source, the search walks backward until
-it finds a source/state/destination UUID match. Specific `--snapshot <name>`
-runs bypass this normal high-watermark skip.
-
-## Compression logic
-
-Destination compression is intentionally not managed by this app. If compressed destination storage is wanted, mount the receiving Btrfs filesystem/subvolume with compression enabled before running the app.
-
-`source.send_compressed_data` only changes the generated `btrfs send` command by adding `--compressed-data`; it does not set any destination compression property or mount option.
-
-
-## Btrfs verbose output
-
-`stream.btrfs_verbose = true` adds `-v` to both generated Btrfs stream commands:
-
-```bash
-btrfs send -v ...
-btrfs receive -v ...
-```
-
-The pipeline lets that Btrfs verbose output pass through live to the terminal. This is operation/detail logging, not byte progress; mbuffer remains the main progress display for throughput and totals.
-
-
-## 0.2.5 notes
-
-- `sync.py` now includes interrupted receive cleanup controlled by `destination.cleanup_incomplete_receive`.
-- `commands.py` mirrors normal captured command stderr to the terminal and `.err`. Transfer pipeline stderr is buffered because successful `btrfs send` and `mbuffer` use stderr for normal status/progress.
-- Source cache cleanup now prints a separator before the next transfer block.
-
-
-## Timeshift on-demand tag workaround
-
-Manual snapshot creation intentionally omits explicit `--tags O`. Timeshift defaults to tag `O` for manual/on-demand creates, and some versions reject explicit `O` because of a CLI validation bug.
-
-
-## timeshift_btrfs_sync/mail.py
-
-Contains all optional SMTP email notification logic. It uses Python standard library `smtplib` and `email.message`, builds success/failure status payloads, supports optional username/password or password_file, STARTTLS, implicit SMTP SSL, and sends plain-text status emails.
-
-
-## 0.4.8 behavior notes
-
-- `timeshift_btrfs_sync/cli.py` resolves dry-run before taking the lock. Dry-run sync/prune paths skip `FileLock` so they do not create lock/state directories.
-- `timeshift_btrfs_sync/sync.py` calls `prepare_destination()` only for real sync runs. Strict dry-run prints the plan without creating destination folders or internal metadata directories.
-- `timeshift_btrfs_sync/log.py` now tees normal app stdout to `.log` and normal app stderr to `.err` while a run logger is active. Transfer streams still bypass this tee for specialized logs, but their stderr is also copied to `.err`.
-
-
-## 0.4.10 stderr logging audit
-
-- `timeshift_btrfs_sync/commands.py` no longer suppresses stderr for expected negative probes.
-- All captured command stderr is mirrored to the terminal and written to `.err` when file logging is enabled.
-- Pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is copied to `.err` only when that pipeline fails.
-- `mbuffer` progress is written to `.mbuffer`, and Btrfs transfer status is written to `.btrfs`. Empty log files are not attached to mail.
+| `cli.py` | CLI, logging wrapper, notifications, config-template copy. |
+| `config.py` | TOML dataclasses and validation. |
+| `sync.py` | Main backup logic and safety decisions. |
+| `btrfs.py` | Btrfs commands, metadata parser, cache helpers. |
+| `timeshift.py` | Remote Timeshift list/create parser and commands. |
+| `commands.py` | Subprocess runner and stream pipeline. |
+| `state.py` | `state.json`, relative paths, sync markers. |
+| `retention.py` | Keep/delete planning and pruning. |
+| `log.py` | `.log`, `.err`, `.btrfs`, `.mbuffer`, `.succes`. |
+| `mail.py`, `mqtt.py` | Optional status notifications. |
+| `ssh.py`, `lock.py`, `models.py` | SSH wrapper, lock file, shared dataclasses. |
+
+## Functions and classes
+
+### `models.py`
+
+- `SubvolumeMeta`: Btrfs UUID/received UUID/parent UUID/read-only metadata.
+- `SnapshotMeta`: Timeshift snapshot name, path, tags, comment, subvolumes.
+- `SnapshotMeta.sort_key()`: timestamp/name sort key.
+
+### `config.py`
+
+- `ManualSnapshotConfig`, `SourceConfig`, `DestinationConfig`, `StreamConfig`, `RetentionConfig`, `AppConfig`: typed config sections.
+- `StreamConfig.command()`: stream helper argv.
+- `RetentionConfig.counts_by_tag()`: retention counts for `H/D/W/M/B/O`.
+- `ConfigError`: invalid config error.
+- `_as_str()`, `_as_path()`, `_as_bool()`, `_as_int()`, `_string_list()`: TOML value readers.
+- `load_config()`: read and validate config.
+
+### `ssh.py`
+
+- `SSHConfig`: SSH settings; `target()`, `uses_password_auth()`, `_read_password()`, `environment()`, `base_command()` build auth/env/argv.
+- `SSHRunner`: remote runner; `command()`, `run()`, `environment()`, `test()` build/run/test SSH commands.
+
+### `commands.py`
+
+- `CommandError`: failed command details.
+- `Completed`: command result.
+- `sudo_prefix()`, `quote_join()`, `remote_double_quote()`, `_merged_env()`: command formatting/env helpers.
+- `run_local()`: normal local command runner.
+- `_join_text()`: join process buffers.
+- `stream_pipeline()`: `ssh btrfs send | mbuffer | btrfs receive`; only failed pipeline stderr goes to `.err`.
+
+### `btrfs.py`
+
+- `_clean_uuid()`: turns Btrfs `-` UUID into `None`.
+- `parse_subvolume_show()`: single parser for `btrfs subvolume show`.
+- `remote_btrfs_cmd()`, `local_btrfs_cmd()`: Btrfs argv builders.
+- `get_subvolume_meta()`: shared local/remote metadata reader.
+- `_validate_cache_snapshot_name()`, `_validate_cache_subvolume_name()`: cache path guards.
+- `readonly_cache_parent_path()`, `readonly_cache_path()`: cache path builders.
+- `_subvolume_list_paths()`, `_cache_path_suffixes()`, `_listed_cache_path_matches()`: parse/match `subvolume list -o` output.
+- `remote_list_child_subvolumes()`: list cache children.
+- `remote_cache_contains()`, `remote_cache_is_empty()`, `cache_child_display_path()`: cache tests/display.
+- `remote_ensure_cache_parent()`: create cache parent when missing.
+- `remote_ensure_readonly_send_path()`: use original read-only snapshot or create read-only cache snapshot.
+- `path_is_under_cache()`: cache path test.
+- `remote_delete_subvolume()`, `remote_try_delete_cache_subvolume()`: source cache deletion.
+- `remote_send_cmd()`, `local_receive_cmd()`, `delete_local_subvolume()`: send/receive/delete argv builders.
+
+### `timeshift.py`
+
+- `timeshift_cmd()`: remote Timeshift argv.
+- `normalize_tags()`: native Timeshift tags only.
+- `parse_timeshift_list()`: parse snapshot names, tags, comments, paths.
+- `list_remote_snapshots()`: run and parse `timeshift --list`.
+- `create_remote_manual_snapshot_cmd()`: build manual snapshot command.
+- `create_remote_manual_snapshot()`: run manual snapshot creation; no explicit `--tags O`.
+
+### `state.py`
+
+- `empty_state()`: new state dict.
+- `_safe_relative_path()`, `destination_path_to_relative()`, `resolve_destination_path()`, `normalize_destination_paths()`: relative destination path handling.
+- `load_state()`, `save_state()`: JSON I/O.
+- `refresh_snapshot_metadata_from_source()`: update tags/comment/created/path from Timeshift.
+- `snapshot_is_synced()`: check all expected subvolumes are ok.
+- `mark_subvolume_synced()`: save successful receive metadata.
+- `remove_snapshot_from_state()`: drop pruned snapshot.
+- `latest_synced_before()`: newest older synced parent for a subvolume.
+
+### `sync.py`
+
+- `SyncError`: fatal sync error.
+- `_local_meta()`, `_remote_meta()`: compact metadata wrappers.
+- `_human_blank()`, `_human_rule()`, `_tags_text()`: summary text helpers.
+- `_record_sync_event()`, `_print_sync_summary()`: `.succes` sync statistics.
+- `prepare_destination()`: prepare destination paths.
+- `list_source_snapshots()`: read source list, optionally verify Btrfs metadata.
+- `source_snapshot_index()`: one Timeshift snapshot dict for the current stage.
+- `verify_source_identity_for_manual_snapshot()`: require UUID-confirmed source anchor before auto manual snapshot when destination is non-empty.
+- `_maybe_create_manual_snapshot()`: create manual snapshot and force a new source list.
+- `_snapshots_in_sync_order()`, `print_snapshot_table()`: order/display snapshots.
+- `_dest_subvolume_path()`, `_target_snapshot_dir()`: destination path builders.
+- `_destination_has_existing_snapshots()`, `destination_has_existing_snapshots()`: non-empty destination checks.
+- `_preview_send_path()`, `_ensure_source_send_path()`: choose/create current read-only send path.
+- `_cleanup_superseded_source_cache()`: delete old cache child; delete parent only when empty.
+- `_cleanup_incomplete_destination_receive()`: remove partial receives.
+- `_read_local_destination_parent_metadata()`: read destination parent metadata.
+- `_match_source_path_to_destination_received_uuid()`: shared source UUID vs destination `received_uuid` check.
+- `_select_verified_parent_send_path()`: validate saved `send_path`, then original source path; never recreate parent cache.
+- `_state_uuid_values_for_path()`: UUIDs trusted from state for a path.
+- `_find_confirmed_sync_floor()`: high-watermark after pruning.
+- `_filesystem_parent_candidates()`: candidates present in source and state.
+- `_select_parent()`: full seed or verified incremental parent.
+- `sync_once()`: complete sync transaction.
+
+### `retention.py`
+
+- `PrunePlan`: keep/delete plan; `add_keep()`, `add_delete()` add decisions.
+- `_is_app_created_ondemand()`, `_tags_text()`: classify/format snapshots.
+- `_delete_reason_for_snapshot()`, `_delete_reasons()`: human delete reasons.
+- `build_prune_plan()`: compute retention plan.
+- `_delete_snapshot()`: delete destination subvolumes for one snapshot.
+- `print_prune_plan()`: readable plan output.
+- `prune()`: dry-run or apply retention.
+
+### `log.py`
+
+- `RunLogger`: owns log files; methods `attachment_paths()`, `success_text()`, `last_stderr_tail()`, `info()`, `err()`, `btrfs_out()`, `mbuffer()`, `success()`, `command()`, `completed()`, `pipeline_commands()`, `pipeline_summary()`, `stream_text()` write/read run logs.
+- `TeeTextIO`: terminal/file tee.
+- `emit_success_summary()`, `terminal_stdout()`, `terminal_stderr()`, `get_logger()`, `active_logger()`, `create_run_logger()`, `tee_pipe_to_log()`: global logging helpers.
+
+### `mail.py` / `mqtt.py`
+
+- `MailConfig`, `MQTTConfig`: notification config and password-file support.
+- `utc_timestamp()`, `build_payload()`: shared status payload shape.
+- Mail helpers `_subject()`, `_body()`, `_success_body_from_paths()`, `_filter_attachments()`, `_attach_file()`, `send_status()`: SMTP status mail and non-empty attachments.
+- `publish_status()`: MQTT JSON publish.
+
+### `cli.py`
+
+- `_failure_exit_code()`, `_stderr_tail_for_exception()`: failure summaries.
+- `_publish_mqtt_status()`, `_send_mail_status()`, `_mail_attachment_paths()`: notification bridge.
+- `_with_logging()`: command wrapper for logging, notifications, exit code.
+- `_resolve_dry_run()`: global/command dry-run merge.
+- `cmd_init_config()`, `cmd_test_ssh()`, `cmd_list_source()`, `cmd_sync()`, `cmd_prune()`, `cmd_create_manual()`, `cmd_show_state()`: command handlers.
+- `_refresh_state_metadata_from_timeshift()`: state metadata refresh for non-sync views.
+- `build_parser()`, `main()`: argparse and entrypoint.
+
+### `lock.py`
+
+- `FileLock`: lock-file context manager; `__enter__()` acquires, `__exit__()` releases.
+
+## Safety invariants
+
+- Full send only into an empty destination.
+- Incremental parent must match destination `received_uuid`.
+- Required cache parents must not be recreated with new UUIDs.
+- Destination paths in state are relative to `destination.target_root`.
+- Timeshift tags/comments refresh from `timeshift --list` without resend.

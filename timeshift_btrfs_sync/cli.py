@@ -370,26 +370,44 @@ def cmd_show_state(args) -> int:
     return _with_logging(config, "show-state", _run)
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create the argparse parser and describe every CLI flag.
+TOP_LEVEL_HELP = """
+Available commands:
+  init-config    Write a starter TOML config from the packaged template.
+  test-ssh       Test SSH and required source sudo commands.
+  list-source    List source Timeshift snapshots.
+  sync           Pull missing snapshots and optionally prune.
+  prune          Apply destination retention rules only.
+  create-manual  Create a source Timeshift on-demand snapshot.
+  show-state     Show local state.json.
 
-    Config options are documented in README.md and the packaged config.example.toml template. This
-    help output focuses on command-line flags available through:
-      python3 -m timeshift_btrfs_sync --help
-      python3 -m timeshift_btrfs_sync <command> --help
-    """
+Command-specific flags are shown by asking the command for help, for example:
+  ts-btrfs sync --help
+  ts-btrfs prune --help
+  ts-btrfs init-config --help
+
+Config options are documented in README.md and the packaged config.example.toml template.
+Typical first test:
+  ts-btrfs sync --config ./config.toml --dry-run
+"""
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Create the argparse parser and command-specific flag help."""
 
     parser = argparse.ArgumentParser(
         prog="ts-btrfs",
         description="Pull Timeshift Btrfs snapshots over SSH.",
-        epilog=(
-            "Config options are documented in README.md and the packaged config.example.toml template.\n"
-            "Typical first test: ts-btrfs sync --config ./config.toml --dry-run"
-        ),
+        epilog=TOP_LEVEL_HELP,
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(
+        dest="command",
+        required=True,
+        title="commands",
+        metavar="COMMAND",
+        description="Run 'ts-btrfs COMMAND --help' to see that command's flags.",
+    )
 
     p = sub.add_parser(
         "init-config",

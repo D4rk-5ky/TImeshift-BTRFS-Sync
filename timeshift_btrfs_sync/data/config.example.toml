@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.7.4 config
+# timeshift-btrfs-sync v0.7.6 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 

@@ -1,14 +1,13 @@
 # Versioning
 
-This build is version `0.7.4`.
+This build is version `0.7.6`.
 
 ## Changelog
 
-### 0.7.4
+### 0.7.6
 
-- Removed the huge embedded `EXAMPLE_CONFIG` string from the CLI.
-- `init-config` now copies the single packaged `timeshift_btrfs_sync/data/config.example.toml` template using `importlib.resources`.
-- Added package-data/PyInstaller handling so installed packages and built executables can still generate a config without duplicating the template in Python code.
+- Expanded the top-level `ts-btrfs --help` output so every command is easy to see: `init-config`, `test-ssh`, `list-source`, `sync`, `prune`, `create-manual`, and `show-state`.
+- Added explicit top-level guidance that command-specific flags are shown with `ts-btrfs <command> --help`, for example `ts-btrfs sync --help`.
 
 ### 0.7.3
 
