@@ -84,7 +84,7 @@ def list_remote_snapshots(
     for snap in snapshots:
         for subvol in subvolumes:
             path = str(Path(snap.path) / subvol)
-            meta = btrfs.remote_try_subvolume_show(ssh, sudo, btrfs_command, path, subvol)
+            meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=sudo, btrfs_command=btrfs_command, path=path, name=subvol, required=False)
             if not meta:
                 continue
             snap.subvolumes[subvol] = meta

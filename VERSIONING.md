@@ -1,8 +1,13 @@
 # Versioning
 
-This build is version `0.6.8`.
+This build is version `0.6.9`.
 
 ## Changelog
+
+### 0.6.9
+
+- Refactored Btrfs metadata reading into one shared `get_subvolume_meta()` helper for both local and remote `btrfs subvolume show` calls.
+- Removed the duplicated `remote_try_subvolume_show()` and `local_subvolume_show()` wrappers while keeping the same parser and behavior.
 
 ### 0.6.8
 

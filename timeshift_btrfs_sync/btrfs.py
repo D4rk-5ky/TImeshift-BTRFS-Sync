@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 import re
 from .commands import quote_join, run_local, sudo_prefix
 from .models import SubvolumeMeta
@@ -68,20 +69,47 @@ def local_btrfs_cmd(sudo: str, btrfs_command: str, args: list[str]) -> list[str]
     return sudo_prefix(sudo) + [btrfs_command] + args
 
 
-def remote_try_subvolume_show(ssh: SSHRunner, sudo: str, btrfs_command: str, path: str, name: str) -> SubvolumeMeta | None:
-    """Return remote subvolume metadata or None if invalid."""
+SubvolumeLocation = Literal["local", "remote"]
 
-    result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]), check=False)
+
+def get_subvolume_meta(
+    *,
+    location: SubvolumeLocation,
+    path: str | Path,
+    name: str,
+    sudo: str,
+    btrfs_command: str = "btrfs",
+    ssh: SSHRunner | None = None,
+    required: bool = True,
+) -> SubvolumeMeta | None:
+    """Read Btrfs subvolume metadata from either the local or remote side.
+
+    This is the single wrapper around ``btrfs subvolume show``. It returns the
+    parsed UUID/read-only metadata for existing subvolumes. When ``required`` is
+    false, a missing/unreadable subvolume returns ``None`` instead of raising;
+    callers use that for optional parent/cache candidate checks.
+    """
+
+    path_text = str(path)
+    args = ["subvolume", "show", path_text]
+
+    if location == "local":
+        result = run_local(local_btrfs_cmd(sudo, btrfs_command, args), check=False)
+    elif location == "remote":
+        if ssh is None:
+            raise ValueError("ssh is required when location='remote'")
+        result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, args), check=False)
+    else:
+        raise ValueError(f"Unsupported Btrfs metadata location: {location!r}")
+
     if result.returncode != 0:
-        return None
-    return parse_subvolume_show(result.stdout, name=name, path=path)
+        if not required:
+            return None
+        details = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+        raise RuntimeError(f"Cannot read {location} Btrfs subvolume metadata for {path_text}: {details}")
 
+    return parse_subvolume_show(result.stdout, name=name, path=path_text)
 
-def local_subvolume_show(path: Path, sudo: str, name: str, btrfs_command: str = "btrfs") -> SubvolumeMeta:
-    """Return local subvolume metadata."""
-
-    result = run_local(local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", str(path)]))
-    return parse_subvolume_show(result.stdout, name=name, path=str(path))
 
 def _validate_cache_snapshot_name(snapshot_name: str) -> str:
     """Reject unsafe cache snapshot names."""
@@ -328,7 +356,15 @@ def remote_ensure_readonly_send_path(
     cache snapshots for already-read-only sources.
     """
 
-    original_meta = remote_try_subvolume_show(ssh, sudo, btrfs_command, original_path, subvolume_name)
+    original_meta = get_subvolume_meta(
+        location="remote",
+        ssh=ssh,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        path=original_path,
+        name=subvolume_name,
+        required=False,
+    )
     if not original_meta:
         raise RuntimeError(f"Source path is not a Btrfs subvolume or cannot be read: {original_path}")
     if original_meta.readonly is True:

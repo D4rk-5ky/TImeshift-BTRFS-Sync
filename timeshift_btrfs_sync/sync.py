@@ -507,7 +507,7 @@ def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, 
     try:
         # Confirm it is a Btrfs subvolume before deleting it. This avoids using
         # the backup tool as a dangerous rm -rf replacement.
-        btrfs.local_subvolume_show(dest_path, config.destination.sudo, subvolume_name, config.destination.btrfs_command)
+        btrfs.get_subvolume_meta(location="local", path=dest_path, name=subvolume_name, sudo=config.destination.sudo, btrfs_command=config.destination.btrfs_command)
         btrfs.delete_local_subvolume(dest_path, config.destination.sudo, config.destination.btrfs_command)
     except Exception as exc:
         # If it is just an empty ordinary directory, removing it is safe. If it
@@ -551,11 +551,12 @@ def _read_local_destination_parent_metadata(
         raise SyncError(f"Incremental parent is recorded but missing on destination: {local_parent_path}")
 
     try:
-        return btrfs.local_subvolume_show(
-            local_parent_path,
-            config.destination.sudo,
-            subvolume_name,
-            config.destination.btrfs_command,
+        return btrfs.get_subvolume_meta(
+            location="local",
+            path=local_parent_path,
+            name=subvolume_name,
+            sudo=config.destination.sudo,
+            btrfs_command=config.destination.btrfs_command,
         )
     except Exception as exc:
         raise SyncError(f"Cannot read destination parent metadata: {local_parent_path}: {exc}") from exc
@@ -577,12 +578,14 @@ def _try_parent_source_candidate(
     was received from the old cached UUID.
     """
 
-    remote_parent = btrfs.remote_try_subvolume_show(
-        ssh,
-        config.source.sudo,
-        config.source.btrfs_command,
-        candidate_path,
-        subvolume_name,
+    remote_parent = btrfs.get_subvolume_meta(
+        location="remote",
+        ssh=ssh,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        path=candidate_path,
+        name=subvolume_name,
+        required=False,
     )
     if not remote_parent:
         return None, f"{candidate_label} not found or is not a readable Btrfs subvolume: {candidate_path}"
@@ -737,11 +740,12 @@ def _remote_path_matches_state_uuid(
         return False, f"invalid destination_path in state: {exc}"
     local_received_uuid: str | None = None
     try:
-        local_meta = btrfs.local_subvolume_show(
-            destination_path,
-            config.destination.sudo,
-            subvolume_name,
-            config.destination.btrfs_command,
+        local_meta = btrfs.get_subvolume_meta(
+            location="local",
+            path=destination_path,
+            name=subvolume_name,
+            sudo=config.destination.sudo,
+            btrfs_command=config.destination.btrfs_command,
         )
         local_received_uuid = local_meta.received_uuid
     except Exception as exc:
@@ -757,12 +761,14 @@ def _remote_path_matches_state_uuid(
 
     failures: list[str] = []
     for candidate_path in candidate_paths:
-        remote_meta = btrfs.remote_try_subvolume_show(
-            ssh,
-            config.source.sudo,
-            config.source.btrfs_command,
-            candidate_path,
-            subvolume_name,
+        remote_meta = btrfs.get_subvolume_meta(
+            location="remote",
+            ssh=ssh,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            path=candidate_path,
+            name=subvolume_name,
+            required=False,
         )
         if not remote_meta or not remote_meta.uuid:
             failures.append(f"{candidate_path}: not found or no UUID")
@@ -1233,7 +1239,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             send_meta = None
             if dest_path.exists():
                 try:
-                    received_meta = btrfs.local_subvolume_show(dest_path, config.destination.sudo, subvol_name, config.destination.btrfs_command)
+                    received_meta = btrfs.get_subvolume_meta(location="local", path=dest_path, name=subvol_name, sudo=config.destination.sudo, btrfs_command=config.destination.btrfs_command)
                 except Exception:
                     received_meta = None
 
@@ -1242,11 +1248,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # metadata lets later runs establish a prune-safe high-watermark without
             # maintaining tombstones for every deleted destination snapshot.
             try:
-                original_meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, subvolume.path, subvol_name)
+                original_meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command, path=subvolume.path, name=subvol_name, required=False)
             except Exception:
                 original_meta = None
             try:
-                send_meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, current_send_path, subvol_name)
+                send_meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command, path=current_send_path, name=subvol_name, required=False)
             except Exception:
                 send_meta = None
 
