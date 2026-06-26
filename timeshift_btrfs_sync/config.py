@@ -258,18 +258,6 @@ def load_config(path: str | Path) -> AppConfig:
     source_raw = raw.get("source", {})
     if not isinstance(source_raw, dict):
         raise ConfigError("[source] must be a TOML table")
-    removed_source_options = {"allow_incremental_without_parent_match", "verify_incremental_parent"}
-    removed_source_present = sorted(removed_source_options.intersection(source_raw))
-    if removed_source_present:
-        names = ", ".join(f"source.{name}" for name in removed_source_present)
-        raise ConfigError(
-            f"Removed source incremental option(s) still present: {names}. "
-            "Incremental parent verification is now mandatory and no longer configurable. "
-            "Incremental sends require a matching source/destination parent. If the "
-            "destination already contains snapshots but no matching parent can be proven, "
-            "use an empty/separate destination target_root for a new full sync or repair "
-            "state/cache so a matching parent can be proven."
-        )
     source = SourceConfig(
         snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
@@ -288,20 +276,6 @@ def load_config(path: str | Path) -> AppConfig:
     destination_raw = raw.get("destination", {})
     if not isinstance(destination_raw, dict):
         raise ConfigError("[destination] must be a TOML table")
-    removed_destination_options = {
-        "compression",
-        "set_compression_before_receive",
-        "set_compression_after_receive",
-    }
-    removed_present = sorted(removed_destination_options.intersection(destination_raw))
-    if removed_present:
-        names = ", ".join(f"destination.{name}" for name in removed_present)
-        raise ConfigError(
-            f"Removed destination compression option(s) still present: {names}. "
-            "These were removed in 0.4.12; configure destination Btrfs compression "
-            "outside this app by mounting the receiving Btrfs filesystem/subvolume "
-            "with compression enabled."
-        )
     target_root = _as_path(destination_raw.get("target_root"), "destination.target_root")
     destination = DestinationConfig(
         target_root=target_root,
@@ -326,15 +300,6 @@ def load_config(path: str | Path) -> AppConfig:
     retention_raw = raw.get("retention", {})
     if not isinstance(retention_raw, dict):
         raise ConfigError("[retention] must be a TOML table")
-    removed_retention_options = {"yearly"}
-    removed_retention_present = sorted(removed_retention_options.intersection(retention_raw))
-    if removed_retention_present:
-        names = ", ".join(f"retention.{name}" for name in removed_retention_present)
-        raise ConfigError(
-            f"Removed retention option(s) still present: {names}. "
-            "Timeshift native retention tags are H, D, W, M, B, and O only; "
-            "remove yearly/Y retention configuration."
-        )
     retention = RetentionConfig(
         hourly=int(_as_int(retention_raw.get("hourly"), "retention.hourly", 6)),
         daily=int(_as_int(retention_raw.get("daily"), "retention.daily", 7)),
@@ -358,13 +323,6 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("manual_snapshot.comment must be non-empty when manual_snapshot.enabled = true")
     if manual_enabled and not manual_marker:
         raise ConfigError("manual_snapshot.marker must be non-empty when manual_snapshot.enabled = true")
-    if "require_verified_source" in manual_raw:
-        raise ConfigError(
-            "Removed manual snapshot option still present: manual_snapshot.require_verified_source. "
-            "Manual snapshot source identity checks are now mandatory when the destination "
-            "already contains snapshots. A first full seed is allowed only when the "
-            "destination target_root has no existing backup snapshots."
-        )
     manual_snapshot = ManualSnapshotConfig(
         enabled=manual_enabled,
         comment=manual_comment or "ts-btrfs-sync automatic on-demand snapshot",

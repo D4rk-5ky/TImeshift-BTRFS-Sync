@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.6.4
+# timeshift-btrfs-sync v0.6.5
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -81,8 +81,7 @@ Fast discovery is used by default. It avoids Btrfs metadata checks for every old
 
 ## Incremental parent guard
 
-The old unsafe escape hatch to continue after a parent mismatch has been removed. The `source.verify_incremental_parent` option has also been removed because incremental parent verification is now mandatory. If the destination has no snapshots at all, the app can start with a normal full sync. If matching snapshots exist, the app uses an incremental send after proving the source parent matches the destination parent. If the destination already contains snapshots but no matching parent can be proven, the app refuses to send and tells the user to use an empty/separate backup directory for a new full sync or repair the existing backup state/cache.
-
+Incremental parent verification is mandatory. If the destination has no snapshots at all, the app can start with a normal full sync. If matching snapshots exist, the app uses an incremental send after proving the source parent matches the destination parent. If the destination already contains snapshots but no matching parent can be proven, the app refuses to send and tells the user to use an empty/separate backup directory for a new full sync or repair the existing backup state/cache.
 
 Incremental Btrfs send uses:
 
@@ -180,8 +179,6 @@ The app does not set destination Btrfs compression properties. If you want recei
 For example, configure the receiving mount outside this app with a Btrfs mount option such as `compress=zstd` or `compress=zstd:<level>` in `/etc/fstab`, then use that mounted path as `destination.target_root`.
 
 `source.send_compressed_data = true` only controls the Btrfs send stream. It can send already-compressed source extents efficiently when supported, but it does not configure destination compression. Destination compression is decided by how the receiving Btrfs filesystem/subvolume is mounted or configured outside the app.
-
-If an old config still contains `destination.compression`, `destination.set_compression_before_receive`, or `destination.set_compression_after_receive`, the app refuses to start and tells you to remove those obsolete keys.
 
 
 ## Installation and executable builds
