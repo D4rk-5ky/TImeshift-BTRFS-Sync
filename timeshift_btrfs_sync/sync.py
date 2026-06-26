@@ -550,43 +550,45 @@ def _read_local_destination_parent_metadata(
         raise SyncError(f"Cannot read destination parent metadata: {local_parent_path}: {exc}") from exc
 
 
-def _try_parent_source_candidate(
+def _match_source_path_to_destination_received_uuid(
     config: AppConfig,
     ssh: SSHRunner,
     *,
-    candidate_label: str,
-    candidate_path: str,
+    source_path: str,
     subvolume_name: str,
-    local_parent: SubvolumeMeta,
-) -> tuple[str | None, str]:
-    """Return candidate_path if its UUID matches destination received_uuid.
+    destination_meta: SubvolumeMeta | None = None,
+    destination_path: Path | None = None,
+    label: str = "source path",
+    expected_uuids: set[str] | None = None,
+    require_readonly: bool = False,
+) -> tuple[bool, str]:
+    """Check whether a source subvolume UUID matches the destination identity."""
 
-    This intentionally does not create cache snapshots. A recreated cache snapshot
-    gets a new Btrfs UUID, so it cannot be a valid parent for a destination that
-    was received from the old cached UUID.
-    """
+    if destination_meta is None:
+        if destination_path is None:
+            raise ValueError("destination_meta or destination_path is required")
+        try:
+            destination_meta = _local_meta(config, destination_path, subvolume_name)
+        except Exception as exc:
+            return False, f"cannot read destination metadata for {destination_path}: {exc}"
 
-    remote_parent = _remote_meta(config, ssh, candidate_path, subvolume_name, required=False)
-    if not remote_parent:
-        return None, f"{candidate_label} not found or is not a readable Btrfs subvolume: {candidate_path}"
-    if not remote_parent.uuid:
-        return None, f"{candidate_label} has no UUID in btrfs subvolume show output: {candidate_path}"
-    if not local_parent.received_uuid:
-        return None, "destination parent has no received_uuid; cannot prove matching source parent"
-    if remote_parent.uuid != local_parent.received_uuid:
-        return (
-            None,
-            f"{candidate_label} UUID {remote_parent.uuid} does not match "
-            f"destination received_uuid {local_parent.received_uuid}: {candidate_path}",
-        )
-    if remote_parent.readonly is False:
-        return (
-            None,
-            f"{candidate_label} UUID matches destination received_uuid, but it is not read-only: {candidate_path}",
-        )
+    remote_meta = _remote_meta(config, ssh, source_path, subvolume_name, required=False)
+    if not remote_meta or not remote_meta.uuid:
+        return False, f"{label} not found or has no UUID: {source_path}"
 
-    readonly_note = "read-only confirmed" if remote_parent.readonly is True else "read-only flag not reported"
-    return candidate_path, f"destination received_uuid matches {candidate_label} UUID ({readonly_note})"
+    allowed = set(expected_uuids or set())
+    if destination_meta.received_uuid:
+        allowed.add(destination_meta.received_uuid)
+    if not allowed:
+        return False, "destination parent has no received_uuid; cannot prove matching source parent"
+    if remote_meta.uuid not in allowed:
+        expected = ", ".join(sorted(allowed))
+        return False, f"{label} UUID {remote_meta.uuid} does not match destination/state UUID(s) {expected}: {source_path}"
+    if require_readonly and remote_meta.readonly is False:
+        return False, f"{label} UUID matches, but it is not read-only: {source_path}"
+
+    readonly_note = "read-only confirmed" if remote_meta.readonly is True else "read-only flag not reported"
+    return True, f"destination received_uuid/state matches {label} UUID ({readonly_note})"
 
 
 def _select_verified_parent_send_path(
@@ -598,26 +600,9 @@ def _select_verified_parent_send_path(
     subvolume_name: str,
     state_parent: dict | None,
 ) -> tuple[str | None, str]:
-    """Select the exact safe source parent path for an incremental send.
+    """Select a safe source parent path for incremental send without recreating it."""
 
-    Valid choices are deliberately limited:
-
-    1. The saved state.json send_path, if it still exists and its current UUID
-       matches the destination parent's received_uuid.
-    2. The original Timeshift snapshot path, if its current UUID matches the
-       destination parent's received_uuid.
-
-    The function never calls _ensure_source_send_path() for a parent. If a cached
-    parent was deleted, recreating it would produce a new UUID and cannot match
-    the already received destination snapshot.
-    """
-
-    local_parent = _read_local_destination_parent_metadata(
-        config,
-        parent_name=parent_name,
-        subvolume_name=subvolume_name,
-    )
-
+    local_parent = _read_local_destination_parent_metadata(config, parent_name=parent_name, subvolume_name=subvolume_name)
     candidates: list[tuple[str, str]] = []
     saved_send_path = state_parent.get("send_path") if state_parent else None
     if isinstance(saved_send_path, str) and saved_send_path:
@@ -629,16 +614,17 @@ def _select_verified_parent_send_path(
 
     failures: list[str] = []
     for label, path in candidates:
-        selected_path, reason = _try_parent_source_candidate(
+        ok, reason = _match_source_path_to_destination_received_uuid(
             config,
             ssh,
-            candidate_label=label,
-            candidate_path=path,
+            source_path=path,
             subvolume_name=subvolume_name,
-            local_parent=local_parent,
+            destination_meta=local_parent,
+            label=label,
+            require_readonly=True,
         )
-        if selected_path:
-            return selected_path, reason
+        if ok:
+            return path, reason
         failures.append(reason)
 
     cache_hint = ""
@@ -656,7 +642,6 @@ def _select_verified_parent_send_path(
         f"destination parent {destination_path} has received_uuid={local_parent.received_uuid}; "
         f"no source parent path matched. {reason}{cache_hint}",
     )
-
 
 def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: str) -> set[str]:
     """Return UUID values that may safely identify the remote path.
@@ -693,63 +678,6 @@ def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: s
             add_key("destination_received_uuid")
 
     return values
-
-
-def _remote_path_matches_state_uuid(
-    config: AppConfig,
-    ssh: SSHRunner,
-    *,
-    state_subvol: dict,
-    source_subvol: SubvolumeMeta,
-    subvolume_name: str,
-) -> tuple[bool, str]:
-    """Check whether a source path still matches a synced destination UUID.
-
-    The high-watermark/prune skip must not be based only on names. It verifies
-    the source candidate against the received destination identity. This keeps an
-    old pruned snapshot from being re-sent while still protecting against using a
-    similarly named snapshot from another OS/source.
-    """
-
-    destination_path_text = state_subvol.get("destination_path")
-    if not isinstance(destination_path_text, str) or not destination_path_text:
-        return False, "state has no destination_path"
-    try:
-        destination_path = resolve_destination_path(config.destination.target_root, destination_path_text)
-    except ValueError as exc:
-        return False, f"invalid destination_path in state: {exc}"
-    local_received_uuid: str | None = None
-    try:
-        local_meta = _local_meta(config, destination_path, subvolume_name)
-        local_received_uuid = local_meta.received_uuid
-    except Exception as exc:
-        return False, f"cannot read destination metadata for {destination_path}: {exc}"
-
-    source_path = source_subvol.path
-    candidate_paths: list[str] = []
-    send_path = state_subvol.get("send_path")
-    if isinstance(send_path, str) and send_path:
-        candidate_paths.append(send_path)
-    if source_path not in candidate_paths:
-        candidate_paths.append(source_path)
-
-    failures: list[str] = []
-    for candidate_path in candidate_paths:
-        remote_meta = _remote_meta(config, ssh, candidate_path, subvolume_name, required=False)
-        if not remote_meta or not remote_meta.uuid:
-            failures.append(f"{candidate_path}: not found or no UUID")
-            continue
-
-        expected = _state_uuid_values_for_path(state_subvol, path=candidate_path, source_path=source_path)
-        if local_received_uuid:
-            expected.add(local_received_uuid)
-
-        if remote_meta.uuid in expected:
-            return True, f"{candidate_path} UUID matches destination received_uuid/state"
-
-        failures.append(f"{candidate_path}: UUID {remote_meta.uuid} did not match expected state/destination UUIDs")
-
-    return False, "; ".join(failures)
 
 
 def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, source_by_name: dict[str, SnapshotMeta]) -> tuple[str | None, str]:
@@ -797,16 +725,38 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
                 ok = False
                 reasons.append(f"{subvolume_name}: missing source or state subvolume")
                 break
-            sub_ok, reason = _remote_path_matches_state_uuid(
-                config,
-                ssh,
-                state_subvol=state_subvol,
-                source_subvol=source_subvol,
-                subvolume_name=subvolume_name,
-            )
-            reasons.append(f"{subvolume_name}: {reason}")
-            if not sub_ok:
+            destination_path_text = state_subvol.get("destination_path")
+            if not isinstance(destination_path_text, str) or not destination_path_text:
                 ok = False
+                reasons.append(f"{subvolume_name}: state has no destination_path")
+                break
+            try:
+                destination_path = resolve_destination_path(config.destination.target_root, destination_path_text)
+            except ValueError as exc:
+                ok = False
+                reasons.append(f"{subvolume_name}: invalid destination_path in state: {exc}")
+                break
+
+            sub_reasons: list[str] = []
+            source_path = source_subvol.path
+            candidate_paths = [path for path in (state_subvol.get("send_path"), source_path) if isinstance(path, str) and path]
+            for path in dict.fromkeys(candidate_paths):
+                sub_ok, reason = _match_source_path_to_destination_received_uuid(
+                    config,
+                    ssh,
+                    source_path=path,
+                    subvolume_name=subvolume_name,
+                    destination_path=destination_path,
+                    label=path,
+                    expected_uuids=_state_uuid_values_for_path(state_subvol, path=path, source_path=source_path),
+                )
+                sub_reasons.append(reason)
+                if sub_ok:
+                    reasons.append(f"{subvolume_name}: {reason}")
+                    break
+            else:
+                ok = False
+                reasons.append(f"{subvolume_name}: {'; '.join(sub_reasons)}")
                 break
 
         if ok:

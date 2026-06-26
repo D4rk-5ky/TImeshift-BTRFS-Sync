@@ -1,12 +1,13 @@
 # Versioning
 
-This build is version `0.7.1`.
+This build is version `0.7.2`.
 
 ## Changelog
 
-### 0.7.1
+### 0.7.2
 
-- Version-only bump.
+- Consolidated parent/source UUID matching into one shared helper, `match_source_path_to_destination_received_uuid` internally, so parent selection and sync-floor validation use the same Btrfs identity rule.
+- Removed older overlapping helper code for parent/source UUID checks while keeping the same strict behavior: source path UUID must match destination received UUID or trusted state UUID history before it can be used.
 
 ### 0.6.11
 
