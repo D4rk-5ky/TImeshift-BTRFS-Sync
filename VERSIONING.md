@@ -1,8 +1,13 @@
 # Versioning
 
-This build is version `0.8.0`.
+This build is version `0.8.1`.
 
 ## Changelog
+
+### 0.8.1
+
+- Refactored safer config parsing patterns with shared table, optional-string, positive-integer, stripped-string, boolean, and integer helpers.
+- Kept password/password_file pair validation explicit for a later, more focused refactor.
 
 ### 0.8.0
 

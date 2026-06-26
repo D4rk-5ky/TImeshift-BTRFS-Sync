@@ -40,7 +40,7 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 - `StreamConfig.command()`: stream helper argv.
 - `RetentionConfig.counts_by_tag()`: retention counts for `H/D/W/M/B/O`.
 - `ConfigError`: invalid config error.
-- `_as_str()`, `_as_path()`, `_as_bool()`, `_as_int()`, `_string_list()`: TOML value readers.
+- `_table()`, `_optional_str()`, `_positive_int()`, `_stripped()`, `_bool()`, `_int()`, `_as_str()`, `_as_path()`, `_as_bool()`, `_as_int()`, `_string_list()`: TOML value readers/validators.
 - `load_config()`: read and validate config.
 
 ### `ssh.py`

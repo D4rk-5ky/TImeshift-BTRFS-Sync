@@ -11,8 +11,6 @@ from .ssh import SSHConfig
 from .mqtt import MQTTConfig
 from .mail import MailConfig
 
-
-
 @dataclass(slots=True)
 class ManualSnapshotConfig:
     """Optional source-side Timeshift on-demand snapshot creation and cleanup."""
@@ -47,7 +45,6 @@ class ManualSnapshotConfig:
     # protected/newest snapshots. Disable cleanup_enabled to keep them all.
     retention_count: int = 10
 
-
 @dataclass(slots=True)
 class SourceConfig:
     """Remote/source Timeshift and Btrfs settings."""
@@ -71,7 +68,6 @@ class SourceConfig:
     # runs Btrfs checks for snapshots that are actually going to be sent.
     verify_subvolumes_at_discovery: bool = False
 
-
     # Performance/safety balance for the current run only. Parent paths from
     # previous runs are always checked against destination received_uuid. When
     # true, a source send_path that was just successfully sent/received by this
@@ -80,7 +76,6 @@ class SourceConfig:
 
     send_compressed_data: bool = False
     send_proto: int | None = None
-
 
 @dataclass(slots=True)
 class DestinationConfig:
@@ -95,8 +90,6 @@ class DestinationConfig:
     # destination subvolume that is not recorded in state.json. When this is
     # true, the app deletes that incomplete destination subvolume and retries.
     cleanup_incomplete_receive: bool = True
-
-
 
 @dataclass(slots=True)
 class StreamConfig:
@@ -132,7 +125,6 @@ class StreamConfig:
         cmd += self.mbuffer_extra_args
         return cmd
 
-
 @dataclass(slots=True)
 class RetentionConfig:
     """Destination retention counts by Timeshift tag."""
@@ -158,7 +150,6 @@ class RetentionConfig:
 
         return {"H": self.hourly, "D": self.daily, "W": self.weekly, "M": self.monthly, "B": self.boot, "O": self.ondemand}
 
-
 @dataclass(slots=True)
 class AppConfig:
     """Complete validated app configuration."""
@@ -178,20 +169,41 @@ class AppConfig:
     default_dry_run: bool = True
     prune_after_sync: bool = False
 
-
 class ConfigError(ValueError):
     """Raised when the TOML config is invalid."""
 
+def _table(raw: dict[str, Any], name: str) -> dict[str, Any]:
+    value = raw.get(name, {})
+    if not isinstance(value, dict):
+        raise ConfigError(f"[{name}] must be a TOML table")
+    return value
+
+def _optional_str(table: dict[str, Any], key: str) -> str | None:
+    return table.get(key) if isinstance(table.get(key), str) and table.get(key) else None
+
+def _positive_int(value: Any, field_name: str, default: int | None = None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, int) and value > 0:
+        return value
+    raise ConfigError(f"{field_name} must be a positive integer")
+
+def _stripped(table: dict[str, Any], key: str, default: str = "") -> str:
+    return str(table.get(key, default)).strip()
+
+def _bool(table: dict[str, Any], section: str, key: str, default: bool) -> bool:
+    return _as_bool(table.get(key), f"{section}.{key}", default)
+
+def _int(table: dict[str, Any], section: str, key: str, default: int | None) -> int | None:
+    return _as_int(table.get(key), f"{section}.{key}", default)
 
 def _as_str(value: Any, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"{field_name} must be a non-empty string")
     return value
 
-
 def _as_path(value: Any, field_name: str) -> Path:
     return Path(_as_str(value, field_name)).expanduser()
-
 
 def _as_bool(value: Any, field_name: str, default: bool) -> bool:
     if value is None:
@@ -200,7 +212,6 @@ def _as_bool(value: Any, field_name: str, default: bool) -> bool:
         raise ConfigError(f"{field_name} must be true or false")
     return value
 
-
 def _as_int(value: Any, field_name: str, default: int | None) -> int | None:
     if value is None:
         return default
@@ -208,14 +219,12 @@ def _as_int(value: Any, field_name: str, default: int | None) -> int | None:
         raise ConfigError(f"{field_name} must be a non-negative integer")
     return value
 
-
 def _string_list(value: Any, field_name: str) -> list[str]:
     if value is None:
         return []
     if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
         raise ConfigError(f"{field_name} must be a list of non-empty strings")
     return value
-
 
 def load_config(path: str | Path) -> AppConfig:
     """Read and validate TOML config."""
@@ -228,14 +237,10 @@ def load_config(path: str | Path) -> AppConfig:
 
     name = str(raw.get("name") or "timeshift-btrfs-sync")
 
-    ssh_raw = raw.get("ssh", {})
-    if not isinstance(ssh_raw, dict):
-        raise ConfigError("[ssh] must be a TOML table")
-    port = ssh_raw.get("port")
-    if port is not None and (not isinstance(port, int) or port <= 0):
-        raise ConfigError("ssh.port must be a positive integer")
-    password = ssh_raw.get("password") if isinstance(ssh_raw.get("password"), str) and ssh_raw.get("password") else None
-    password_file = ssh_raw.get("password_file") if isinstance(ssh_raw.get("password_file"), str) and ssh_raw.get("password_file") else None
+    ssh_raw = _table(raw, "ssh")
+    port = _positive_int(ssh_raw.get("port"), "ssh.port")
+    password = _optional_str(ssh_raw, "password")
+    password_file = _optional_str(ssh_raw, "password_file")
     if password and password_file:
         raise ConfigError("Use either ssh.password or ssh.password_file, not both")
     if password_file and not Path(password_file).expanduser().is_file():
@@ -245,19 +250,17 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
     ssh = SSHConfig(
         host=_as_str(ssh_raw.get("host"), "ssh.host"),
-        user=ssh_raw.get("user") if isinstance(ssh_raw.get("user"), str) and ssh_raw.get("user") else None,
+        user=_optional_str(ssh_raw, "user"),
         port=port,
-        identity_file=ssh_raw.get("identity_file") if isinstance(ssh_raw.get("identity_file"), str) and ssh_raw.get("identity_file") else None,
+        identity_file=_optional_str(ssh_raw, "identity_file"),
         password=password,
         password_file=password_file,
-        compression=_as_bool(ssh_raw.get("compression"), "ssh.compression", False),
-        cipher=ssh_raw.get("cipher") if isinstance(ssh_raw.get("cipher"), str) and ssh_raw.get("cipher") else None,
+        compression=_bool(ssh_raw, "ssh", "compression", False),
+        cipher=_optional_str(ssh_raw, "cipher"),
         extra_args=extra_args,
     )
 
-    source_raw = raw.get("source", {})
-    if not isinstance(source_raw, dict):
-        raise ConfigError("[source] must be a TOML table")
+    source_raw = _table(raw, "source")
     source = SourceConfig(
         snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
@@ -265,60 +268,52 @@ def load_config(path: str | Path) -> AppConfig:
         btrfs_command=str(source_raw.get("btrfs_command", "btrfs")),
         timeshift_command=str(source_raw.get("timeshift_command", "timeshift")),
         cache_root=(str(source_raw.get("cache_root")) if source_raw.get("cache_root") else None),
-        create_readonly_cache=_as_bool(source_raw.get("create_readonly_cache"), "source.create_readonly_cache", True),
-        cleanup_superseded_cache=_as_bool(source_raw.get("cleanup_superseded_cache"), "source.cleanup_superseded_cache", True),
-        verify_subvolumes_at_discovery=_as_bool(source_raw.get("verify_subvolumes_at_discovery"), "source.verify_subvolumes_at_discovery", False),
-        verify_incremental_parent_once_per_run=_as_bool(source_raw.get("verify_incremental_parent_once_per_run"), "source.verify_incremental_parent_once_per_run", True),
-        send_compressed_data=_as_bool(source_raw.get("send_compressed_data"), "source.send_compressed_data", False),
-        send_proto=_as_int(source_raw.get("send_proto"), "source.send_proto", None),
+        create_readonly_cache=_bool(source_raw, "source", "create_readonly_cache", True),
+        cleanup_superseded_cache=_bool(source_raw, "source", "cleanup_superseded_cache", True),
+        verify_subvolumes_at_discovery=_bool(source_raw, "source", "verify_subvolumes_at_discovery", False),
+        verify_incremental_parent_once_per_run=_bool(source_raw, "source", "verify_incremental_parent_once_per_run", True),
+        send_compressed_data=_bool(source_raw, "source", "send_compressed_data", False),
+        send_proto=_int(source_raw, "source", "send_proto", None),
     )
 
-    destination_raw = raw.get("destination", {})
-    if not isinstance(destination_raw, dict):
-        raise ConfigError("[destination] must be a TOML table")
+    destination_raw = _table(raw, "destination")
     target_root = _as_path(destination_raw.get("target_root"), "destination.target_root")
     destination = DestinationConfig(
         target_root=target_root,
         sudo=str(destination_raw.get("sudo", "sudo -n")),
         btrfs_command=str(destination_raw.get("btrfs_command", "btrfs")),
-        create_target_root=_as_bool(destination_raw.get("create_target_root"), "destination.create_target_root", True),
-        cleanup_incomplete_receive=_as_bool(destination_raw.get("cleanup_incomplete_receive"), "destination.cleanup_incomplete_receive", True),
+        create_target_root=_bool(destination_raw, "destination", "create_target_root", True),
+        cleanup_incomplete_receive=_bool(destination_raw, "destination", "cleanup_incomplete_receive", True),
     )
 
-    stream_raw = raw.get("stream", {})
-    if not isinstance(stream_raw, dict):
-        raise ConfigError("[stream] must be a TOML table")
+    stream_raw = _table(raw, "stream")
     stream = StreamConfig(
-        use_mbuffer=_as_bool(stream_raw.get("use_mbuffer"), "stream.use_mbuffer", False),
+        use_mbuffer=_bool(stream_raw, "stream", "use_mbuffer", False),
         mbuffer_command=str(stream_raw.get("mbuffer_command", "mbuffer")),
         mbuffer_size=str(stream_raw.get("mbuffer_size", "256M")),
         mbuffer_rate=(str(stream_raw.get("mbuffer_rate")) if stream_raw.get("mbuffer_rate") else None),
         mbuffer_extra_args=_string_list(stream_raw.get("mbuffer_extra_args"), "stream.mbuffer_extra_args"),
-        btrfs_verbose=_as_bool(stream_raw.get("btrfs_verbose"), "stream.btrfs_verbose", False),
+        btrfs_verbose=_bool(stream_raw, "stream", "btrfs_verbose", False),
     )
 
-    retention_raw = raw.get("retention", {})
-    if not isinstance(retention_raw, dict):
-        raise ConfigError("[retention] must be a TOML table")
+    retention_raw = _table(raw, "retention")
     retention = RetentionConfig(
-        hourly=int(_as_int(retention_raw.get("hourly"), "retention.hourly", 6)),
-        daily=int(_as_int(retention_raw.get("daily"), "retention.daily", 7)),
-        weekly=int(_as_int(retention_raw.get("weekly"), "retention.weekly", 4)),
-        monthly=int(_as_int(retention_raw.get("monthly"), "retention.monthly", 6)),
-        boot=int(_as_int(retention_raw.get("boot"), "retention.boot", 5)),
-        ondemand=int(_as_int(retention_raw.get("ondemand"), "retention.ondemand", 10)),
-        cleanup_ondemand=_as_bool(retention_raw.get("cleanup_ondemand"), "retention.cleanup_ondemand", False),
-        keep_latest=_as_bool(retention_raw.get("keep_latest"), "retention.keep_latest", True),
-        keep_latest_common_parent=_as_bool(retention_raw.get("keep_latest_common_parent"), "retention.keep_latest_common_parent", True),
+        hourly=int(_int(retention_raw, "retention", "hourly", 6)),
+        daily=int(_int(retention_raw, "retention", "daily", 7)),
+        weekly=int(_int(retention_raw, "retention", "weekly", 4)),
+        monthly=int(_int(retention_raw, "retention", "monthly", 6)),
+        boot=int(_int(retention_raw, "retention", "boot", 5)),
+        ondemand=int(_int(retention_raw, "retention", "ondemand", 10)),
+        cleanup_ondemand=_bool(retention_raw, "retention", "cleanup_ondemand", False),
+        keep_latest=_bool(retention_raw, "retention", "keep_latest", True),
+        keep_latest_common_parent=_bool(retention_raw, "retention", "keep_latest_common_parent", True),
         protected_snapshots=_string_list(retention_raw.get("protected_snapshots"), "retention.protected_snapshots"),
     )
 
-    manual_raw = raw.get("manual_snapshot", {})
-    if not isinstance(manual_raw, dict):
-        raise ConfigError("[manual_snapshot] must be a TOML table")
-    manual_comment = str(manual_raw.get("comment", "ts-btrfs-sync automatic on-demand snapshot")).strip()
-    manual_marker = str(manual_raw.get("marker", "ts-btrfs-sync")).strip()
-    manual_enabled = _as_bool(manual_raw.get("enabled"), "manual_snapshot.enabled", False)
+    manual_raw = _table(raw, "manual_snapshot")
+    manual_comment = _stripped(manual_raw, "comment", "ts-btrfs-sync automatic on-demand snapshot")
+    manual_marker = _stripped(manual_raw, "marker", "ts-btrfs-sync")
+    manual_enabled = _bool(manual_raw, "manual_snapshot", "enabled", False)
     if manual_enabled and not manual_comment:
         raise ConfigError("manual_snapshot.comment must be non-empty when manual_snapshot.enabled = true")
     if manual_enabled and not manual_marker:
@@ -327,31 +322,25 @@ def load_config(path: str | Path) -> AppConfig:
         enabled=manual_enabled,
         comment=manual_comment or "ts-btrfs-sync automatic on-demand snapshot",
         marker=manual_marker or "ts-btrfs-sync",
-        cleanup_enabled=_as_bool(manual_raw.get("cleanup_enabled"), "manual_snapshot.cleanup_enabled", True),
-        retention_count=int(_as_int(manual_raw.get("retention_count"), "manual_snapshot.retention_count", 10)),
+        cleanup_enabled=_bool(manual_raw, "manual_snapshot", "cleanup_enabled", True),
+        retention_count=int(_int(manual_raw, "manual_snapshot", "retention_count", 10)),
     )
 
-    mqtt_raw = raw.get("mqtt", {})
-    if not isinstance(mqtt_raw, dict):
-        raise ConfigError("[mqtt] must be a TOML table")
-    mqtt_port = mqtt_raw.get("port", 1883)
-    if not isinstance(mqtt_port, int) or mqtt_port <= 0:
-        raise ConfigError("mqtt.port must be a positive integer")
+    mqtt_raw = _table(raw, "mqtt")
+    mqtt_port = _positive_int(mqtt_raw.get("port"), "mqtt.port", 1883)
     mqtt_qos = mqtt_raw.get("qos", 0)
     if not isinstance(mqtt_qos, int) or mqtt_qos not in {0, 1, 2}:
         raise ConfigError("mqtt.qos must be 0, 1, or 2")
-    mqtt_timeout = mqtt_raw.get("timeout", 10)
-    if not isinstance(mqtt_timeout, int) or mqtt_timeout <= 0:
-        raise ConfigError("mqtt.timeout must be a positive integer")
-    mqtt_password = mqtt_raw.get("password") if isinstance(mqtt_raw.get("password"), str) and mqtt_raw.get("password") else None
-    mqtt_password_file = mqtt_raw.get("password_file") if isinstance(mqtt_raw.get("password_file"), str) and mqtt_raw.get("password_file") else None
+    mqtt_timeout = _positive_int(mqtt_raw.get("timeout"), "mqtt.timeout", 10)
+    mqtt_password = _optional_str(mqtt_raw, "password")
+    mqtt_password_file = _optional_str(mqtt_raw, "password_file")
     if mqtt_password and mqtt_password_file:
         raise ConfigError("Use either mqtt.password or mqtt.password_file, not both")
     if mqtt_password_file and not Path(mqtt_password_file).expanduser().is_file():
         raise ConfigError(f"mqtt.password_file does not exist or is not a file: {mqtt_password_file}")
-    mqtt_enabled = _as_bool(mqtt_raw.get("enabled"), "mqtt.enabled", False)
-    mqtt_host = str(mqtt_raw.get("host", "")).strip()
-    mqtt_topic = str(mqtt_raw.get("topic", "timeshift-btrfs-sync/status")).strip()
+    mqtt_enabled = _bool(mqtt_raw, "mqtt", "enabled", False)
+    mqtt_host = _stripped(mqtt_raw, "host")
+    mqtt_topic = _stripped(mqtt_raw, "topic", "timeshift-btrfs-sync/status")
     if mqtt_enabled and not mqtt_host:
         raise ConfigError("mqtt.host is required when mqtt.enabled = true")
     if mqtt_enabled and not mqtt_topic:
@@ -361,42 +350,35 @@ def load_config(path: str | Path) -> AppConfig:
         host=mqtt_host,
         port=mqtt_port,
         topic=mqtt_topic,
-        username=mqtt_raw.get("username") if isinstance(mqtt_raw.get("username"), str) and mqtt_raw.get("username") else None,
+        username=_optional_str(mqtt_raw, "username"),
         password=mqtt_password,
         password_file=str(Path(mqtt_password_file).expanduser()) if mqtt_password_file else None,
-        client_id=mqtt_raw.get("client_id") if isinstance(mqtt_raw.get("client_id"), str) and mqtt_raw.get("client_id") else None,
+        client_id=_optional_str(mqtt_raw, "client_id"),
         qos=mqtt_qos,
-        retain=_as_bool(mqtt_raw.get("retain"), "mqtt.retain", False),
+        retain=_bool(mqtt_raw, "mqtt", "retain", False),
         timeout=mqtt_timeout,
-        notify_on_success=_as_bool(mqtt_raw.get("notify_on_success"), "mqtt.notify_on_success", True),
-        notify_on_failure=_as_bool(mqtt_raw.get("notify_on_failure"), "mqtt.notify_on_failure", True),
+        notify_on_success=_bool(mqtt_raw, "mqtt", "notify_on_success", True),
+        notify_on_failure=_bool(mqtt_raw, "mqtt", "notify_on_failure", True),
     )
 
-
-    mail_raw = raw.get("mail", {})
-    if not isinstance(mail_raw, dict):
-        raise ConfigError("[mail] must be a TOML table")
-    mail_port = mail_raw.get("smtp_port", 587)
-    if not isinstance(mail_port, int) or mail_port <= 0:
-        raise ConfigError("mail.smtp_port must be a positive integer")
-    mail_timeout = mail_raw.get("timeout", 10)
-    if not isinstance(mail_timeout, int) or mail_timeout <= 0:
-        raise ConfigError("mail.timeout must be a positive integer")
+    mail_raw = _table(raw, "mail")
+    mail_port = _positive_int(mail_raw.get("smtp_port"), "mail.smtp_port", 587)
+    mail_timeout = _positive_int(mail_raw.get("timeout"), "mail.timeout", 10)
     mail_max_attachment_bytes = mail_raw.get("max_attachment_bytes", 0)
     if not isinstance(mail_max_attachment_bytes, int) or mail_max_attachment_bytes < 0:
         raise ConfigError("mail.max_attachment_bytes must be a non-negative integer")
-    mail_password = mail_raw.get("password") if isinstance(mail_raw.get("password"), str) and mail_raw.get("password") else None
-    mail_password_file = mail_raw.get("password_file") if isinstance(mail_raw.get("password_file"), str) and mail_raw.get("password_file") else None
+    mail_password = _optional_str(mail_raw, "password")
+    mail_password_file = _optional_str(mail_raw, "password_file")
     if mail_password and mail_password_file:
         raise ConfigError("Use either mail.password or mail.password_file, not both")
     if mail_password_file and not Path(mail_password_file).expanduser().is_file():
         raise ConfigError(f"mail.password_file does not exist or is not a file: {mail_password_file}")
-    mail_enabled = _as_bool(mail_raw.get("enabled"), "mail.enabled", False)
-    mail_smtp_host = str(mail_raw.get("smtp_host", "")).strip()
-    mail_from_addr = str(mail_raw.get("from_addr", "")).strip()
+    mail_enabled = _bool(mail_raw, "mail", "enabled", False)
+    mail_smtp_host = _stripped(mail_raw, "smtp_host")
+    mail_from_addr = _stripped(mail_raw, "from_addr")
     mail_to_addrs = _string_list(mail_raw.get("to_addrs"), "mail.to_addrs")
-    mail_smtp_ssl = _as_bool(mail_raw.get("smtp_ssl"), "mail.smtp_ssl", False)
-    mail_starttls = _as_bool(mail_raw.get("starttls"), "mail.starttls", True)
+    mail_smtp_ssl = _bool(mail_raw, "mail", "smtp_ssl", False)
+    mail_starttls = _bool(mail_raw, "mail", "starttls", True)
     if mail_smtp_ssl and mail_starttls:
         raise ConfigError("mail.smtp_ssl and mail.starttls cannot both be true")
     if mail_enabled and not mail_smtp_host:
@@ -411,17 +393,17 @@ def load_config(path: str | Path) -> AppConfig:
         smtp_port=mail_port,
         smtp_ssl=mail_smtp_ssl,
         starttls=mail_starttls,
-        username=mail_raw.get("username") if isinstance(mail_raw.get("username"), str) and mail_raw.get("username") else None,
+        username=_optional_str(mail_raw, "username"),
         password=mail_password,
         password_file=str(Path(mail_password_file).expanduser()) if mail_password_file else None,
         from_addr=mail_from_addr,
         to_addrs=mail_to_addrs,
-        subject_prefix=str(mail_raw.get("subject_prefix", "[timeshift-btrfs-sync]")).strip(),
+        subject_prefix=_stripped(mail_raw, "subject_prefix", "[timeshift-btrfs-sync]"),
         timeout=mail_timeout,
-        notify_on_success=_as_bool(mail_raw.get("notify_on_success"), "mail.notify_on_success", True),
-        notify_on_failure=_as_bool(mail_raw.get("notify_on_failure"), "mail.notify_on_failure", True),
-        include_json=_as_bool(mail_raw.get("include_json"), "mail.include_json", True),
-        attach_logs=_as_bool(mail_raw.get("attach_logs"), "mail.attach_logs", True),
+        notify_on_success=_bool(mail_raw, "mail", "notify_on_success", True),
+        notify_on_failure=_bool(mail_raw, "mail", "notify_on_failure", True),
+        include_json=_bool(mail_raw, "mail", "include_json", True),
+        attach_logs=_bool(mail_raw, "mail", "attach_logs", True),
         max_attachment_bytes=mail_max_attachment_bytes,
     )
 
