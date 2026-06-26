@@ -1,8 +1,12 @@
 # Versioning
 
-This build is version `0.8.3`.
+This build is version `0.8.4`.
 
 ## Changelog
+
+### 0.8.4
+
+- Refreshed `COMMENTED_CODE_MAP.md` to document only current commands, classes, and functions, and to add concise notes explaining safety-driven code paths.
 
 ### 0.8.3
 
