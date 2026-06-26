@@ -17,7 +17,7 @@ from pathlib import Path
 from . import btrfs, timeshift
 from .commands import stream_pipeline
 from .config import AppConfig
-from .models import SnapshotMeta, SubvolumeMeta
+from .models import SnapshotMeta, SubvolumeMeta, tags_text
 from .ssh import SSHRunner
 from .log import emit_success_summary
 from .state import latest_synced_before, mark_subvolume_synced, refresh_state_metadata_and_report, resolve_destination_path, save_state, snapshot_is_synced
@@ -50,12 +50,6 @@ def _human_rule(text: str = "----") -> None:
 
 
 
-def _tags_text(tags: list[str] | tuple[str, ...] | None) -> str:
-    """Return compact Timeshift tags for terminal summaries."""
-
-    return "".join(tags or []) or "-"
-
-
 def _record_sync_event(
     events: list[dict],
     *,
@@ -74,7 +68,7 @@ def _record_sync_event(
         {
             "mode": mode,
             "snapshot": snapshot.name,
-            "tags": _tags_text(snapshot.tags),
+            "tags": tags_text(snapshot.tags),
             "subvolume": subvolume_name,
             "source": source_path,
             "destination": str(destination_path),

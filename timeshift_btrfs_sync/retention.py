@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from . import btrfs
 from .config import AppConfig
+from .models import tags_text
 from .state import remove_snapshot_from_state, resolve_destination_path, save_state
 from .log import emit_success_summary
 
@@ -45,13 +46,6 @@ def _is_app_created_ondemand(snapshot_state: dict, marker: str) -> bool:
 
 
 
-
-def _tags_text(snapshot_state: dict) -> str:
-    """Return compact Timeshift tags for terminal retention summaries."""
-
-    return "".join(snapshot_state.get("tags", []) or []) or "-"
-
-
 def _delete_reason_for_snapshot(
     config: AppConfig,
     snapshots: dict,
@@ -64,7 +58,7 @@ def _delete_reason_for_snapshot(
 
     snapshot_state = snapshots.get(name, {})
     tags = snapshot_state.get("tags", []) or []
-    tag_text = _tags_text(snapshot_state)
+    tag_text = tags_text(snapshot_state.get('tags', []))
 
     if name in app_created_ondemand:
         return (
@@ -227,7 +221,7 @@ def print_prune_plan(plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
     for name in sorted(plan.delete):
         snapshot_state = snapshots.get(name, {})
         action = "WOULD DELETE" if dry_run else "DELETE"
-        lines.append(f"  [{action}] {name}  tags={_tags_text(snapshot_state)}")
+        lines.append(f"  [{action}] {name}  tags={tags_text(snapshot_state.get('tags', []))}")
         for reason in _delete_reasons(plan, name):
             lines.append(f"      why: {reason}")
     lines.append("")
@@ -250,7 +244,7 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
         print()
         print("RETENTION DELETE")
         print(f"  snapshot: {name}")
-        print(f"  tags:     {_tags_text(snapshot_state)}")
+        print(f"  tags:     {tags_text(snapshot_state.get('tags', []))}")
         for reason in _delete_reasons(plan, name):
             print(f"  why:      {reason}")
         print("  action:   deleting destination subvolumes and removing state.json entry")

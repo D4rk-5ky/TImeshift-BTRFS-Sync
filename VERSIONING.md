@@ -1,8 +1,12 @@
 # Versioning
 
-This build is version `0.8.1`.
+This build is version `0.8.2`.
 
 ## Changelog
+
+### 0.8.2
+
+- Added shared `tags_text()` display helper and removed duplicate `_tags_text()` formatting helpers from sync/prune paths.
 
 ### 0.8.1
 

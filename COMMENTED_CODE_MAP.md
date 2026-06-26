@@ -99,7 +99,7 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 
 - `SyncError`: fatal sync error.
 - `_local_meta()`, `_remote_meta()`: compact metadata wrappers.
-- `_human_blank()`, `_human_rule()`, `_tags_text()`: summary text helpers.
+- `_human_blank()`, `_human_rule()`: summary text helpers; tag display uses shared `tags_text()`.
 - `_record_sync_event()`, `_print_sync_summary()`: `.succes` sync statistics.
 - `prepare_destination()`: prepare destination paths.
 - `list_source_snapshots()`: read source list, optionally verify Btrfs metadata.
@@ -124,7 +124,7 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 ### `retention.py`
 
 - `PrunePlan`: keep/delete plan; `add_keep()`, `add_delete()` add decisions.
-- `_is_app_created_ondemand()`, `_tags_text()`: classify/format snapshots.
+- `_is_app_created_ondemand()`: classify app-created on-demand snapshots; tag display uses shared `tags_text()`.
 - `_delete_reason_for_snapshot()`, `_delete_reasons()`: human delete reasons.
 - `build_prune_plan()`: compute retention plan.
 - `_delete_snapshot()`: delete destination subvolumes for one snapshot.

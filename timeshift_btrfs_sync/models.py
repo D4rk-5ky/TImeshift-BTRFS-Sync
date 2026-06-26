@@ -33,3 +33,10 @@ class SnapshotMeta:
         """Timeshift timestamp names sort oldest-to-newest lexically."""
 
         return self.name
+
+
+def tags_text(tags: list[str] | tuple[str, ...] | None) -> str:
+    """Return compact human text for Timeshift tags."""
+
+    return " ".join(tags or []) or "none"
+
