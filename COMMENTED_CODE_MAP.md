@@ -54,7 +54,7 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 - `Completed`: command result.
 - `sudo_prefix()`, `quote_join()`, `remote_double_quote()`, `_merged_env()`: command formatting/env helpers.
 - `run_local()`: normal local command runner.
-- `_join_text()`: join process buffers.
+- `_start_pipeline_readers()`, `_failed_stderr()`, `_log_failed_streams()`: compact stream-routing helpers.
 - `stream_pipeline()`: `ssh btrfs send | mbuffer | btrfs receive`; only failed pipeline stderr goes to `.err`.
 
 ### `btrfs.py`
@@ -150,8 +150,9 @@ Shared notification helpers. `utc_timestamp()` creates the common UTC timestamp,
 
 ### `cli.py`
 
+- `new_subparser()`, `add_config_arg()`, `add_run_mode_args()`, `add_yes_delete_arg()`: small argparse helpers.
 - `_failure_exit_code()`, `_stderr_tail_for_exception()`: failure summaries.
-- `_publish_mqtt_status()`, `_send_mail_status()`, `_mail_attachment_paths()`: notification bridge.
+- `_send_notifications()`, `_mail_attachment_paths()`: notification bridge.
 - `_with_logging()`: command wrapper for logging, notifications, exit code.
 - `_resolve_dry_run()`: global/command dry-run merge.
 - `cmd_init_config()`, `cmd_test_ssh()`, `cmd_list_source()`, `cmd_sync()`, `cmd_prune()`, `cmd_create_manual()`, `cmd_show_state()`: command handlers.

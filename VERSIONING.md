@@ -1,8 +1,13 @@
 # Versioning
 
-This build is version `0.8.2`.
+This build is version `0.8.3`.
 
 ## Changelog
+
+### 0.8.3
+
+- Added light CLI parser helpers for subparser creation, shared `--config`, shared run-mode flags, and shared delete-confirmation flags.
+- Preserved command-specific help output and command flag visibility.
 
 ### 0.8.2
 

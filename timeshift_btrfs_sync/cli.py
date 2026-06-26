@@ -22,6 +22,27 @@ from .sync import confirm_source_identity_before_manual_snapshot, list_source_sn
 from .timeshift import create_remote_manual_snapshot
 
 
+CLI_FORMATTER = argparse.RawTextHelpFormatter
+
+
+def new_subparser(sub, name: str, help_text: str, description: str, func):
+    parser = sub.add_parser(name, help=help_text, description=description, formatter_class=CLI_FORMATTER)
+    parser.set_defaults(func=func)
+    return parser
+
+
+def add_config_arg(parser) -> None: parser.add_argument("--config", "-c", required=True, help="path to config.toml")
+
+def add_run_mode_args(parser, *, dry_run_help: str, run_help: str) -> None:
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help=dry_run_help)
+    mode.add_argument("--run", action="store_true", help=run_help)
+
+
+def add_yes_delete_arg(parser, help_text: str) -> None:
+    parser.add_argument("--yes-delete", action="store_true", help=help_text)
+
+
 def _failure_exit_code(exc: BaseException) -> int:
     """Return a stable CLI exit code for failure notifications.
 
@@ -329,7 +350,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ts-btrfs",
         description="Pull Timeshift Btrfs snapshots over SSH.",
         epilog=TOP_LEVEL_HELP,
-        formatter_class=argparse.RawTextHelpFormatter,
+        formatter_class=CLI_FORMATTER,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(
@@ -340,103 +361,81 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run 'ts-btrfs COMMAND --help' to see that command's flags.",
     )
 
-    p = sub.add_parser(
-        "init-config",
-        help="write an example TOML config",
-        description="Write a complete commented TOML config template.",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
+    p = new_subparser(sub, "init-config", "write an example TOML config", "Write a complete commented TOML config template.", cmd_init_config)
     p.add_argument("--path", default="./ts-btrfs.toml", help="where to write the example config; default: ./ts-btrfs.toml")
     p.add_argument("--force", action="store_true", help="overwrite the destination config file if it already exists")
-    p.set_defaults(func=cmd_init_config)
 
-    p = sub.add_parser(
-        "test-ssh",
-        help="test SSH and source sudo permissions",
-        description="Verify SSH works and source sudo can run timeshift --list and btrfs --version.",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
-    p.set_defaults(func=cmd_test_ssh)
+    p = new_subparser(sub, "test-ssh", "test SSH and source sudo permissions", "Verify SSH works and source sudo can run timeshift --list and btrfs --version.", cmd_test_ssh)
+    add_config_arg(p)
 
-    p = sub.add_parser(
+    p = new_subparser(
+        sub,
         "list-source",
-        help="list source Timeshift snapshots",
-        description=(
+        "list source Timeshift snapshots",
+        (
             "List Timeshift snapshots found on the source.\n"
             "Default is fast mode: parse timeshift --list and construct expected paths.\n"
             "Use --verify-btrfs to run slower btrfs checks for every listed subvolume."
         ),
-        formatter_class=argparse.RawTextHelpFormatter,
+        cmd_list_source,
     )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
+    add_config_arg(p)
     p.add_argument(
         "--verify-btrfs",
         action="store_true",
         help="slow: verify every configured source subvolume with btrfs during listing",
     )
-    p.set_defaults(func=cmd_list_source)
 
-    p = sub.add_parser(
+    p = new_subparser(
+        sub,
         "sync",
-        help="pull missing snapshots",
-        description=(
+        "pull missing snapshots",
+        (
             "Pull missing Timeshift snapshot subvolumes from source to destination.\n"
             "Without --run or --dry-run, the config option default_dry_run decides.\n"
             "Real prune deletion still requires --yes-delete."
         ),
-        formatter_class=argparse.RawTextHelpFormatter,
+        cmd_sync,
     )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="strict preview: no destination preparation, lock, receive, state write, manual snapshot, or delete")
-    mode.add_argument("--run", action="store_true", help="perform real send/receive work; required for actual changes")
+    add_config_arg(p)
+    add_run_mode_args(p, dry_run_help="strict preview: no destination preparation, lock, receive, state write, manual snapshot, or delete", run_help="perform real send/receive work; required for actual changes")
     p.add_argument("--limit", type=int, help="transfer at most this many subvolumes; useful for first live test")
     p.add_argument("--snapshot", help="sync only this Timeshift snapshot name, for example 2026-06-23_07-10-24")
     p.add_argument("--resend", action="store_true", help="attempt transfer even if state.json says the subvolume was already synced")
     p.add_argument("--prune", action="store_true", help="run destination retention pruning after sync; real delete also needs --run --yes-delete")
-    p.add_argument("--yes-delete", action="store_true", help="allow real pruning deletes when used with --run and --prune or prune_after_sync=true")
-    p.set_defaults(func=cmd_sync)
+    add_yes_delete_arg(p, "allow real pruning deletes when used with --run and --prune or prune_after_sync=true")
 
-    p = sub.add_parser(
+    p = new_subparser(
+        sub,
         "prune",
-        help="apply destination retention rules",
-        description=(
+        "apply destination retention rules",
+        (
             "Apply retention rules to destination snapshots only.\n"
             "Use --dry-run first. Real deletion requires both --run and --yes-delete."
         ),
-        formatter_class=argparse.RawTextHelpFormatter,
+        cmd_prune,
     )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
-    mode = p.add_mutually_exclusive_group()
-    mode.add_argument("--dry-run", action="store_true", help="show what would be deleted; do not create a lock file, save state, or delete anything")
-    mode.add_argument("--run", action="store_true", help="perform real pruning if --yes-delete is also present")
-    p.add_argument("--yes-delete", action="store_true", help="explicit safety confirmation required before real prune deletes")
-    p.set_defaults(func=cmd_prune)
+    add_config_arg(p)
+    add_run_mode_args(p, dry_run_help="show what would be deleted; do not create a lock file, save state, or delete anything", run_help="perform real pruning if --yes-delete is also present")
+    add_yes_delete_arg(p, "explicit safety confirmation required before real prune deletes")
 
-    p = sub.add_parser(
+    p = new_subparser(
+        sub,
         "create-manual",
-        help="create source Timeshift tag O snapshot",
-        description=(
+        "create source Timeshift tag O snapshot",
+        (
             "Ask source Timeshift to create an on-demand/manual snapshot with tag O.\n"
             "If the destination already contains snapshots, the source must match state.json by UUID first. "
             "If the destination is empty, first full seed creation is allowed."
         ),
-        formatter_class=argparse.RawTextHelpFormatter,
+        cmd_create_manual,
     )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
+    add_config_arg(p)
     p.add_argument("--comment", required=True, help="comment passed to timeshift --create --comments")
-    p.set_defaults(func=cmd_create_manual)
 
-    p = sub.add_parser(
-        "show-state",
-        help="show local sync state",
-        description="Show state.json, which records completed transfers and incremental parent metadata.",
-        formatter_class=argparse.RawTextHelpFormatter,
-    )
-    p.add_argument("--config", "-c", required=True, help="path to config.toml")
+    p = new_subparser(sub, "show-state", "show local sync state", "Show state.json, which records completed transfers and incremental parent metadata.", cmd_show_state)
+    add_config_arg(p)
     p.add_argument("--json", action="store_true", help="print raw state.json instead of a short table")
-    p.set_defaults(func=cmd_show_state)
     return parser
 
 def main(argv: list[str] | None = None) -> int:
