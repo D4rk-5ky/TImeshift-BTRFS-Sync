@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from . import btrfs
 from .config import AppConfig
-from .state import remove_snapshot_from_state, save_state
+from .state import remove_snapshot_from_state, resolve_destination_path, save_state
 
 
 @dataclass(slots=True)
@@ -124,7 +124,11 @@ def _delete_snapshot(config: AppConfig, state: dict, snapshot_name: str) -> None
 
     item = state.get("snapshots", {}).get(snapshot_name, {})
     snap_path = config.destination.target_root / "snapshots" / snapshot_name
-    subvol_paths = [Path(sub["destination_path"]) for sub in item.get("subvolumes", {}).values() if sub.get("destination_path")]
+    subvol_paths = [
+        resolve_destination_path(config.destination.target_root, sub["destination_path"])
+        for sub in item.get("subvolumes", {}).values()
+        if sub.get("destination_path")
+    ]
     for subvol_path in sorted(subvol_paths, key=lambda p: len(p.parts), reverse=True):
         if subvol_path.exists():
             btrfs.delete_local_subvolume(subvol_path, config.destination.sudo, config.destination.btrfs_command)

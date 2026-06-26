@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.5.7
+# Config and CLI audit for v0.5.8
 
 This file records the audit requested after v0.2.3.
 

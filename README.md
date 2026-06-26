@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.5.7
+# timeshift-btrfs-sync v0.5.8
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -54,6 +54,8 @@ The destination `target_root` is the backup job folder. The app creates and owns
 ```
 
 `state.json` records successfully received snapshots and the metadata needed for incremental sends. Do not delete only `state.json` while keeping `snapshots/`, and do not delete only `snapshots/` while keeping old state.
+
+State destination paths are stored relative to `destination.target_root`, for example `snapshots/2026-06-23_07-10-24/@`. This means you can move the whole target root to another mount point, update `destination.target_root`, and the app will resolve existing state paths under the new target root. Older absolute state paths are normalized when the state is loaded.
 
 A full reset means deleting both `snapshots/` and `.ts-btrfs-sync/`. Received `@` and `@home` entries are Btrfs subvolumes, so delete them with `btrfs subvolume delete` before removing ordinary folders.
 

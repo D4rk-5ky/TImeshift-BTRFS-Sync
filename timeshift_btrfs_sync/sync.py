@@ -19,7 +19,7 @@ from .commands import stream_pipeline
 from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
-from .state import latest_synced_before, mark_subvolume_synced, save_state, snapshot_is_synced
+from .state import latest_synced_before, mark_subvolume_synced, resolve_destination_path, save_state, snapshot_is_synced
 
 
 class SyncError(RuntimeError):
@@ -580,7 +580,10 @@ def _remote_path_matches_state_uuid(
     destination_path_text = state_subvol.get("destination_path")
     if not isinstance(destination_path_text, str) or not destination_path_text:
         return False, "state has no destination_path"
-    destination_path = Path(destination_path_text)
+    try:
+        destination_path = resolve_destination_path(config.destination.target_root, destination_path_text)
+    except ValueError as exc:
+        return False, f"invalid destination_path in state: {exc}"
     local_received_uuid: str | None = None
     try:
         local_meta = btrfs.local_subvolume_show(
@@ -1038,7 +1041,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             except Exception:
                 send_meta = None
 
-            mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta, original_meta=original_meta, send_meta=send_meta)
+            mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, destination_root=config.destination.target_root, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta, original_meta=original_meta, send_meta=send_meta)
             save_state(config.state_file, state)
 
             # Source-side read-only cache snapshots are temporary. After a

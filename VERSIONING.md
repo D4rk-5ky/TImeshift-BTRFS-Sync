@@ -55,15 +55,23 @@ Corrected sequence:
 55th zip -> 0.5.5
 56th zip -> 0.5.6
 57th zip -> 0.5.7
+58th zip -> 0.5.8
 ```
 
-This build is version `0.5.7`.
+This build is version `0.5.8`.
 
-The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, and this release increments that by `0.0.1` to `0.5.7`.
+The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, 0.5.7 fixed source cache parent cleanup, and this release increments that by `0.0.1` to `0.5.8`.
 
 
 ## Changelog
 
+
+### 0.5.8
+
+- State `destination_path` values are now stored relative to `destination.target_root`, for example `snapshots/2026-06-23_07-10-24/@` instead of an absolute path.
+- Loading state with a config now normalizes older absolute destination paths in memory, including moved backups where the old absolute path still contains the standard `snapshots/<name>/<subvolume>` suffix.
+- Sync floor checks and destination pruning now resolve `destination_path` through the current `destination.target_root`, so moving the whole target and updating the config no longer leaves state pointing at the old mount path.
+- Destructive destination path resolution refuses absolute/parent-directory escape paths that cannot be converted to the target-root-relative layout.
 
 ### 0.5.7
 
