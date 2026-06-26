@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 import re
 from .commands import quote_join, run_local, sudo_prefix
 from .models import SubvolumeMeta
 from .ssh import SSHRunner
 
 UUID_KEYS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Received UUID": "received_uuid"}
-
 
 
 def _clean_uuid(value: str) -> str | None:
@@ -21,13 +19,7 @@ def _clean_uuid(value: str) -> str | None:
 
 
 def parse_subvolume_show(output: str, name: str, path: str) -> SubvolumeMeta:
-    """Parse selected fields from `btrfs subvolume show`.
-
-    Besides UUID fields, this also reads the `Flags:` line when present. Newer
-    btrfs-progs versions print read-only state here as `Flags: readonly`, so
-    this one command is the source of truth for both UUID metadata and read-only
-    detection.
-    """
+    """Parse UUIDs and read-only state from `btrfs subvolume show`."""
 
     meta = SubvolumeMeta(name=name, path=path)
     for line in output.splitlines():
@@ -41,12 +33,6 @@ def parse_subvolume_show(output: str, name: str, path: str) -> SubvolumeMeta:
             setattr(meta, attr, _clean_uuid(value))
             continue
 
-        # Example outputs seen across btrfs-progs versions:
-        #   Flags: readonly
-        #   Flags: -
-        #   Flags: readonly|something-else
-        # A read-only source can be sent directly, so detecting this avoids
-        # creating an unnecessary send-cache snapshot.
         if key.lower() == "flags":
             lower_value = value.lower()
             if "readonly" in lower_value or "read-only" in lower_value:
@@ -54,7 +40,6 @@ def parse_subvolume_show(output: str, name: str, path: str) -> SubvolumeMeta:
             elif lower_value in {"-", "none", ""}:
                 meta.readonly = False
     return meta
-
 
 
 def remote_btrfs_cmd(sudo: str, btrfs_command: str, args: list[str]) -> str:
@@ -69,46 +54,33 @@ def local_btrfs_cmd(sudo: str, btrfs_command: str, args: list[str]) -> list[str]
     return sudo_prefix(sudo) + [btrfs_command] + args
 
 
-SubvolumeLocation = Literal["local", "remote"]
-
-
 def get_subvolume_meta(
-    *,
-    location: SubvolumeLocation,
+    location: str,
     path: str | Path,
     name: str,
     sudo: str,
     btrfs_command: str = "btrfs",
+    *,
     ssh: SSHRunner | None = None,
     required: bool = True,
 ) -> SubvolumeMeta | None:
-    """Read Btrfs subvolume metadata from either the local or remote side.
-
-    This is the single wrapper around ``btrfs subvolume show``. It returns the
-    parsed UUID/read-only metadata for existing subvolumes. When ``required`` is
-    false, a missing/unreadable subvolume returns ``None`` instead of raising;
-    callers use that for optional parent/cache candidate checks.
-    """
+    """Read and parse `btrfs subvolume show` metadata locally or over SSH."""
 
     path_text = str(path)
     args = ["subvolume", "show", path_text]
-
     if location == "local":
         result = run_local(local_btrfs_cmd(sudo, btrfs_command, args), check=False)
-    elif location == "remote":
-        if ssh is None:
-            raise ValueError("ssh is required when location='remote'")
+    elif location == "remote" and ssh:
         result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, args), check=False)
     else:
-        raise ValueError(f"Unsupported Btrfs metadata location: {location!r}")
+        raise ValueError("location must be 'local' or 'remote' with ssh")
 
-    if result.returncode != 0:
-        if not required:
-            return None
-        details = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
-        raise RuntimeError(f"Cannot read {location} Btrfs subvolume metadata for {path_text}: {details}")
-
-    return parse_subvolume_show(result.stdout, name=name, path=path_text)
+    if result.returncode == 0:
+        return parse_subvolume_show(result.stdout, name=name, path=path_text)
+    if not required:
+        return None
+    details = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+    raise RuntimeError(f"Cannot read {location} Btrfs subvolume metadata for {path_text}: {details}")
 
 
 def _validate_cache_snapshot_name(snapshot_name: str) -> str:
@@ -207,22 +179,7 @@ def remote_cache_subvolume_exists(
     cache_root: str | None,
     path: str,
 ) -> bool:
-    """Check whether a cache subvolume exists without probing the missing path.
-
-    This must avoid two different traps:
-
-    * `btrfs subvolume show <missing-cache-path>` prints noisy expected stderr
-      when a cache child such as @home has not been created yet.
-    * `btrfs subvolume list <cache_root>` without `-o` may list every subvolume
-      in the filesystem. A normal Timeshift snapshot path like
-      `timeshift-btrfs/snapshots/<date>/@` then has the same suffix as the
-      wanted cache path `<date>/@`, causing a false positive.
-
-    Use `btrfs subvolume list -o <cache_root>` so Btrfs restricts the result to
-    descendants of the configured cache root. Then suffix matching is safe for
-    both possible output styles: relative paths such as `<date>/@` and full
-    filesystem-relative paths such as `timeshift-btrfs/.ts-btrfs-sync/send-cache/<date>/@`.
-    """
+    """Check cache existence with `subvolume list -o` to avoid noisy missing-path probes."""
 
     if not cache_root or not path_is_under_cache(path, cache_root):
         return False
@@ -236,13 +193,7 @@ def remote_cache_subvolume_exists(
 
 
 def _cache_child_display_path(cache_parent: str, listed_path: str) -> str:
-    """Return a short display path for a listed cache child subvolume.
-
-    `btrfs subvolume list -o <cache-parent>` can print paths relative to the
-    filesystem root rather than relative to <cache-parent>. For logging, prefer
-    the child tail such as `@home`, but fall back to the raw listed path when
-    the exact parent prefix is not visible.
-    """
+    """Return a short display path for a listed cache child subvolume."""
 
     parent_text = str(Path(cache_parent)).strip("/").rstrip("/")
     listed_text = listed_path.strip("/").rstrip("/")
@@ -263,21 +214,7 @@ def remote_cache_child_subvolumes(
     cache_root: str | None,
     cache_parent: str,
 ) -> list[str] | None:
-    """List remaining child subvolumes below one cache date parent.
-
-    The source cache layout is normally:
-
-        <cache_root>/<snapshot-name>/@
-        <cache_root>/<snapshot-name>/@home
-
-    The `<snapshot-name>` directory is itself a Btrfs subvolume. It must only be
-    deleted after all child cache snapshots below it are gone. This helper uses
-    `btrfs subvolume list -o <cache-parent>` so it checks for any descendant
-    subvolume, not only the currently configured names.
-
-    Returns None when the emptiness check could not be performed. Callers should
-    keep the parent in that case instead of risking a noisy failed delete.
-    """
+    """List child cache subvolumes, or None when the safe check fails."""
 
     if not cache_root or not path_is_under_cache(cache_parent, cache_root):
         return None
@@ -301,13 +238,7 @@ def remote_ensure_cache_parent(
     cache_root: str,
     cache_parent: str,
 ) -> None:
-    """Ensure the per-snapshot cache parent exists as a Btrfs subvolume.
-
-    The cache layout is `<cache_root>/<snapshot-name>/@` and optionally
-    `<cache_root>/<snapshot-name>/@home`. When @ is prepared first it creates
-    the date parent; when @home is prepared later, the parent already exists and
-    that must be treated as normal, not as a failing condition.
-    """
+    """Ensure the per-snapshot cache parent exists as a Btrfs subvolume."""
 
     if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_parent):
         return
@@ -345,34 +276,14 @@ def remote_ensure_readonly_send_path(
     subvolume_name: str,
     create_readonly_cache: bool,
 ) -> str:
-    """Return a source path safe for `btrfs send`.
+    """Return the original read-only source or create/reuse a read-only cache snapshot."""
 
-    Read-only detection comes from the same `btrfs subvolume show` call that
-    reads UUID metadata. If `Flags: readonly` is present, the original Timeshift
-    snapshot is sent directly. If no read-only flag is detected, the app creates
-    a read-only cache snapshot before `btrfs send`.
-
-    This uses only one Btrfs metadata command while still avoiding unnecessary
-    cache snapshots for already-read-only sources.
-    """
-
-    original_meta = get_subvolume_meta(
-        location="remote",
-        ssh=ssh,
-        sudo=sudo,
-        btrfs_command=btrfs_command,
-        path=original_path,
-        name=subvolume_name,
-        required=False,
-    )
+    original_meta = get_subvolume_meta("remote", original_path, subvolume_name, sudo, btrfs_command, ssh=ssh, required=False)
     if not original_meta:
         raise RuntimeError(f"Source path is not a Btrfs subvolume or cannot be read: {original_path}")
     if original_meta.readonly is True:
         return original_path
 
-    # If no read-only flag is detected, treat the source as needing a read-only
-    # send-cache snapshot. That is safe for writable sources and avoids the
-    # separate read-only probe command entirely.
     if not create_readonly_cache:
         raise RuntimeError(f"Source subvolume is not confirmed read-only and cache creation is disabled: {original_path}")
     if not cache_root:
@@ -381,9 +292,6 @@ def remote_ensure_readonly_send_path(
     cache_parent = readonly_cache_parent_path(cache_root, snapshot_name)
     cache_path = readonly_cache_path(cache_root, snapshot_name, subvolume_name)
 
-    # Check for an existing cache snapshot without probing the missing path
-    # directly. Missing @home under an existing date parent is normal when @ was
-    # prepared first, so avoid noisy expected "No such file" stderr here.
     if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_path):
         return cache_path
 
@@ -402,9 +310,6 @@ def remote_ensure_readonly_send_path(
     if result.returncode == 0:
         return cache_path
 
-    # If another attempt created the target between the list check and the
-    # snapshot command, accept it only after Btrfs confirms that the target is a
-    # cache subvolume.
     if "target path already exists" in result.stderr.lower():
         if remote_cache_subvolume_exists(ssh, sudo, btrfs_command, cache_root, cache_path):
             return cache_path
@@ -412,12 +317,7 @@ def remote_ensure_readonly_send_path(
 
 
 def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
-    """Return True when path points inside the configured source cache root.
-
-    This is used before deleting any source-side cache subvolume. The check is
-    intentionally simple and conservative: only absolute-looking paths below the
-    configured cache_root are treated as deletable cache paths.
-    """
+    """Return True when path points inside the configured source cache root."""
 
     if not path or not cache_root:
         return False
@@ -436,12 +336,7 @@ def remote_delete_subvolume(
     log_stderr: bool = True,
     mirror_stderr: bool = True,
 ):
-    """Delete a source-side Btrfs subvolume with `btrfs subvolume delete`.
-
-    This is used for temporary read-only cache snapshots after they are no
-    longer needed as incremental parents. It still only requires passwordless
-    source-side `btrfs`; no rm/mkdir/cat/helper command is introduced.
-    """
+    """Delete a source-side Btrfs subvolume."""
 
     return ssh.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]),
@@ -459,12 +354,7 @@ def remote_try_delete_cache_subvolume(
     cache_root: str | None,
     path: str | None,
 ) -> bool:
-    """Best-effort delete for one source cache subvolume.
-
-    Returns True only when the delete command succeeded. Paths outside
-    cache_root are refused so this cleanup can never delete original Timeshift
-    snapshots by accident.
-    """
+    """Best-effort delete for one source cache subvolume."""
 
     if not path_is_under_cache(path, cache_root):
         return False
@@ -484,12 +374,7 @@ def remote_send_cmd(
     proto: int | None = None,
     verbose: bool = False,
 ) -> list[str]:
-    """Build SSH command that runs remote `btrfs send`.
-
-    verbose=True adds `-v`. Btrfs send verbose output is operation/detail
-    logging, not a percentage progress bar. Throughput/total progress is still
-    best provided by mbuffer.
-    """
+    """Build SSH command that runs remote `btrfs send`."""
 
     args = ["send"]
     if verbose:
@@ -505,10 +390,7 @@ def remote_send_cmd(
 
 
 def local_receive_cmd(destination_dir: Path, sudo: str, btrfs_command: str = "btrfs", *, verbose: bool = False) -> list[str]:
-    """Build local `btrfs receive` command.
-
-    verbose=True adds `-v` so Btrfs receive can print operation details.
-    """
+    """Build local `btrfs receive` command."""
 
     args = ["receive"]
     if verbose:

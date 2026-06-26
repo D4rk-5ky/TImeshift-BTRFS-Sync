@@ -27,6 +27,14 @@ class SyncError(RuntimeError):
     """Raised for sync safety errors."""
 
 
+def _local_meta(config: AppConfig, path: str | Path, name: str, required: bool = True) -> SubvolumeMeta | None:
+    return btrfs.get_subvolume_meta("local", path, name, config.destination.sudo, config.destination.btrfs_command, required=required)
+
+
+def _remote_meta(config: AppConfig, ssh: SSHRunner, path: str | Path, name: str, required: bool = True) -> SubvolumeMeta | None:
+    return btrfs.get_subvolume_meta("remote", path, name, config.source.sudo, config.source.btrfs_command, ssh=ssh, required=required)
+
+
 def _human_blank() -> None:
     """Print one blank line to separate human-readable status blocks."""
 
@@ -142,13 +150,7 @@ def prepare_destination(config: AppConfig) -> None:
 
 
 def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
-    """Discover source Timeshift snapshots.
-
-    `include_btrfs_info=False` is the fast path: it parses Timeshift snapshot
-    names/tags and constructs @/@home paths without running btrfs subvolume-show
-    for every snapshot. Btrfs checks are then delayed until an actual send or a
-    selected incremental-parent verification.
-    """
+    """Discover source Timeshift snapshots."""
 
     return timeshift.list_remote_snapshots(
         ssh,
@@ -161,6 +163,8 @@ def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_in
     )
 
 
+def source_snapshot_index(snapshots) -> dict[str, SnapshotMeta]:
+    return {snap.name: snap for snap in snapshots if snap.subvolumes}
 
 
 def verify_source_identity_for_manual_snapshot(
@@ -273,20 +277,10 @@ def _maybe_create_manual_snapshot(
     return True
 
 
-def _snapshots_in_sync_order(snapshots: list[SnapshotMeta]) -> list[SnapshotMeta]:
-    """Return snapshots in the only order used for sending.
-
-    Timeshift output can vary by version/theme and may be newest-first in the
-    terminal. Btrfs incremental send chains are safest and easiest to reason
-    about when processed oldest-to-newest by the Timeshift timestamp name.
-
-    A snapshot created by [manual_snapshot] is deliberately not prioritized.
-    After creation, sync re-reads ``timeshift --list`` and this function places
-    it wherever its timestamp belongs in the normal chain.
-    """
+def _snapshots_in_sync_order(snapshots) -> list[SnapshotMeta]:
+    """Return source snapshots oldest-to-newest for Btrfs send."""
 
     return sorted(snapshots, key=lambda s: s.sort_key())
-
 
 def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
     """Print source snapshots in table form."""
@@ -507,7 +501,7 @@ def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, 
     try:
         # Confirm it is a Btrfs subvolume before deleting it. This avoids using
         # the backup tool as a dangerous rm -rf replacement.
-        btrfs.get_subvolume_meta(location="local", path=dest_path, name=subvolume_name, sudo=config.destination.sudo, btrfs_command=config.destination.btrfs_command)
+        _local_meta(config, dest_path, subvolume_name)
         btrfs.delete_local_subvolume(dest_path, config.destination.sudo, config.destination.btrfs_command)
     except Exception as exc:
         # If it is just an empty ordinary directory, removing it is safe. If it
@@ -551,13 +545,7 @@ def _read_local_destination_parent_metadata(
         raise SyncError(f"Incremental parent is recorded but missing on destination: {local_parent_path}")
 
     try:
-        return btrfs.get_subvolume_meta(
-            location="local",
-            path=local_parent_path,
-            name=subvolume_name,
-            sudo=config.destination.sudo,
-            btrfs_command=config.destination.btrfs_command,
-        )
+        return _local_meta(config, local_parent_path, subvolume_name)
     except Exception as exc:
         raise SyncError(f"Cannot read destination parent metadata: {local_parent_path}: {exc}") from exc
 
@@ -578,15 +566,7 @@ def _try_parent_source_candidate(
     was received from the old cached UUID.
     """
 
-    remote_parent = btrfs.get_subvolume_meta(
-        location="remote",
-        ssh=ssh,
-        sudo=config.source.sudo,
-        btrfs_command=config.source.btrfs_command,
-        path=candidate_path,
-        name=subvolume_name,
-        required=False,
-    )
+    remote_parent = _remote_meta(config, ssh, candidate_path, subvolume_name, required=False)
     if not remote_parent:
         return None, f"{candidate_label} not found or is not a readable Btrfs subvolume: {candidate_path}"
     if not remote_parent.uuid:
@@ -740,13 +720,7 @@ def _remote_path_matches_state_uuid(
         return False, f"invalid destination_path in state: {exc}"
     local_received_uuid: str | None = None
     try:
-        local_meta = btrfs.get_subvolume_meta(
-            location="local",
-            path=destination_path,
-            name=subvolume_name,
-            sudo=config.destination.sudo,
-            btrfs_command=config.destination.btrfs_command,
-        )
+        local_meta = _local_meta(config, destination_path, subvolume_name)
         local_received_uuid = local_meta.received_uuid
     except Exception as exc:
         return False, f"cannot read destination metadata for {destination_path}: {exc}"
@@ -761,15 +735,7 @@ def _remote_path_matches_state_uuid(
 
     failures: list[str] = []
     for candidate_path in candidate_paths:
-        remote_meta = btrfs.get_subvolume_meta(
-            location="remote",
-            ssh=ssh,
-            sudo=config.source.sudo,
-            btrfs_command=config.source.btrfs_command,
-            path=candidate_path,
-            name=subvolume_name,
-            required=False,
-        )
+        remote_meta = _remote_meta(config, ssh, candidate_path, subvolume_name, required=False)
         if not remote_meta or not remote_meta.uuid:
             failures.append(f"{candidate_path}: not found or no UUID")
             continue
@@ -807,7 +773,7 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
     if not state_snapshots:
         return None, "state is empty"
 
-    source_names = set(source_by_name.keys())
+    source_names = source_by_name.keys()
     checked_missing = 0
     checked_mismatch: list[str] = []
 
@@ -901,7 +867,7 @@ def _select_parent(
     candidate is tried.
     """
 
-    source_names = set(source_by_name.keys())
+    source_names = source_by_name.keys()
     state_parent = latest_synced_before(state, snapshot.name, subvolume_name, source_names)
 
     candidate_names: list[str] = []
@@ -1014,33 +980,18 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     ssh = SSHRunner(config.ssh)
     ssh.test()
 
-    def discover_source_snapshot_list(*, reason: str) -> tuple[list[SnapshotMeta], dict[str, SnapshotMeta]]:
-        """Read source Timeshift snapshots and return both list and name lookup."""
-
-        # Discovery uses Timeshift for names/tags. By default it avoids expensive
-        # btrfs metadata probes for every snapshot/subvolume. This makes dry-run
-        # and initial planning much faster on systems with many snapshots. If the
-        # user wants the old verification behavior, they can set
-        # source.verify_subvolumes_at_discovery = true.
+    def discover_source_index(reason: str) -> dict[str, SnapshotMeta]:
         print(f"Reading source Timeshift snapshots with sudo timeshift --list ({reason})...")
         _human_blank()
-        if config.source.verify_subvolumes_at_discovery:
-            print("Discovery verification: enabled, checking every configured subvolume with btrfs.")
-        else:
-            print("Discovery verification: fast mode, delaying btrfs checks until send time.")
+        print(
+            "Discovery verification: enabled, checking every configured subvolume with btrfs."
+            if config.source.verify_subvolumes_at_discovery
+            else "Discovery verification: fast mode, delaying btrfs checks until send time."
+        )
         _human_rule("----")
-        discovered = [
-            snap
-            for snap in list_source_snapshots(
-                config,
-                ssh,
-                include_btrfs_info=config.source.verify_subvolumes_at_discovery,
-            )
-            if snap.subvolumes
-        ]
-        return discovered, {snap.name: snap for snap in discovered}
+        return source_snapshot_index(list_source_snapshots(config, ssh, include_btrfs_info=config.source.verify_subvolumes_at_discovery))
 
-    snapshots, source_by_name = discover_source_snapshot_list(reason="before manual snapshot safety check")
+    source_by_name = discover_source_index("before manual snapshot safety check")
     before_manual_snapshot_names = set(source_by_name)
 
     created_manual_snapshot = _maybe_create_manual_snapshot(
@@ -1052,7 +1003,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         only_snapshot=only_snapshot,
     )
     if created_manual_snapshot:
-        snapshots, source_by_name = discover_source_snapshot_list(reason="after manual snapshot creation")
+        source_by_name = discover_source_index("after manual snapshot creation")
         created_names = sorted(set(source_by_name) - before_manual_snapshot_names)
         _human_blank()
         print("MANUAL SNAPSHOT SYNC ORDER")
@@ -1063,7 +1014,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         print("  sending rule: no special early send; snapshots are processed in normal oldest-to-newest order")
         _human_rule("----")
 
-    refreshed_metadata = refresh_snapshot_metadata_from_source(state, snapshots)
+    refreshed_metadata = refresh_snapshot_metadata_from_source(state, source_by_name.values())
     if refreshed_metadata:
         _human_blank()
         print("STATE METADATA REFRESH")
@@ -1080,10 +1031,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
     sync_floor_name: str | None = None
     if only_snapshot:
-        snapshots = [snap for snap in snapshots if snap.name == only_snapshot]
-        if not snapshots:
+        snapshots_to_sync = [source_by_name[only_snapshot]] if only_snapshot in source_by_name else []
+        if not snapshots_to_sync:
             raise SyncError(f"Source snapshot not found: {only_snapshot}")
     else:
+        snapshots_to_sync = source_by_name.values()
         sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
         if sync_floor_name:
             print(f"Sync floor: confirmed {sync_floor_name} ({sync_floor_reason})")
@@ -1106,7 +1058,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     trusted_parent_send_paths: set[str] = set()
 
     skipped_by_floor = 0
-    for snapshot in _snapshots_in_sync_order(snapshots):
+    for snapshot in _snapshots_in_sync_order(snapshots_to_sync):
         if sync_floor_name and snapshot.name <= sync_floor_name:
             skipped_by_floor += 1
             continue
@@ -1239,7 +1191,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             send_meta = None
             if dest_path.exists():
                 try:
-                    received_meta = btrfs.get_subvolume_meta(location="local", path=dest_path, name=subvol_name, sudo=config.destination.sudo, btrfs_command=config.destination.btrfs_command)
+                    received_meta = _local_meta(config, dest_path, subvol_name)
                 except Exception:
                     received_meta = None
 
@@ -1248,11 +1200,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # metadata lets later runs establish a prune-safe high-watermark without
             # maintaining tombstones for every deleted destination snapshot.
             try:
-                original_meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command, path=subvolume.path, name=subvol_name, required=False)
+                original_meta = _remote_meta(config, ssh, subvolume.path, subvol_name, required=False)
             except Exception:
                 original_meta = None
             try:
-                send_meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command, path=current_send_path, name=subvol_name, required=False)
+                send_meta = _remote_meta(config, ssh, current_send_path, subvol_name, required=False)
             except Exception:
                 send_meta = None
 

@@ -1,13 +1,17 @@
 # Versioning
 
-This build is version `0.6.9`.
+This build is version `0.7.1`.
 
 ## Changelog
 
-### 0.6.9
+### 0.7.1
 
-- Refactored Btrfs metadata reading into one shared `get_subvolume_meta()` helper for both local and remote `btrfs subvolume show` calls.
-- Removed the duplicated `remote_try_subvolume_show()` and `local_subvolume_show()` wrappers while keeping the same parser and behavior.
+- Version-only bump.
+
+### 0.6.11
+
+- Reused one parsed Timeshift source snapshot index per sync stage.
+- Manual snapshot creation still re-reads `timeshift --list` after creating a new snapshot, but metadata refresh, manual identity checks, sync-floor checks, parent selection, and the sync loop now share the same source index for that stage.
 
 ### 0.6.8
 
