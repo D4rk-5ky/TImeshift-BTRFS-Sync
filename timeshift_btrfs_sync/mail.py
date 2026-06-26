@@ -8,13 +8,11 @@ library modules: smtplib and email.message.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
 from typing import Any, Iterable
 import json
 import mimetypes
-import socket
 import smtplib
 
 
@@ -58,41 +56,6 @@ class MailConfig:
             return Path(self.password_file).expanduser().read_text(encoding="utf-8").strip()
         return self.password
 
-
-def utc_timestamp() -> str:
-    """Return an ISO-8601 UTC timestamp suitable for notification bodies."""
-
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def build_payload(
-    *,
-    job_name: str,
-    command: str,
-    state: str,
-    success: bool,
-    exit_code: int,
-    stderr_tail: str = "",
-    error: str = "",
-    version: str = "",
-) -> dict[str, Any]:
-    """Build the status payload used in the email body."""
-
-    return {
-        "state": state,
-        "status": state,
-        "success": success,
-        "job": job_name,
-        "name": job_name,
-        "command": command,
-        "exit_code": exit_code,
-        "error": error,
-        "stderr": stderr_tail,
-        "timestamp": utc_timestamp(),
-        "host": socket.gethostname(),
-        "app": "timeshift-btrfs-sync",
-        "version": version,
-    }
 
 
 def _subject(config: MailConfig, payload: dict[str, Any]) -> str:

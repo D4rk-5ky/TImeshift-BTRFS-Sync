@@ -12,8 +12,9 @@ from .commands import CommandError
 from .config import ConfigError, load_config
 from .lock import FileLock
 from .log import active_logger, create_run_logger
-from .mqtt import build_payload, publish_status
-from .mail import build_payload as build_mail_payload, send_status as send_mail_status
+from .mail import send_status as send_mail_status
+from .mqtt import publish_status
+from .notify import build_notification_payload
 from .retention import prune
 from .ssh import SSHRunner
 from .state import load_state, refresh_snapshot_metadata_from_source, save_state
@@ -47,36 +48,7 @@ def _stderr_tail_for_exception(exc: BaseException, logger) -> str:
     return ""
 
 
-def _publish_mqtt_status(config, command_name: str, *, success: bool, exit_code: int, error: str = "", stderr_tail: str = "") -> None:
-    """Publish optional MQTT status without changing the command exit code."""
-
-    mqtt_config = getattr(config, "mqtt", None)
-    if not mqtt_config or not mqtt_config.enabled:
-        return
-    if success and not mqtt_config.notify_on_success:
-        return
-    if not success and not mqtt_config.notify_on_failure:
-        return
-
-    payload = build_payload(
-        job_name=config.name,
-        command=command_name,
-        state="success" if success else "failure",
-        success=success,
-        exit_code=exit_code,
-        stderr_tail=stderr_tail,
-        error=error,
-        version=__version__,
-    )
-    try:
-        publish_status(mqtt_config, payload)
-    except Exception as mqtt_exc:
-        print(f"WARNING: MQTT notification failed: {mqtt_exc}", file=sys.stderr)
-
-
-
-
-def _send_mail_status(
+def _send_notifications(
     config,
     command_name: str,
     *,
@@ -86,17 +58,9 @@ def _send_mail_status(
     stderr_tail: str = "",
     attachment_paths: list[Path] | None = None,
 ) -> None:
-    """Send optional email status without changing the command exit code."""
+    """Send optional MQTT/email status without changing the command exit code."""
 
-    mail_config = getattr(config, "mail", None)
-    if not mail_config or not mail_config.enabled:
-        return
-    if success and not mail_config.notify_on_success:
-        return
-    if not success and not mail_config.notify_on_failure:
-        return
-
-    payload = build_mail_payload(
+    payload = build_notification_payload(
         job_name=config.name,
         command=command_name,
         state="success" if success else "failure",
@@ -106,10 +70,22 @@ def _send_mail_status(
         error=error,
         version=__version__,
     )
-    try:
-        send_mail_status(mail_config, payload, attachments=attachment_paths)
-    except Exception as mail_exc:
-        print(f"WARNING: mail notification failed: {mail_exc}", file=sys.stderr)
+
+    mqtt_config = getattr(config, "mqtt", None)
+    if mqtt_config and mqtt_config.enabled:
+        if (success and mqtt_config.notify_on_success) or (not success and mqtt_config.notify_on_failure):
+            try:
+                publish_status(mqtt_config, payload)
+            except Exception as mqtt_exc:
+                print(f"WARNING: MQTT notification failed: {mqtt_exc}", file=sys.stderr)
+
+    mail_config = getattr(config, "mail", None)
+    if mail_config and mail_config.enabled:
+        if (success and mail_config.notify_on_success) or (not success and mail_config.notify_on_failure):
+            try:
+                send_mail_status(mail_config, payload, attachments=attachment_paths)
+            except Exception as mail_exc:
+                print(f"WARNING: mail notification failed: {mail_exc}", file=sys.stderr)
 
 
 def _mail_attachment_paths(logger) -> list[Path] | None:
@@ -138,22 +114,13 @@ def _with_logging(config, command_name: str, callback):
             logger.info("Logging is active before command work begins")
         try:
             result = int(callback() or 0)
-            _publish_mqtt_status(config, command_name, success=(result == 0), exit_code=result)
-            _send_mail_status(config, command_name, success=(result == 0), exit_code=result, attachment_paths=_mail_attachment_paths(logger))
+            _send_notifications(config, command_name, success=(result == 0), exit_code=result, attachment_paths=_mail_attachment_paths(logger))
             return result
         except KeyboardInterrupt as exc:
             if logger:
                 logger.err("ERROR: Interrupted by user")
             stderr_tail = _stderr_tail_for_exception(exc, logger)
-            _publish_mqtt_status(
-                config,
-                command_name,
-                success=False,
-                exit_code=130,
-                error="Interrupted by user",
-                stderr_tail=stderr_tail,
-            )
-            _send_mail_status(
+            _send_notifications(
                 config,
                 command_name,
                 success=False,
@@ -168,15 +135,7 @@ def _with_logging(config, command_name: str, callback):
                 logger.err(f"ERROR: {exc}")
             stderr_tail = _stderr_tail_for_exception(exc, logger)
             exit_code = _failure_exit_code(exc)
-            _publish_mqtt_status(
-                config,
-                command_name,
-                success=False,
-                exit_code=exit_code,
-                error=str(exc),
-                stderr_tail=stderr_tail,
-            )
-            _send_mail_status(
+            _send_notifications(
                 config,
                 command_name,
                 success=False,

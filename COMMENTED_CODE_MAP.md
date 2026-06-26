@@ -136,6 +136,10 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 - `TeeTextIO`: terminal/file tee.
 - `emit_success_summary()`, `terminal_stdout()`, `terminal_stderr()`, `get_logger()`, `active_logger()`, `create_run_logger()`, `tee_pipe_to_log()`: global logging helpers.
 
+### `notify.py`
+
+Shared notification helpers. `utc_timestamp()` creates the common UTC timestamp, and `build_notification_payload()` builds the single status dictionary reused by MQTT and email.
+
 ### `mail.py` / `mqtt.py`
 
 - `MailConfig`, `MQTTConfig`: notification config and password-file support.

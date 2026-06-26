@@ -1,10 +1,10 @@
 # Versioning
 
-This build is version `0.7.6`.
+This build is version `0.7.7`.
 
 ## Changelog
 
-### 0.7.6
+### 0.7.7
 
 - Expanded the top-level `ts-btrfs --help` output so every command is easy to see: `init-config`, `test-ssh`, `list-source`, `sync`, `prune`, `create-manual`, and `show-state`.
 - Added explicit top-level guidance that command-specific flags are shown with `ts-btrfs <command> --help`, for example `ts-btrfs sync --help`.

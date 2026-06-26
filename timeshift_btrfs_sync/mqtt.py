@@ -10,7 +10,6 @@ usable without paho-mqtt installed when [mqtt].enabled is false.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 import json
 import socket
@@ -47,45 +46,6 @@ class MQTTConfig:
                 return fh.read().strip()
         return self.password
 
-
-def utc_timestamp() -> str:
-    """Return an ISO-8601 UTC timestamp suitable for JSON payloads."""
-
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-
-
-def build_payload(
-    *,
-    job_name: str,
-    command: str,
-    state: str,
-    success: bool,
-    exit_code: int,
-    stderr_tail: str = "",
-    error: str = "",
-    version: str = "",
-) -> dict[str, Any]:
-    """Build the Home-Assistant-friendly JSON status payload.
-
-    The payload intentionally uses simple top-level keys so Home Assistant can
-    use it directly with MQTT sensors, templates, or automations.
-    """
-
-    return {
-        "state": state,
-        "status": state,
-        "success": success,
-        "job": job_name,
-        "name": job_name,
-        "command": command,
-        "exit_code": exit_code,
-        "error": error,
-        "stderr": stderr_tail,
-        "timestamp": utc_timestamp(),
-        "host": socket.gethostname(),
-        "app": "timeshift-btrfs-sync",
-        "version": version,
-    }
 
 
 def publish_status(config: MQTTConfig, payload: dict[str, Any]) -> None:
