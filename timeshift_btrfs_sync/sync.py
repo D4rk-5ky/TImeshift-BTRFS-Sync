@@ -427,42 +427,25 @@ def _cleanup_superseded_source_cache(
         _human_blank()
         return
 
-    # The cache layout is <cache_root>/<snapshot-name>/<subvolume>. The
-    # per-snapshot parent was created with `btrfs subvolume create`. Only delete
-    # that date parent after *no* child subvolumes remain below it. Check the
-    # actual Btrfs subvolume list under the date parent instead of assuming only
-    # the configured subvolume names exist. This avoids deleting the parent
-    # after @ while @home is still waiting, and it also protects unexpected
-    # leftovers from interrupted or older runs.
     parent_cache_dir = str(Path(parent_send_path).parent)
     if btrfs.path_is_under_cache(parent_cache_dir, config.source.cache_root):
-        remaining_children = btrfs.remote_cache_child_subvolumes(
+        remaining = btrfs.remote_list_child_subvolumes(
             ssh,
             sudo=config.source.sudo,
             btrfs_command=config.source.btrfs_command,
-            cache_root=config.source.cache_root,
-            cache_parent=parent_cache_dir,
+            path=parent_cache_dir,
         )
 
-        if remaining_children is None:
+        if remaining is None:
             print()
-            print(
-                "SOURCE CACHE PARENT KEEP: "
-                f"could not verify that {parent_cache_dir} has no child subvolumes"
-            )
-        elif remaining_children:
+            print(f"SOURCE CACHE PARENT KEEP: could not verify that {parent_cache_dir} has no child subvolumes")
+        elif remaining:
+            children = [btrfs.cache_child_display_path(parent_cache_dir, child) for child in remaining]
             print()
-            print(
-                "SOURCE CACHE PARENT KEEP: "
-                f"{parent_cache_dir} still contains cached {', '.join(remaining_children)}"
-            )
+            print(f"SOURCE CACHE PARENT KEEP: {parent_cache_dir} still contains cached {', '.join(children)}")
         else:
             parent_result = btrfs.remote_delete_subvolume(
-                ssh,
-                config.source.sudo,
-                config.source.btrfs_command,
-                parent_cache_dir,
-                check=False,
+                ssh, config.source.sudo, config.source.btrfs_command, parent_cache_dir, check=False
             )
             if parent_result.returncode == 0:
                 print()

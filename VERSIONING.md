@@ -1,8 +1,13 @@
 # Versioning
 
-This build is version `0.7.2`.
+This build is version `0.7.3`.
 
 ## Changelog
+
+### 0.7.3
+
+- Consolidated source cache listing helpers around `remote_list_child_subvolumes`, `remote_cache_contains`, and cache child display formatting.
+- Removed older overlapping cache list parsing/existence helpers while keeping the same cache parent cleanup behavior.
 
 ### 0.7.2
 
