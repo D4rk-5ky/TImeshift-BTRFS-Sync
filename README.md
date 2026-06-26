@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.7.9
+# timeshift-btrfs-sync v0.8.0
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 

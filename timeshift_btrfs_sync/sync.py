@@ -1093,9 +1093,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 # If stream.btrfs_verbose is enabled, let Btrfs operation
                 # output appear live in the terminal. mbuffer remains the real
                 # byte/throughput progress display.
-                passthrough_left_stderr=config.stream.btrfs_verbose,
                 passthrough_right_stdout=config.stream.btrfs_verbose,
-                passthrough_right_stderr=config.stream.btrfs_verbose,
             )
             _human_rule("---")
 

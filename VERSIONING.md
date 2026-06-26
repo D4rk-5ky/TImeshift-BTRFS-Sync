@@ -1,8 +1,17 @@
 # Versioning
 
-This build is version `0.7.9`.
+This build is version `0.8.0`.
 
 ## Changelog
+
+### 0.8.0
+
+- Version-only bump from 0.7.10.
+
+### 0.7.10
+
+- Refactored pipeline stream reader setup into one compact stream-routing table.
+- Preserved successful btrfs/mbuffer stderr routing to `.btrfs`/`.mbuffer` without polluting `.err`.
 
 ### 0.7.9
 

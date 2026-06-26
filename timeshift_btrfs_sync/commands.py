@@ -149,10 +149,42 @@ def run_local(
     return result
 
 
-def _join_text(parts: list[str]) -> str:
-    """Join captured stream text chunks into one string."""
 
-    return "".join(parts)
+def _start_pipeline_readers(streams: list[tuple]) -> list:
+    """Start tee readers from compact stream routing specs."""
+
+    threads = []
+    for pipe, name, terminal, to_mbuffer, to_btrfs_out, capture, _ in streams:
+        if pipe is None:
+            continue
+        threads.append(runlog.tee_pipe_to_log(
+            pipe,
+            stream_name=name,
+            terminal=terminal,
+            to_mbuffer=to_mbuffer,
+            to_btrfs_out=to_btrfs_out,
+            to_err=False,
+            capture=capture,
+        ))
+    return threads
+
+
+def _failed_stderr(streams: list[tuple]) -> str:
+    """Return captured pipeline stderr for streams that belong in failures."""
+
+    return "".join("".join(capture) for *_, capture, err_label in streams if err_label)
+
+
+def _log_failed_streams(streams: list[tuple]) -> None:
+    """Copy captured failed pipeline streams to .err."""
+
+    logger = runlog.get_logger()
+    if not logger:
+        return
+    for *_, capture, err_label in streams:
+        if err_label and capture:
+            logger.err(f"[{err_label}]")
+            logger.err("".join(capture))
 
 
 def stream_pipeline(
@@ -164,9 +196,7 @@ def stream_pipeline(
     left_env: dict[str, str] | None = None,
     middle_env: dict[str, str] | None = None,
     right_env: dict[str, str] | None = None,
-    passthrough_left_stderr: bool = False,
     passthrough_right_stdout: bool = False,
-    passthrough_right_stderr: bool = False,
 ) -> None:
     """Stream left command into optional middle command, then right command.
 
@@ -242,59 +272,21 @@ def stream_pipeline(
     )
     receive_stdin.close()
 
-    threads = []
     left_err_chunks: list[str] = []
     middle_err_chunks: list[str] = []
     right_out_chunks: list[str] = []
     right_err_chunks: list[str] = []
+    stderr_terminal = runlog.terminal_stderr()
 
-    # Remote btrfs send writes normal successful status lines like
-    # "At subvol ..." to stderr. Keep it visible on the terminal and in .btrfs,
-    # but do not mark the run as having .err output unless the pipeline fails.
-    threads.append(runlog.tee_pipe_to_log(
-        left.stderr,
-        stream_name="remote-send-stderr",
-        terminal=runlog.terminal_stderr(),
-        to_mbuffer=False,
-        to_btrfs_out=bool(logger),
-        to_err=False,
-        capture=left_err_chunks,
-    ))
-
-    # mbuffer writes normal progress to stderr. That belongs in .mbuffer. If the
-    # mbuffer process fails, the captured text is copied to .err below.
-    if middle and middle.stderr is not None:
-        threads.append(runlog.tee_pipe_to_log(
-            middle.stderr,
-            stream_name="mbuffer",
-            terminal=runlog.terminal_stderr(),
-            to_mbuffer=bool(logger),
-            to_btrfs_out=False,
-            to_err=False,
-            capture=middle_err_chunks,
-        ))
-
-    # btrfs receive stdout is only shown on the terminal in verbose mode, but it
-    # is still useful in .btrfs because receive also reports normal status there.
-    # btrfs receive stderr is captured and copied to .err only on pipeline failure.
-    threads.append(runlog.tee_pipe_to_log(
-        right.stdout,
-        stream_name="local-receive-stdout",
-        terminal=runlog.terminal_stdout() if passthrough_right_stdout else None,
-        to_mbuffer=False,
-        to_btrfs_out=bool(logger),
-        to_err=False,
-        capture=right_out_chunks,
-    ))
-    threads.append(runlog.tee_pipe_to_log(
-        right.stderr,
-        stream_name="local-receive-stderr",
-        terminal=runlog.terminal_stderr(),
-        to_mbuffer=False,
-        to_btrfs_out=bool(logger),
-        to_err=False,
-        capture=right_err_chunks,
-    ))
+    # Tuple: pipe, stream name, terminal, .mbuffer?, .btrfs?, capture, failure .err label.
+    # Successful btrfs/mbuffer stderr is captured but only copied to .err on failure.
+    streams = [
+        (left.stderr, "remote-send-stderr", stderr_terminal, False, bool(logger), left_err_chunks, "remote-send-stderr"),
+        (middle.stderr if middle else None, "mbuffer", stderr_terminal, bool(logger), False, middle_err_chunks, "mbuffer-stderr"),
+        (right.stdout, "local-receive-stdout", runlog.terminal_stdout() if passthrough_right_stdout else None, False, bool(logger), right_out_chunks, None),
+        (right.stderr, "local-receive-stderr", stderr_terminal, False, bool(logger), right_err_chunks, "local-receive-stderr"),
+    ]
+    threads = _start_pipeline_readers(streams)
 
     right_return = right.wait()
     middle_return = middle.wait() if middle else 0
@@ -308,8 +300,8 @@ def stream_pipeline(
         logger.pipeline_summary(returncode)
 
     if left_return != 0 or middle_return != 0 or right_return != 0:
-        stderr = _join_text(left_err_chunks) + _join_text(middle_err_chunks) + _join_text(right_err_chunks)
-        stdout = _join_text(right_out_chunks)
+        stderr = _failed_stderr(streams)
+        stdout = "".join(right_out_chunks)
         pipe_text = shlex.join(left_cmd)
         if middle_cmd:
             pipe_text += " | " + shlex.join(middle_cmd)
@@ -320,14 +312,6 @@ def stream_pipeline(
         # copy those captured streams to .err when the pipeline actually failed.
         if logger:
             logger.err("PIPELINE FAILED: " + pipe_text)
-            if left_err_chunks:
-                logger.err("[remote-send-stderr]")
-                logger.err(_join_text(left_err_chunks))
-            if middle_err_chunks:
-                logger.err("[mbuffer-stderr]")
-                logger.err(_join_text(middle_err_chunks))
-            if right_err_chunks:
-                logger.err("[local-receive-stderr]")
-                logger.err(_join_text(right_err_chunks))
+            _log_failed_streams(streams)
 
         raise CommandError(pipe_text, returncode, stdout, stderr)
