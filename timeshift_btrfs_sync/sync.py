@@ -167,21 +167,27 @@ def source_snapshot_index(snapshots) -> dict[str, SnapshotMeta]:
     return {snap.name: snap for snap in snapshots if snap.subvolumes}
 
 
-def verify_source_identity_for_manual_snapshot(
+def confirm_source_identity_before_manual_snapshot(
     config: AppConfig,
     ssh: SSHRunner,
     state: dict,
-    source_by_name: dict[str, SnapshotMeta],
-) -> tuple[str, str]:
-    """Require the configured source to match existing destination snapshots.
+    source_by_name: dict[str, SnapshotMeta] | None = None,
+    load_source_index=None,
+) -> tuple[str | None, str]:
+    """Print and enforce the shared manual-snapshot source identity guard."""
 
-    This is used before the app asks source Timeshift to create a new manual
-    snapshot when the destination already contains backups. It prevents writing
-    a new stale snapshot to the wrong mounted OS or wrong source host. The match
-    is not name-only: it walks state.json newest-to-oldest, finds an entry that
-    still exists in `timeshift --list`, and confirms Btrfs UUID / destination
-    received_uuid identity.
-    """
+    print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+    if not _destination_has_existing_snapshots(config):
+        print("  destination: no existing snapshots found")
+        print("  first full seed is allowed; later snapshots in the same run become incremental")
+        return None, "empty destination; first full seed allowed"
+
+    print("  destination: existing snapshots found")
+    print("  checking existing source Timeshift list against state.json UUID history")
+    if source_by_name is None:
+        if load_source_index is None:
+            raise SyncError("Internal error: source Timeshift index is required for manual snapshot identity check")
+        source_by_name = load_source_index()
 
     confirmed_name, reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
     if not confirmed_name:
@@ -195,6 +201,8 @@ def verify_source_identity_for_manual_snapshot(
             "Use an empty/separate target_root for a new full backup, or repair "
             "state/cache so a matching source/destination parent can be proven."
         )
+    print(f"  confirmed source anchor: {confirmed_name}")
+    print(f"  reason: {reason}")
     return confirmed_name, reason
 
 
@@ -235,18 +243,7 @@ def _maybe_create_manual_snapshot(
         return False
 
     _human_blank()
-    print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
-    if _destination_has_existing_snapshots(config):
-        print("  destination: existing snapshots found")
-        print("  checking existing source Timeshift list against state.json UUID history")
-
-        confirmed_name, reason = verify_source_identity_for_manual_snapshot(config, ssh, state, source_by_name)
-
-        print(f"  confirmed source anchor: {confirmed_name}")
-        print(f"  reason: {reason}")
-    else:
-        print("  destination: no existing snapshots found")
-        print("  first full seed is allowed; later snapshots in the same run become incremental")
+    confirm_source_identity_before_manual_snapshot(config, ssh, state, source_by_name)
     _human_rule("----")
 
     _human_blank()
@@ -332,12 +329,6 @@ def _destination_has_existing_snapshots(config: AppConfig) -> bool:
             if (child / subvol_name).exists():
                 return True
     return False
-
-
-def destination_has_existing_snapshots(config: AppConfig) -> bool:
-    """Public wrapper used by CLI commands that need the same destination guard."""
-
-    return _destination_has_existing_snapshots(config)
 
 
 def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: SubvolumeMeta) -> str:

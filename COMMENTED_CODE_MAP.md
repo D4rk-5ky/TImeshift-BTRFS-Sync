@@ -103,11 +103,11 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 - `prepare_destination()`: prepare destination paths.
 - `list_source_snapshots()`: read source list, optionally verify Btrfs metadata.
 - `source_snapshot_index()`: one Timeshift snapshot dict for the current stage.
-- `verify_source_identity_for_manual_snapshot()`: require UUID-confirmed source anchor before auto manual snapshot when destination is non-empty.
+- `confirm_source_identity_before_manual_snapshot()`: shared guard for automatic and standalone manual snapshot creation; empty destination allows first full seed, otherwise UUID anchor is required.
 - `_maybe_create_manual_snapshot()`: create manual snapshot and force a new source list.
 - `_snapshots_in_sync_order()`, `print_snapshot_table()`: order/display snapshots.
 - `_dest_subvolume_path()`, `_target_snapshot_dir()`: destination path builders.
-- `_destination_has_existing_snapshots()`, `destination_has_existing_snapshots()`: non-empty destination checks.
+- `_destination_has_existing_snapshots()`: non-empty destination check used by send and manual-snapshot guards.
 - `_preview_send_path()`, `_ensure_source_send_path()`: choose/create current read-only send path.
 - `_cleanup_superseded_source_cache()`: delete old cache child; delete parent only when empty.
 - `_cleanup_incomplete_destination_receive()`: remove partial receives.

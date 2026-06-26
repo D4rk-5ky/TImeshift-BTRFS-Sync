@@ -18,7 +18,7 @@ from .notify import build_notification_payload
 from .retention import prune
 from .ssh import SSHRunner
 from .state import load_state, refresh_snapshot_metadata_from_source, save_state
-from .sync import list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once, verify_source_identity_for_manual_snapshot, destination_has_existing_snapshots
+from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
 from .timeshift import create_remote_manual_snapshot
 
 
@@ -281,26 +281,15 @@ def cmd_create_manual(args) -> int:
     def _run() -> int:
         ssh = SSHRunner(config.ssh)
         ssh.test()
-        print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
-        if destination_has_existing_snapshots(config):
-            print("  destination: existing snapshots found")
-            print("  checking existing source Timeshift list against state.json UUID history")
-            source_by_name = source_snapshot_index(
+        confirm_source_identity_before_manual_snapshot(
+            config,
+            ssh,
+            load_state(config.state_file, config.destination.target_root),
+            load_source_index=lambda: source_snapshot_index(
                 list_source_snapshots(config, ssh, include_btrfs_info=config.source.verify_subvolumes_at_discovery)
-            )
-            confirmed_name, reason = verify_source_identity_for_manual_snapshot(
-                config,
-                ssh,
-                load_state(config.state_file, config.destination.target_root),
-                source_by_name,
-            )
-            print(f"  confirmed source anchor: {confirmed_name}")
-            print(f"  reason: {reason}")
-            print()
-        else:
-            print("  destination: no existing snapshots found")
-            print("  first full seed is allowed")
-            print()
+            ),
+        )
+        print()
         create_remote_manual_snapshot(ssh, sudo=config.source.sudo, timeshift_command=config.source.timeshift_command, comment=args.comment)
         print("Requested remote Timeshift on-demand snapshot.")
         return 0
