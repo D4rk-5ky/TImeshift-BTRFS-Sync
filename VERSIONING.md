@@ -1,8 +1,19 @@
 # Versioning
 
-This build is version `0.8.4`.
+This build is version `0.8.6`.
 
 ## Changelog
+
+### 0.8.6
+
+- Fixed retention-based source cache cleanup to pre-check which cache subvolumes still exist before deleting.
+- Missing source cache paths are now skipped cleanly instead of producing noisy Btrfs delete/list errors.
+- Removed duplicate stderr printing from cache cleanup failures; command stderr is already emitted by the command runner.
+
+### 0.8.5
+
+- Changed source cache cleanup to retention-based cleanup. `sync` now keeps every read-only cache snapshot it creates, and `prune` deletes matching source cache snapshots only for destination snapshots selected by the same retention delete plan.
+- This preserves more common Btrfs UUID ground when short-lived snapshots are removed later.
 
 ### 0.8.4
 

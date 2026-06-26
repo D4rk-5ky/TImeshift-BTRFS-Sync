@@ -57,10 +57,10 @@ class SourceConfig:
     cache_root: str | None = None
     create_readonly_cache: bool = True
 
-    # Cleanup option. When true, temporary source-side cache snapshots are
-    # deleted after they are superseded by a newer successful send. The newest
-    # cache snapshot per subvolume is kept because it is needed as the parent
-    # for the next incremental send, including the next program run.
+    # Backward-compatible option name. When true, source-side read-only cache
+    # snapshots are cleaned only during prune, and only for snapshots that the
+    # destination retention plan deletes. Sync itself keeps every cache snapshot
+    # it creates so short-lived hourly parents do not erase common UUID ground.
     cleanup_superseded_cache: bool = True
 
     # Speed option. False means discovery does not run btrfs subvolume show for

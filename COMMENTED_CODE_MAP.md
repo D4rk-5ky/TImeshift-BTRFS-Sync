@@ -6,7 +6,7 @@ intentionally not listed here; historical changes belong in `VERSIONING.md`.
 
 The purpose of this file is to explain what each part does and why some code is
 intentionally conservative, especially around Btrfs UUID safety, dry-run safety,
-cache handling, state metadata refresh, and pipeline logging.
+retention-based cache handling, state metadata refresh, and pipeline logging.
 
 ## App flow
 
@@ -41,7 +41,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `timeshift.py` | Remote Timeshift list/create command helpers and parser. |
 | `commands.py` | Local subprocess runner and send/receive stream pipeline. |
 | `state.py` | `state.json` loading, saving, relative paths, metadata refresh, sync markers. |
-| `retention.py` | Retention keep/delete planning and destination pruning. |
+| `retention.py` | Retention keep/delete planning, destination pruning, and matching source cache pruning. |
 | `log.py` | Split run logs: `.log`, `.err`, `.btrfs`, `.mbuffer`, `.succes`. |
 | `notify.py` | Shared notification payload/timestamp builder. |
 | `mail.py` | Optional SMTP status email with safe attachment filtering. |
@@ -66,7 +66,8 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 
 - `ManualSnapshotConfig`: automatic source on-demand snapshot settings.
 - `SourceConfig`: source SSH, Timeshift root, subvolume names, cache root, and
-  discovery/cleanup behavior.
+  discovery/cache behavior. Cache cleanup is retention-based so sync keeps every
+  read-only cache snapshot it creates until prune deletes the matching destination snapshot.
 - `DestinationConfig`: destination root, snapshot folder, and receive behavior.
 - `StreamConfig`: optional stream helper settings such as `mbuffer`.
 - `StreamConfig.command()`: returns the configured stream helper argv or `None`.
@@ -150,6 +151,9 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   path, not a similarly named Timeshift path elsewhere.
 - `remote_list_child_subvolumes()`: lists existing child subvolumes below a source
   cache parent.
+- `remote_cache_existing_paths()`: lists `source.cache_root` once and returns only
+  requested cache subvolumes that currently exist, so prune skips missing source
+  cache paths without noisy delete errors.
 - `remote_cache_contains()`: tests if a specific cache subvolume exists.
 - `remote_cache_is_empty()`: checks whether a cache parent has any children left.
 - `cache_child_display_path()`: formats cache child paths for logs.
@@ -160,7 +164,6 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   parent cache snapshots because the UUID would change.
 - `path_is_under_cache()`: tells cleanup whether a path belongs to cache root.
 - `remote_delete_subvolume()`: deletes a remote Btrfs subvolume.
-- `remote_try_delete_cache_subvolume()`: best-effort source cache cleanup.
 - `remote_send_cmd()`: builds `btrfs send` argv, including `-p` for incremental.
 - `local_receive_cmd()`: builds `btrfs receive` argv for the destination folder.
 - `delete_local_subvolume()`: deletes a destination Btrfs subvolume.
@@ -232,8 +235,6 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_preview_send_path()`: predicts whether a writable snapshot would use cache,
   without creating anything during dry-run previews.
 - `_ensure_source_send_path()`: verifies/creates the current read-only send path.
-- `_cleanup_superseded_source_cache()`: deletes older cache child only after a
-  newer send succeeds; deletes cache parent only when empty.
 - `_cleanup_incomplete_destination_receive()`: removes partial destination
   receives after failed attempts before retrying.
 - `_read_local_destination_parent_metadata()`: reads metadata for a candidate
@@ -254,7 +255,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   unsafe existing-destination sends.
 - `sync_once()`: complete sync transaction for one config/run, including source
   discovery, optional manual creation, metadata refresh, send/receive, state
-  writes, summaries, and optional prune.
+  writes, and summaries. It intentionally keeps all created source cache snapshots; cache cleanup happens later through retention/prune.
 
 ### `retention.py`
 
@@ -266,13 +267,20 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   that distinction.
 - `_delete_reason_for_snapshot()`: explains the first applicable delete reason.
 - `_delete_reasons()`: returns all human-readable delete reasons.
+- `_source_cache_delete_paths()`: returns cached `send_path` entries for a snapshot
+  selected by destination retention. It only returns paths under `source.cache_root`.
+- `_cleanup_source_cache_for_pruned_snapshot()`: after destination deletion succeeds,
+  checks which matching source cache subvolumes still exist, skips missing paths,
+  best-effort deletes existing paths, and removes the timestamp cache parent only
+  when Btrfs says no cached child subvolumes remain.
 - `build_prune_plan()`: computes retention keep/delete decisions from state,
   source tags, and config; it does not delete anything.
 - `_delete_snapshot()`: deletes destination Btrfs subvolumes for one snapshot.
 - `print_prune_plan()`: prints retention summary and delete plan to terminal and
-  `.succes`.
+  `.succes`, including source cache paths that would follow each destination delete.
 - `prune()`: refreshes metadata if needed, prints plan, and only deletes in real
-  mode with explicit confirmation.
+  mode with explicit confirmation. Source cache cleanup follows the same delete plan
+  and runs only after destination deletion succeeds.
 
 ### `log.py`
 
@@ -386,7 +394,9 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   destination.
 - **Current writable snapshots may be cached read-only.** That is safe because the
   new cache snapshot becomes the current send object, not a fake replacement for
-  an old parent.
+  an old parent. Sync keeps these cache snapshots until retention deletes the
+  matching destination snapshot so short-lived hourly parents do not erase common
+  UUID ground too early.
 - **Destination paths in state are relative.** Moving the whole backup root should
   not break state; path escape is still rejected.
 - **Timeshift metadata refresh is restricted.** Only `tags`, `comment`, `created`,

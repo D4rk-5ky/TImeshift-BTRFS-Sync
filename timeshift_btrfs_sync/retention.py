@@ -9,6 +9,7 @@ from .config import AppConfig
 from .models import tags_text
 from .state import remove_snapshot_from_state, resolve_destination_path, save_state
 from .log import emit_success_summary
+from .ssh import SSHRunner
 
 
 @dataclass(slots=True)
@@ -90,6 +91,89 @@ def _delete_reasons(plan: PrunePlan, name: str) -> list[str]:
         if reason.startswith("delete: "):
             reasons.append(reason.removeprefix("delete: "))
     return reasons or ["outside retention"]
+
+def _source_cache_delete_paths(config: AppConfig, snapshot_state: dict) -> list[tuple[str, str]]:
+    """Return source cache send paths that follow a destination prune decision."""
+
+    if not config.source.cleanup_superseded_cache or not config.source.cache_root:
+        return []
+    paths: dict[str, str] = {}
+    for subvol_name, subvol in snapshot_state.get("subvolumes", {}).items():
+        send_path = subvol.get("send_path")
+        if isinstance(send_path, str) and btrfs.path_is_under_cache(send_path, config.source.cache_root):
+            paths[subvol_name] = send_path
+    return sorted(paths.items())
+
+
+def _cleanup_source_cache_for_pruned_snapshot(
+    config: AppConfig,
+    ssh: SSHRunner,
+    snapshot_name: str,
+    snapshot_state: dict,
+) -> None:
+    """Best-effort source cache cleanup for one destination-pruned snapshot."""
+
+    cache_paths = _source_cache_delete_paths(config, snapshot_state)
+    if not cache_paths:
+        return
+
+    print()
+    print("SOURCE CACHE RETENTION CLEANUP")
+    print(f"  snapshot: {snapshot_name}")
+
+    existing_paths = btrfs.remote_cache_existing_paths(
+        ssh,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        cache_root=config.source.cache_root,
+        paths=[send_path for _, send_path in cache_paths],
+    )
+    if existing_paths is None:
+        print("  warning: could not list source cache; skipping source cache cleanup")
+        return
+
+    parent_dirs: set[str] = set()
+    for subvol_name, send_path in cache_paths:
+        if send_path not in existing_paths:
+            print(f"  cache {subvol_name}: missing on source, skipping {send_path}")
+            continue
+        parent_dirs.add(str(Path(send_path).parent))
+        print(f"  cache {subvol_name}: deleting {send_path}")
+        result = btrfs.remote_delete_subvolume(
+            ssh,
+            config.source.sudo,
+            config.source.btrfs_command,
+            send_path,
+            check=False,
+        )
+        if result.returncode != 0:
+            print("  warning: source cache subvolume cleanup failed; leaving it in place")
+
+    for parent_dir in sorted(parent_dirs):
+        empty = btrfs.remote_cache_is_empty(
+            ssh,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            cache_root=config.source.cache_root,
+            path=parent_dir,
+        )
+        if empty is True:
+            result = btrfs.remote_delete_subvolume(
+                ssh,
+                config.source.sudo,
+                config.source.btrfs_command,
+                parent_dir,
+                check=False,
+            )
+            if result.returncode == 0:
+                print(f"  cache parent: deleted {parent_dir}")
+            else:
+                print("  warning: source cache parent cleanup failed; leaving it in place")
+        elif empty is None:
+            print(f"  cache parent: could not verify empty, keeping {parent_dir}")
+        else:
+            print(f"  cache parent: still has cached subvolumes, keeping {parent_dir}")
+
 
 def build_prune_plan(config: AppConfig, state: dict) -> PrunePlan:
     """Build retention plan from state without deleting anything.
@@ -197,7 +281,7 @@ def _delete_snapshot(config: AppConfig, state: dict, snapshot_name: str) -> None
     remove_snapshot_from_state(state, snapshot_name)
 
 
-def print_prune_plan(plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
+def print_prune_plan(config: AppConfig, plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
     """Write an easy-to-read retention summary to terminal and .succes."""
 
     snapshots = state.get("snapshots", {})
@@ -222,6 +306,11 @@ def print_prune_plan(plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
         snapshot_state = snapshots.get(name, {})
         action = "WOULD DELETE" if dry_run else "DELETE"
         lines.append(f"  [{action}] {name}  tags={tags_text(snapshot_state.get('tags', []))}")
+        cache_paths = _source_cache_delete_paths(config, snapshot_state)
+        if cache_paths:
+            lines.append("      source cache cleanup follows this destination prune decision:")
+            for subvol_name, send_path in cache_paths:
+                lines.append(f"        {subvol_name}: {send_path}")
         for reason in _delete_reasons(plan, name):
             lines.append(f"      why: {reason}")
     lines.append("")
@@ -232,13 +321,18 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
     """Apply destination retention rules."""
 
     plan = build_prune_plan(config, state)
-    print_prune_plan(plan, state, dry_run=dry_run)
+    print_prune_plan(config, plan, state, dry_run=dry_run)
     if dry_run:
         print("Dry-run: no retention deletes were performed.")
         return plan
     if plan.delete and not yes_delete:
         raise RuntimeError("Refusing to delete without --yes-delete")
     deleted = 0
+    source_cache_ssh = (
+        SSHRunner(config.ssh)
+        if plan.delete and config.source.cleanup_superseded_cache and config.source.cache_root
+        else None
+    )
     for name in sorted(plan.delete):
         snapshot_state = state.get("snapshots", {}).get(name, {})
         print()
@@ -249,6 +343,8 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
             print(f"  why:      {reason}")
         print("  action:   deleting destination subvolumes and removing state.json entry")
         _delete_snapshot(config, state, name)
+        if source_cache_ssh:
+            _cleanup_source_cache_for_pruned_snapshot(config, source_cache_ssh, name, snapshot_state)
         deleted += 1
     save_state(config.state_file, state)
     emit_success_summary(

@@ -358,91 +358,6 @@ def _ensure_source_send_path(config: AppConfig, ssh: SSHRunner, snapshot_name: s
     )
 
 
-def _cleanup_superseded_source_cache(
-    config: AppConfig,
-    ssh: SSHRunner,
-    *,
-    parent_send_path: str | None,
-    current_send_path: str,
-    subvolume_name: str,
-    parent_name: str | None,
-) -> None:
-    """Delete source cache snapshots that are no longer needed.
-
-    Btrfs incremental send needs the previous source parent to exist while the
-    next snapshot is being sent. Therefore the app must NOT delete the current
-    newest cache snapshot immediately after sending it; that snapshot becomes
-    the parent for the next incremental send, including the next run.
-
-    What is safe to delete after a successful incremental send is the *old*
-    parent cache snapshot. Once current_send_path has been received and saved to
-    state.json, current_send_path is the new parent and parent_send_path is
-    superseded.
-    """
-
-    if not config.source.cleanup_superseded_cache:
-        return
-    if not parent_send_path:
-        # A full send has no old parent to clean up.
-        return
-    if parent_send_path == current_send_path:
-        # Defensive guard; never delete the cache snapshot that was just sent.
-        return
-    if not btrfs.path_is_under_cache(parent_send_path, config.source.cache_root):
-        # The parent was an original read-only Timeshift snapshot, not a cache.
-        return
-
-    _human_blank()
-    print(f"  {subvolume_name}: cleaning superseded source cache parent from {parent_name}")
-    print()
-    print(f"SOURCE CACHE DELETE: {parent_send_path}")
-
-    result = btrfs.remote_delete_subvolume(
-        ssh,
-        config.source.sudo,
-        config.source.btrfs_command,
-        parent_send_path,
-        check=False,
-    )
-    if result.returncode != 0:
-        print()
-        print("WARNING: source cache subvolume cleanup failed; leaving it in place")
-        if result.stderr.strip():
-            print(result.stderr.strip())
-        _human_blank()
-        return
-
-    parent_cache_dir = str(Path(parent_send_path).parent)
-    if btrfs.path_is_under_cache(parent_cache_dir, config.source.cache_root):
-        remaining = btrfs.remote_list_child_subvolumes(
-            ssh,
-            sudo=config.source.sudo,
-            btrfs_command=config.source.btrfs_command,
-            path=parent_cache_dir,
-        )
-
-        if remaining is None:
-            print()
-            print(f"SOURCE CACHE PARENT KEEP: could not verify that {parent_cache_dir} has no child subvolumes")
-        elif remaining:
-            children = [btrfs.cache_child_display_path(parent_cache_dir, child) for child in remaining]
-            print()
-            print(f"SOURCE CACHE PARENT KEEP: {parent_cache_dir} still contains cached {', '.join(children)}")
-        else:
-            parent_result = btrfs.remote_delete_subvolume(
-                ssh, config.source.sudo, config.source.btrfs_command, parent_cache_dir, check=False
-            )
-            if parent_result.returncode == 0:
-                print()
-                print(f"SOURCE CACHE PARENT DELETE: {parent_cache_dir}")
-            else:
-                print()
-                print("WARNING: source cache parent cleanup failed; leaving parent in place")
-                if parent_result.stderr.strip():
-                    print(parent_result.stderr.strip())
-    _human_rule("---")
-
-
 def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, subvolume_name: str) -> None:
     """Delete an incomplete destination receive before retrying.
 
@@ -1128,18 +1043,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 status="synced",
             )
 
-            # Source-side read-only cache snapshots are temporary. After a
-            # successful incremental receive, the old parent cache is no longer
-            # needed because the current send path becomes the new parent. The
-            # current/latest cache is kept for future incremental sends.
-            _cleanup_superseded_source_cache(
-                config,
-                ssh,
-                parent_send_path=parent_send_path,
-                current_send_path=current_send_path,
-                subvolume_name=subvol_name,
-                parent_name=parent_name,
-            )
+            # Keep every source-side read-only cache snapshot created by this
+            # run. Cache snapshots are pruned only by the retention step, using
+            # the same keep/delete decision as destination snapshots. This avoids
+            # losing the newest common source/destination UUID merely because a
+            # short-lived hourly parent was superseded during sync.
 
             transferred += 1
 

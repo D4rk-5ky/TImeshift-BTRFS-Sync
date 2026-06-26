@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.8.4
+# timeshift-btrfs-sync v0.8.6
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -110,7 +110,7 @@ sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolum
 
 The app checks cache paths with `btrfs subvolume list -o <cache_root>` so normal Timeshift snapshot paths with the same date/name are not mistaken for existing cache snapshots.
 
-The newest cache snapshot is kept because it is the next incremental parent. Older superseded cache snapshots are deleted only after a newer send succeeds. After deleting one child cache snapshot, the app checks `btrfs subvolume list -o <cache_root>/<snapshot-name>` and deletes the timestamp cache parent only when no child subvolumes remain.
+Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. When `prune` deletes a destination snapshot, source cache cleanup follows the same retention decision. It first lists the source cache and skips matching cache subvolumes that are already missing, then deletes only cache subvolumes that still exist. The app then checks `btrfs subvolume list -o <cache_root>/<snapshot-name>` and deletes the timestamp cache parent only when no child subvolumes remain.
 
 ## Optional automatic on-demand snapshots
 
@@ -408,7 +408,7 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 | `verify_incremental_parent_once_per_run` | Verifies only the first parent per subvolume name during a run, then trusts the chain created by that run. | Reduces repeated metadata checks while keeping the initial safety check. |
 | `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |
-| `cleanup_superseded_cache` | Deletes old cache snapshots after newer successful sends supersede them. | Prevents the source cache from growing forever while keeping the newest parent. |
+| `cleanup_superseded_cache` | Backward-compatible name for source cache cleanup during prune. | `sync` keeps all created cache snapshots; `prune` deletes cache snapshots only when the same destination snapshot is deleted by retention. |
 | `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want destination compression. |
 | `send_proto` | Adds `btrfs send --proto <N>`. | Needed only when you intentionally want a specific Btrfs send protocol version. |
 

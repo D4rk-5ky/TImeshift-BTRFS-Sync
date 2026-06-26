@@ -155,6 +155,31 @@ def remote_list_child_subvolumes(
     return None if result.returncode != 0 else _subvolume_list_paths(result.stdout)
 
 
+def remote_cache_existing_paths(
+    ssh: SSHRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str | None,
+    paths: list[str],
+) -> set[str] | None:
+    """Return requested cache paths that currently exist as source cache subvolumes."""
+
+    if not cache_root:
+        return set()
+    candidates = [path for path in paths if path_is_under_cache(path, cache_root)]
+    if not candidates:
+        return set()
+    listed_paths = remote_list_child_subvolumes(ssh, sudo=sudo, btrfs_command=btrfs_command, path=cache_root)
+    if listed_paths is None:
+        return None
+    return {
+        path
+        for path in candidates
+        if any(_listed_cache_path_matches(listed, cache_root, path) for listed in listed_paths)
+    }
+
+
 def remote_cache_contains(
     ssh: SSHRunner,
     sudo: str,
@@ -164,10 +189,10 @@ def remote_cache_contains(
 ) -> bool:
     """Return True when the configured source cache contains `path` as a subvolume."""
 
-    if not cache_root or not path_is_under_cache(path, cache_root):
-        return False
-    listed_paths = remote_list_child_subvolumes(ssh, sudo=sudo, btrfs_command=btrfs_command, path=cache_root)
-    return bool(listed_paths) and any(_listed_cache_path_matches(listed, cache_root, path) for listed in listed_paths)
+    existing = remote_cache_existing_paths(
+        ssh, sudo=sudo, btrfs_command=btrfs_command, cache_root=cache_root, paths=[path]
+    )
+    return bool(existing)
 
 
 def remote_cache_is_empty(
@@ -311,23 +336,6 @@ def remote_delete_subvolume(
         log_stderr=log_stderr,
         mirror_stderr=mirror_stderr,
     )
-
-
-def remote_try_delete_cache_subvolume(
-    ssh: SSHRunner,
-    *,
-    sudo: str,
-    btrfs_command: str,
-    cache_root: str | None,
-    path: str | None,
-) -> bool:
-    """Best-effort delete for one source cache subvolume."""
-
-    if not path_is_under_cache(path, cache_root):
-        return False
-    assert path is not None
-    result = remote_delete_subvolume(ssh, sudo, btrfs_command, path, check=False)
-    return result.returncode == 0
 
 
 def remote_send_cmd(

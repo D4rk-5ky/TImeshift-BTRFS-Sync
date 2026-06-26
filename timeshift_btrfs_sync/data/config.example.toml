@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.8.4 config
+# timeshift-btrfs-sync v0.8.6 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -226,15 +226,16 @@ verify_incremental_parent_once_per_run = true
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 
-# Source cache cleanup. Keep true. After a successful incremental send, the
-# previous source cache snapshot is no longer needed and is deleted with:
-#   sudo -n btrfs subvolume delete <old-cache-subvolume>
+# Source cache cleanup. Keep true. The historical option name is kept for
+# config compatibility, but cache cleanup is now retention-based, not immediate
+# superseded-parent cleanup. `sync` keeps every read-only cache snapshot it
+# creates. Later, when `prune` deletes a destination snapshot by the normal
+# retention plan, it also deletes that snapshot's matching source cache
+# subvolumes with:
+#   sudo -n btrfs subvolume delete <cache-subvolume>
 # The timestamp cache parent <cache_root>/<snapshot-name> is deleted only after
-# `btrfs subvolume list -o <cache_root>/<snapshot-name>` confirms that no child
-# subvolumes remain below it. This avoids deleting the parent after @ while
-# @home still exists.
-# The newest/current cache snapshot is kept because it is needed as the parent
-# for the next incremental send, including the next program run.
+# `btrfs subvolume list -o <cache_root>/<snapshot-name>` confirms no cached
+# child subvolumes remain below it.
 cleanup_superseded_cache = true
 
 # Optional Btrfs send compressed-data mode.
