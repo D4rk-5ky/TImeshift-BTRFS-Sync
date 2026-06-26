@@ -15,7 +15,7 @@ functions.
 | `timeshift_btrfs_sync/btrfs.py` | Builds Btrfs commands for metadata, send, receive, cache snapshots, and delete. |
 | `timeshift_btrfs_sync/sync.py` | Main sync loop: discover snapshots, choose parent, send/receive, update state. |
 | `timeshift_btrfs_sync/commands.py` | Runs subprocess commands and manages the streaming pipeline with optional mbuffer. |
-| `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.mbuffer`, `.btrfs-out`, and `.err` files. |
+| `timeshift_btrfs_sync/log.py` | Owns optional split file logging and creates `.log`, `.err`, `.btrfs`, `.mbuffer`, and `.succes` files. |
 | `timeshift_btrfs_sync/mqtt.py` | Owns optional MQTT JSON notifications using `paho-mqtt`. |
 | `timeshift_btrfs_sync/state.py` | Reads/writes `state.json` and finds incremental parents. |
 | `timeshift_btrfs_sync/retention.py` | Plans and applies destination pruning. |
@@ -32,14 +32,15 @@ Files created per run:
 
 ```text
 *.log = normal commands, return codes, and captured command output
+*.err = real command/pipeline error output
+*.btrfs = send/receive command lines plus Btrfs verbose stream output
 *.mbuffer = transfer command header plus mbuffer progress/summary
-*.btrfs-out = send/receive command lines plus Btrfs verbose stream output
-*.err = stderr/error output
+*.succes = readable sync/retention statistics and success mail body
 ```
 
 The streaming pipeline in `commands.py` calls `log.py` helper functions so
 mbuffer progress can be shown live on screen and written to `.mbuffer` without
-flooding `.log`. Btrfs verbose output is written separately to `.btrfs-out`.
+flooding `.log`. Btrfs verbose output is written separately to `.btrfs`, and readable statistics are written separately to `.succes`.
 
 ## MQTT notification logic
 
@@ -240,7 +241,7 @@ The pipeline lets that Btrfs verbose output pass through live to the terminal. T
 ## 0.2.5 notes
 
 - `sync.py` now includes interrupted receive cleanup controlled by `destination.cleanup_incomplete_receive`.
-- `commands.py` mirrors all captured stderr to the terminal and `.err`, including expected negative probes.
+- `commands.py` mirrors normal captured command stderr to the terminal and `.err`. Transfer pipeline stderr is buffered because successful `btrfs send` and `mbuffer` use stderr for normal status/progress.
 - Source cache cleanup now prints a separator before the next transfer block.
 
 
@@ -265,5 +266,5 @@ Contains all optional SMTP email notification logic. It uses Python standard lib
 
 - `timeshift_btrfs_sync/commands.py` no longer suppresses stderr for expected negative probes.
 - All captured command stderr is mirrored to the terminal and written to `.err` when file logging is enabled.
-- Pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is written live to `.err`.
-- `mbuffer` stderr is still also written to `.mbuffer`, and Btrfs verbose stderr is still also written to `.btrfs-out` when enabled.
+- Pipeline stderr from remote `btrfs send`, local `btrfs receive`, and `mbuffer` is copied to `.err` only when that pipeline fails.
+- `mbuffer` progress is written to `.mbuffer`, and Btrfs transfer status is written to `.btrfs`. Empty log files are not attached to mail.

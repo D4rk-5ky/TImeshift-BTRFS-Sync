@@ -19,6 +19,7 @@ from .commands import stream_pipeline
 from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
+from .log import emit_success_summary
 from .state import latest_synced_before, mark_subvolume_synced, refresh_snapshot_metadata_from_source, resolve_destination_path, save_state, snapshot_is_synced
 
 
@@ -38,6 +39,89 @@ def _human_rule(text: str = "----") -> None:
     print()
     print(text)
     print()
+
+
+
+def _tags_text(tags: list[str] | tuple[str, ...] | None) -> str:
+    """Return compact Timeshift tags for terminal summaries."""
+
+    return "".join(tags or []) or "-"
+
+
+def _record_sync_event(
+    events: list[dict],
+    *,
+    mode: str,
+    snapshot: SnapshotMeta,
+    subvolume_name: str,
+    source_path: str,
+    destination_path: Path,
+    parent_name: str | None,
+    parent_send_path: str | None,
+    status: str,
+) -> None:
+    """Add one planned or completed transfer to the run summary."""
+
+    events.append(
+        {
+            "mode": mode,
+            "snapshot": snapshot.name,
+            "tags": _tags_text(snapshot.tags),
+            "subvolume": subvolume_name,
+            "source": source_path,
+            "destination": str(destination_path),
+            "parent": parent_name or "-",
+            "parent_source": parent_send_path or "-",
+            "status": status,
+        }
+    )
+
+
+def _print_sync_summary(
+    events: list[dict],
+    *,
+    dry_run: bool,
+    skipped_by_floor: int,
+    already_synced: int,
+) -> None:
+    """Write a terminal-friendly transfer summary to terminal and .succes.
+
+    The readable statistics intentionally go to the separate .succes file, not
+    the normal .log file. Mail uses .succes as the plain-text success body.
+    """
+
+    full_count = sum(1 for event in events if event.get("mode") == "full")
+    incremental_count = sum(1 for event in events if event.get("mode") == "incremental")
+    mode_text = "dry-run plan" if dry_run else "completed transfers"
+    lines = [
+        "SYNC SUMMARY",
+        "============",
+        f"  mode:              {mode_text}",
+        f"  full syncs:        {full_count}",
+        f"  incremental syncs: {incremental_count}",
+        f"  total listed:      {len(events)}",
+        f"  already synced:    {already_synced}",
+        f"  skipped by floor:  {skipped_by_floor}",
+    ]
+
+    if not events:
+        lines += ["  transfers:         none", ""]
+        emit_success_summary("\n".join(lines))
+        return
+
+    lines += ["", "SYNC TRANSFERS", "--------------"]
+    for event in events:
+        action = "FULL SYNC" if event["mode"] == "full" else "INCREMENTAL SYNC"
+        if dry_run:
+            action = "WOULD " + action
+        lines.append(f"  [{action}] {event['snapshot']}  subvol={event['subvolume']}  tags={event['tags']}")
+        lines.append(f"      parent:      {event['parent']}")
+        if event["parent_source"] != "-":
+            lines.append(f"      parent path: {event['parent_source']}")
+        lines.append(f"      source:      {event['source']}")
+        lines.append(f"      destination: {event['destination']}")
+    lines.append("")
+    emit_success_summary("\n".join(lines))
 
 def prepare_destination(config: AppConfig) -> None:
     """Create/validate destination directories."""
@@ -1005,6 +1089,8 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             _human_rule("----")
 
     transferred = 0
+    already_synced = 0
+    sync_events: list[dict] = []
 
     # Tracks source parent paths that were successfully sent and received during
     # this run. When verify_incremental_parent_once_per_run is true, those freshly
@@ -1021,6 +1107,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
+            already_synced += len(expected)
             continue
         if limit is not None and transferred >= limit:
             break
@@ -1039,6 +1126,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             dest_path = _dest_subvolume_path(config, snapshot.name, subvol_name)
             already = state.get("snapshots", {}).get(snapshot.name, {}).get("subvolumes", {}).get(subvol_name)
             if already and already.get("status") == "ok" and dest_path.exists():
+                already_synced += 1
                 print(f"  {subvol_name}: already synced")
                 _human_blank()
                 continue
@@ -1059,6 +1147,17 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             mode = "incremental" if parent_send_path else "full"
 
             if dry_run:
+                _record_sync_event(
+                    sync_events,
+                    mode=mode,
+                    snapshot=snapshot,
+                    subvolume_name=subvol_name,
+                    source_path=current_send_path,
+                    destination_path=dest_path,
+                    parent_name=parent_name,
+                    parent_send_path=parent_send_path,
+                    status="planned",
+                )
                 parent_text = f" parent={parent_name}" if parent_name else ""
                 print(f"  {subvol_name}: would {mode} send{parent_text}")
                 print()
@@ -1154,6 +1253,17 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, destination_root=config.destination.target_root, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta, original_meta=original_meta, send_meta=send_meta)
             save_state(config.state_file, state)
             trusted_parent_send_paths.add(current_send_path)
+            _record_sync_event(
+                sync_events,
+                mode=mode,
+                snapshot=snapshot,
+                subvolume_name=subvol_name,
+                source_path=current_send_path,
+                destination_path=dest_path,
+                parent_name=parent_name,
+                parent_send_path=parent_send_path,
+                status="synced",
+            )
 
             # Source-side read-only cache snapshots are temporary. After a
             # successful incremental receive, the old parent cache is no longer
@@ -1174,4 +1284,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     if skipped_by_floor:
         print(f"Skipped {skipped_by_floor} source snapshot(s) at or below confirmed sync floor.")
     print("No missing subvolumes to sync." if transferred == 0 else f"Synced {transferred} subvolume(s).")
+    print()
+    _print_sync_summary(
+        sync_events,
+        dry_run=dry_run,
+        skipped_by_floor=skipped_by_floor,
+        already_synced=already_synced,
+    )
     return transferred

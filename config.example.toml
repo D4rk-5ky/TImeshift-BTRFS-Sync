@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.6.5 config
+# timeshift-btrfs-sync v0.6.8 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -17,9 +17,10 @@ prune_after_sync = false
 # Optional split file logging. If blank or omitted, only terminal output is used.
 # When set, the directory is created automatically and each run writes:
 #   *.log = normal commands and captured command output
+#   *.err = real command/pipeline error output
+#   *.btrfs = btrfs send/receive status/verbose output and commands
 #   *.mbuffer = mbuffer progress/summary and transfer command header
-#   *.btrfs-out = btrfs send/receive verbose output and send/receive commands
-#   *.err = stderr/error output
+#   *.succes = readable sync/retention statistics and success mail body
 log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
 
 
@@ -95,12 +96,13 @@ subject_prefix = "[timeshift-btrfs-sync]"
 include_json = true
 
 # Attach split run logs to the email when top-level log_dir is enabled.
-# The app attaches only files that exist for this run, in this order:
-#   .log, .err, .mbuffer, .btrfs-out
+# The app attaches only non-empty files that exist for this run, in this order:
+#   .log, .err, .btrfs, .mbuffer, .succes
+# When .succes exists and has content, its text becomes the email body.
 attach_logs = true
 
 # Optional safety cap for each attachment in bytes. 0 means no size cap.
-# This can be useful if btrfs_verbose creates a very large .btrfs-out file.
+# This can be useful if btrfs_verbose creates a very large .btrfs file.
 max_attachment_bytes = 0
 
 # Control whether success and/or failure messages are sent.

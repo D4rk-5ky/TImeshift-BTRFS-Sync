@@ -4,7 +4,7 @@ This module centralizes local process execution and the streaming pipeline used
 for `ssh ... btrfs send | [mbuffer] | btrfs receive`.
 
 File logging is delegated to timeshift_btrfs_sync.log. This keeps naming,
-.log/.mbuffer/.btrfs-out/.err splitting, and stream tee logic in one module as requested.
+.log/.err/.btrfs/.mbuffer/.succes splitting, and stream tee logic in one module as requested.
 """
 
 from __future__ import annotations
@@ -179,9 +179,14 @@ def stream_pipeline(
     Logging behavior when log_dir is set:
       * command/control output goes to .log
       * mbuffer progress/summary goes to .mbuffer and terminal
-      * btrfs verbose send/receive output goes to .btrfs-out and terminal
-      * every stderr stream goes to .err and terminal as it appears
+      * btrfs send/receive status/verbose output goes to .btrfs
+      * pipeline stderr is buffered and copied to .err only if the pipeline fails
       * .log is not flooded with mbuffer or verbose Btrfs output
+
+    Important Btrfs detail: `btrfs send` writes normal status lines such as
+    `At subvol ...` to stderr even when the send succeeds. Those lines are not
+    errors, so successful pipeline stderr must not make the run .err file
+    non-empty.
     """
 
     logger = runlog.get_logger()
@@ -243,20 +248,21 @@ def stream_pipeline(
     right_out_chunks: list[str] = []
     right_err_chunks: list[str] = []
 
-    # Remote btrfs send stderr is always shown live and logged to .err.
-    # When btrfs verbose is enabled it is also copied to .btrfs-out.
+    # Remote btrfs send writes normal successful status lines like
+    # "At subvol ..." to stderr. Keep it visible on the terminal and in .btrfs,
+    # but do not mark the run as having .err output unless the pipeline fails.
     threads.append(runlog.tee_pipe_to_log(
         left.stderr,
         stream_name="remote-send-stderr",
         terminal=runlog.terminal_stderr(),
         to_mbuffer=False,
-        to_btrfs_out=bool(logger and passthrough_left_stderr),
-        to_err=True,
+        to_btrfs_out=bool(logger),
+        to_err=False,
         capture=left_err_chunks,
     ))
 
-    # mbuffer writes progress to stderr. It stays in .mbuffer, and because it is
-    # stderr it is also copied to terminal and .err.
+    # mbuffer writes normal progress to stderr. That belongs in .mbuffer. If the
+    # mbuffer process fails, the captured text is copied to .err below.
     if middle and middle.stderr is not None:
         threads.append(runlog.tee_pipe_to_log(
             middle.stderr,
@@ -264,18 +270,19 @@ def stream_pipeline(
             terminal=runlog.terminal_stderr(),
             to_mbuffer=bool(logger),
             to_btrfs_out=False,
-            to_err=True,
+            to_err=False,
             capture=middle_err_chunks,
         ))
 
-    # btrfs receive stdout is only shown in verbose mode. btrfs receive stderr is
-    # always shown live and logged to .err; with verbose it is also in .btrfs-out.
+    # btrfs receive stdout is only shown on the terminal in verbose mode, but it
+    # is still useful in .btrfs because receive also reports normal status there.
+    # btrfs receive stderr is captured and copied to .err only on pipeline failure.
     threads.append(runlog.tee_pipe_to_log(
         right.stdout,
         stream_name="local-receive-stdout",
         terminal=runlog.terminal_stdout() if passthrough_right_stdout else None,
         to_mbuffer=False,
-        to_btrfs_out=bool(logger and passthrough_right_stdout),
+        to_btrfs_out=bool(logger),
         to_err=False,
         capture=right_out_chunks,
     ))
@@ -284,8 +291,8 @@ def stream_pipeline(
         stream_name="local-receive-stderr",
         terminal=runlog.terminal_stderr(),
         to_mbuffer=False,
-        to_btrfs_out=bool(logger and passthrough_right_stderr),
-        to_err=True,
+        to_btrfs_out=bool(logger),
+        to_err=False,
         capture=right_err_chunks,
     ))
 
@@ -303,9 +310,24 @@ def stream_pipeline(
     if left_return != 0 or middle_return != 0 or right_return != 0:
         stderr = _join_text(left_err_chunks) + _join_text(middle_err_chunks) + _join_text(right_err_chunks)
         stdout = _join_text(right_out_chunks)
-        # Stderr has already been mirrored live to .err by the stream readers.
         pipe_text = shlex.join(left_cmd)
         if middle_cmd:
             pipe_text += " | " + shlex.join(middle_cmd)
         pipe_text += " | " + shlex.join(right_cmd)
+
+        # Pipeline stderr is buffered during the transfer because successful
+        # btrfs send and mbuffer both use stderr for normal status/progress. Only
+        # copy those captured streams to .err when the pipeline actually failed.
+        if logger:
+            logger.err("PIPELINE FAILED: " + pipe_text)
+            if left_err_chunks:
+                logger.err("[remote-send-stderr]")
+                logger.err(_join_text(left_err_chunks))
+            if middle_err_chunks:
+                logger.err("[mbuffer-stderr]")
+                logger.err(_join_text(middle_err_chunks))
+            if right_err_chunks:
+                logger.err("[local-receive-stderr]")
+                logger.err(_join_text(right_err_chunks))
+
         raise CommandError(pipe_text, returncode, stdout, stderr)

@@ -1,8 +1,22 @@
 # Versioning
 
-This build is version `0.6.5`.
+This build is version `0.6.8`.
 
 ## Changelog
+
+### 0.6.8
+
+- Fixed successful transfer pipeline stderr handling. Successful `btrfs send` status lines such as `At subvol ...` and mbuffer progress no longer make `.err` non-empty.
+- Transfer stderr is now buffered and copied to `.err` only if the send/mbuffer/receive pipeline fails.
+- Btrfs transfer status is still written to `.btrfs`, and mbuffer progress is still written to `.mbuffer`.
+
+### 0.6.7
+
+- Added a separate `.succes` run log for readable sync and retention statistics.
+- Sync summaries and retention delete plans are written to `.succes` and still shown in the terminal, instead of being mixed into the normal `.log` file.
+- Email notifications use non-empty `.succes` text as the plain-text message body when present.
+- Email log attachments are conditional and include only non-empty `.log`, `.err`, `.btrfs`, `.mbuffer`, and `.succes` files.
+- Renamed the Btrfs verbose-output log suffix from `.btrfs-out` to `.btrfs`.
 
 ### 0.6.5
 

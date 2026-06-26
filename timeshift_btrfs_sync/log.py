@@ -5,10 +5,11 @@ All file logging logic lives in this module by design.
 When logging is enabled by setting top-level `log_dir` in config.toml, one run
 creates timestamped files:
 
-  * .log       - normal app status, commands executed, and normal command output
-  * .mbuffer   - mbuffer progress/summary and the transfer command header
-  * .btrfs-out - btrfs send/receive verbose output and the send/receive commands
-  * .err       - stderr/error output
+  * .log     - normal app status, commands executed, and normal command output
+  * .err     - real command/pipeline error output
+  * .btrfs   - btrfs send/receive status/verbose output and commands
+  * .mbuffer - mbuffer progress/summary and the transfer command header
+  * .succes  - readable sync/retention statistics used as the success mail body
 
 The terminal output stays human-readable. The logger mirrors important lines to
 files without forcing the rest of the project to know file naming details.
@@ -29,7 +30,7 @@ import threading
 
 @dataclass
 class RunLogger:
-    """Owns the .log, .mbuffer, .btrfs-out, and .err files for one run."""
+    """Owns the split log files for one run."""
 
     log_dir: Path
     name: str = "timeshift-btrfs-sync"
@@ -44,42 +45,45 @@ class RunLogger:
         base = self.log_dir / f"{timestamp}_{safe_name}_{pid}"
 
         self.log_path = base.with_suffix(".log")
-        self.mbuffer_path = base.with_suffix(".mbuffer")
-        self.btrfs_out_path = base.with_suffix(".btrfs-out")
         self.err_path = base.with_suffix(".err")
+        self.btrfs_out_path = base.with_suffix(".btrfs")
+        self.mbuffer_path = base.with_suffix(".mbuffer")
+        self.success_path = base.with_suffix(".succes")
 
         self._log_fh: IO[str] = self.log_path.open("a", encoding="utf-8", buffering=1)
-        self._mbuffer_fh: IO[str] = self.mbuffer_path.open("a", encoding="utf-8", buffering=1)
-        self._btrfs_out_fh: IO[str] = self.btrfs_out_path.open("a", encoding="utf-8", buffering=1)
         self._err_fh: IO[str] = self.err_path.open("a", encoding="utf-8", buffering=1)
+        self._btrfs_out_fh: IO[str] = self.btrfs_out_path.open("a", encoding="utf-8", buffering=1)
+        self._mbuffer_fh: IO[str] = self.mbuffer_path.open("a", encoding="utf-8", buffering=1)
+        self._success_fh: IO[str] = self.success_path.open("a", encoding="utf-8", buffering=1)
         self._lock = threading.Lock()
         self._stderr_tail = ""
 
         self.info(f"Logging started: {timestamp}")
         self.info(f"LOG file: {self.log_path}")
-        self.info(f"MBUFFER file: {self.mbuffer_path}")
-        self.info(f"BTRFS OUT file: {self.btrfs_out_path}")
         self.info(f"ERR file: {self.err_path}")
+        self.info(f"BTRFS file: {self.btrfs_out_path}")
+        self.info(f"MBUFFER file: {self.mbuffer_path}")
+        self.info(f"SUCCESS SUMMARY file: {self.success_path}")
 
     def close(self) -> None:
         """Close all log files."""
 
         self.info("Logging finished")
         self._log_fh.close()
-        self._mbuffer_fh.close()
-        self._btrfs_out_fh.close()
         self._err_fh.close()
+        self._btrfs_out_fh.close()
+        self._mbuffer_fh.close()
+        self._success_fh.close()
 
     def attachment_paths(self) -> list[Path]:
         """Return run log files in the order useful for mail attachments.
 
-        The files are returned only if they currently exist. The order is:
-        .log, .err, .mbuffer, .btrfs-out. This keeps email attachments easy to
-        scan and matches the names shown in README.md.
+        The files are returned only if they currently exist and are non-empty.
+        The order is: .log, .err, .btrfs, .mbuffer, .succes.
         """
 
-        paths = [self.log_path, self.err_path, self.mbuffer_path, self.btrfs_out_path]
-        return [path for path in paths if path.exists()]
+        paths = [self.log_path, self.err_path, self.btrfs_out_path, self.mbuffer_path, self.success_path]
+        return [path for path in paths if path.exists() and path.is_file() and path.stat().st_size > 0]
 
     def _write(self, fh: IO[str], text: str) -> None:
         """Write text safely from possible stream-reader threads."""
@@ -120,9 +124,21 @@ class RunLogger:
         self._line(self._mbuffer_fh, text)
 
     def btrfs_out(self, text: str = "") -> None:
-        """Write one line to the .btrfs-out Btrfs verbose-output log."""
+        """Write one line to the .btrfs Btrfs verbose-output log."""
 
         self._line(self._btrfs_out_fh, text)
+
+    def success(self, text: str = "") -> None:
+        """Write one line to the .succes human-readable summary log."""
+
+        self._line(self._success_fh, text)
+
+    def success_text(self, text: str) -> None:
+        """Write a preformatted block to the .succes summary log."""
+
+        if text and not text.endswith("\n"):
+            text += "\n"
+        self._write(self._success_fh, text)
 
     def err(self, text: str = "") -> None:
         """Write an error/stderr line to .err and remember its tail."""
@@ -142,7 +158,7 @@ class RunLogger:
         """Record a command that is about to run.
 
         All commands go to .log. Transfer commands are also copied to the more
-        specific stream files so .mbuffer and .btrfs-out are understandable by
+        specific stream files so .mbuffer and .btrfs are understandable by
         themselves when debugging a single transfer.
         """
 
@@ -170,7 +186,7 @@ class RunLogger:
     def pipeline_commands(self, left_cmd: list[str], right_cmd: list[str], middle_cmd: list[str] | None = None) -> None:
         """Record send/buffer/receive commands to the appropriate logs."""
 
-        # .btrfs-out should identify exactly which send and receive produced the
+        # .btrfs should identify exactly which send and receive produced the
         # verbose Btrfs lines. .mbuffer also gets the full pipeline header so its
         # progress lines can be matched to the transfer that produced them.
         self.command("REMOTE SEND", left_cmd, include_in_mbuffer=True, include_in_btrfs_out=True)
@@ -214,6 +230,22 @@ class RunLogger:
 
 
 
+def emit_success_summary(text: str) -> None:
+    """Write a readable summary to the real terminal and .succes only.
+
+    This intentionally bypasses the normal stdout tee so statistics do not get
+    duplicated into .log. The .succes file is the plain-text success-mail body.
+    """
+
+    if text and not text.endswith("\n"):
+        text += "\n"
+    terminal_stdout().write(text)
+    terminal_stdout().flush()
+    logger = get_logger()
+    if logger:
+        logger.success_text(text)
+
+
 class TeeTextIO:
     """Terminal stream wrapper that also writes normal app output to run logs.
 
@@ -222,8 +254,9 @@ class TeeTextIO:
     as the latest stderr tail for failure notifications.
 
     Streaming transfer output from mbuffer/Btrfs bypasses this wrapper and is
-    written to .mbuffer/.btrfs-out directly. Stderr from those processes is also
-    written to .err so the error log contains every stderr source.
+    written to .mbuffer/.btrfs directly. Transfer stderr is copied to .err only
+    when the transfer pipeline fails, because successful btrfs send and mbuffer
+    both use stderr for normal status/progress.
     """
 
     def __init__(self, wrapped, logger: RunLogger, stream_kind: str):
@@ -294,7 +327,7 @@ def active_logger(logger: RunLogger | None) -> Iterator[None]:
     active, normal stdout from the app is copied to .log and normal stderr is
     copied to .err. Transfer streams still use dedicated logging paths so
     mbuffer progress goes to .mbuffer and Btrfs verbose output goes to
-    .btrfs-out without flooding .log/.err.
+    .btrfs without flooding .log/.err.
     """
 
     global _current_logger, _terminal_stdout, _terminal_stderr

@@ -28,8 +28,9 @@ class MailConfig:
     not both.
 
     attach_logs attaches the run's split log files when file logging is enabled:
-    .log, .err, .mbuffer, and .btrfs-out. max_attachment_bytes can optionally
-    prevent very large verbose logs from being attached. Set it to 0 for no cap.
+    .log, .err, .btrfs, .mbuffer, and .succes. Empty files are not attached.
+    max_attachment_bytes can optionally prevent very large verbose logs from
+    being attached. Set it to 0 for no cap.
     """
 
     enabled: bool = False
@@ -106,7 +107,7 @@ def _subject(config: MailConfig, payload: dict[str, Any]) -> str:
 
 
 def _body(config: MailConfig, payload: dict[str, Any], *, attached: list[Path], skipped: list[str]) -> str:
-    """Create a plain-text email body from the status payload."""
+    """Create a fallback plain-text email body from the status payload."""
 
     lines = [
         f"timeshift-btrfs-sync {payload.get('state', 'unknown')}",
@@ -132,6 +133,24 @@ def _body(config: MailConfig, payload: dict[str, Any], *, attached: list[Path], 
         lines += ["", "JSON payload:", json.dumps(payload, indent=2, sort_keys=True)]
     return "\n".join(lines).rstrip() + "\n"
 
+
+
+def _success_body_from_paths(paths: Iterable[str | Path] | None) -> str | None:
+    """Return the text content of the non-empty .succes file, if present."""
+
+    if not paths:
+        return None
+    for raw_path in paths:
+        path = Path(raw_path).expanduser()
+        if path.suffix != ".succes":
+            continue
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                text = path.read_text(encoding="utf-8", errors="replace")
+                return text if text.endswith("\n") else text + "\n"
+        except OSError:
+            continue
+    return None
 
 def _filter_attachments(config: MailConfig, paths: Iterable[str | Path] | None) -> tuple[list[Path], list[str]]:
     """Return existing attachment paths and human-readable skipped reasons."""
@@ -191,13 +210,14 @@ def send_status(config: MailConfig, payload: dict[str, Any], *, attachments: Ite
     if not config.to_addrs:
         raise RuntimeError("mail.to_addrs must contain at least one address when mail.enabled = true")
 
+    success_body = _success_body_from_paths(attachments)
     attached, skipped = _filter_attachments(config, attachments)
 
     msg = EmailMessage()
     msg["From"] = config.from_addr
     msg["To"] = ", ".join(config.to_addrs)
     msg["Subject"] = _subject(config, payload)
-    msg.set_content(_body(config, payload, attached=attached, skipped=skipped))
+    msg.set_content(success_body or _body(config, payload, attached=attached, skipped=skipped))
 
     for path in attached:
         _attach_file(msg, path)

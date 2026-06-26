@@ -7,6 +7,7 @@ from pathlib import Path
 from . import btrfs
 from .config import AppConfig
 from .state import remove_snapshot_from_state, resolve_destination_path, save_state
+from .log import emit_success_summary
 
 
 @dataclass(slots=True)
@@ -42,6 +43,59 @@ def _is_app_created_ondemand(snapshot_state: dict, marker: str) -> bool:
         return False
     return marker in str(snapshot_state.get("comment") or "").lower()
 
+
+
+
+def _tags_text(snapshot_state: dict) -> str:
+    """Return compact Timeshift tags for terminal retention summaries."""
+
+    return "".join(snapshot_state.get("tags", []) or []) or "-"
+
+
+def _delete_reason_for_snapshot(
+    config: AppConfig,
+    snapshots: dict,
+    name: str,
+    *,
+    app_created_ondemand: set[str],
+    normal_ondemand: set[str],
+) -> str:
+    """Explain why a snapshot is outside the active retention rules."""
+
+    snapshot_state = snapshots.get(name, {})
+    tags = snapshot_state.get("tags", []) or []
+    tag_text = _tags_text(snapshot_state)
+
+    if name in app_created_ondemand:
+        return (
+            "app-created on-demand snapshot outside "
+            f"manual_snapshot.retention_count={config.manual_snapshot.retention_count}; tags={tag_text}"
+        )
+
+    if name in normal_ondemand:
+        return f"normal on-demand snapshot outside retention.ondemand={config.retention.ondemand}; tags={tag_text}"
+
+    matched_rules: list[str] = []
+    for tag, count in config.retention.counts_by_tag().items():
+        if tag == "O" or count <= 0:
+            continue
+        if tag in tags:
+            matched_rules.append(f"tag {tag} keeps newest {count}")
+
+    if matched_rules:
+        return f"outside active Timeshift tag retention ({'; '.join(matched_rules)}); tags={tag_text}"
+
+    return f"not protected by any active retention rule; tags={tag_text}"
+
+
+def _delete_reasons(plan: PrunePlan, name: str) -> list[str]:
+    """Return delete reasons without the internal prefix."""
+
+    reasons: list[str] = []
+    for reason in plan.reasons.get(name, []):
+        if reason.startswith("delete: "):
+            reasons.append(reason.removeprefix("delete: "))
+    return reasons or ["outside retention"]
 
 def build_prune_plan(config: AppConfig, state: dict) -> PrunePlan:
     """Build retention plan from state without deleting anything.
@@ -114,7 +168,16 @@ def build_prune_plan(config: AppConfig, state: dict) -> PrunePlan:
 
     for name in names:
         if name not in plan.keep:
-            plan.add_delete(name, "outside retention")
+            plan.add_delete(
+                name,
+                _delete_reason_for_snapshot(
+                    config,
+                    snapshots,
+                    name,
+                    app_created_ondemand=app_created_ondemand,
+                    normal_ondemand=normal_ondemand,
+                ),
+            )
     plan.delete -= plan.keep
     return plan
 
@@ -140,29 +203,70 @@ def _delete_snapshot(config: AppConfig, state: dict, snapshot_name: str) -> None
     remove_snapshot_from_state(state, snapshot_name)
 
 
-def print_prune_plan(plan: PrunePlan) -> None:
-    """Print delete candidates."""
+def print_prune_plan(plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
+    """Write an easy-to-read retention summary to terminal and .succes."""
+
+    snapshots = state.get("snapshots", {})
+    mode_text = "dry-run plan" if dry_run else "real deletion plan"
+    lines = [
+        "",
+        "RETENTION SUMMARY",
+        "=================",
+        f"  mode:              {mode_text}",
+        f"  snapshots in state:{len(snapshots):>5}",
+        f"  kept by rules:     {len(plan.keep):>5}",
+        f"  delete candidates: {len(plan.delete):>5}",
+    ]
 
     if not plan.delete:
-        print("Nothing to prune.")
+        lines += ["  deletion:          none", ""]
+        emit_success_summary("\n".join(lines))
         return
-    print("Snapshots selected for deletion:")
+
+    lines += ["", "RETENTION DELETE PLAN", "---------------------"]
     for name in sorted(plan.delete):
-        print(f"  {name}  ({'; '.join(plan.reasons.get(name, []))})")
+        snapshot_state = snapshots.get(name, {})
+        action = "WOULD DELETE" if dry_run else "DELETE"
+        lines.append(f"  [{action}] {name}  tags={_tags_text(snapshot_state)}")
+        for reason in _delete_reasons(plan, name):
+            lines.append(f"      why: {reason}")
+    lines.append("")
+    emit_success_summary("\n".join(lines))
 
 
 def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) -> PrunePlan:
     """Apply destination retention rules."""
 
     plan = build_prune_plan(config, state)
-    print_prune_plan(plan)
+    print_prune_plan(plan, state, dry_run=dry_run)
     if dry_run:
-        print("Dry-run: nothing deleted.")
+        print("Dry-run: no retention deletes were performed.")
         return plan
     if plan.delete and not yes_delete:
         raise RuntimeError("Refusing to delete without --yes-delete")
+    deleted = 0
     for name in sorted(plan.delete):
-        print(f"Deleting {name}")
+        snapshot_state = state.get("snapshots", {}).get(name, {})
+        print()
+        print("RETENTION DELETE")
+        print(f"  snapshot: {name}")
+        print(f"  tags:     {_tags_text(snapshot_state)}")
+        for reason in _delete_reasons(plan, name):
+            print(f"  why:      {reason}")
+        print("  action:   deleting destination subvolumes and removing state.json entry")
         _delete_snapshot(config, state, name)
+        deleted += 1
     save_state(config.state_file, state)
+    emit_success_summary(
+        "\n".join(
+            [
+                "",
+                "RETENTION DELETE SUMMARY",
+                "========================",
+                f"  deleted snapshots: {deleted}",
+                f"  remaining in state:{len(state.get('snapshots', {})):>5}",
+                "",
+            ]
+        )
+    )
     return plan

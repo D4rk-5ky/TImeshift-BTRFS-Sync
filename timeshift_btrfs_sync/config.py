@@ -430,7 +430,7 @@ def load_config(path: str | Path) -> AppConfig:
 
     # File logging is optional. If top-level log_dir is missing or blank, the app
     # only prints to the terminal. If log_dir is set, log.py creates timestamped
-    # .log/.mbuffer/.btrfs-out/.err files in that directory.
+    # .log/.err/.btrfs/.mbuffer/.succes files in that directory.
     raw_log_dir = raw.get("log_dir")
     log_dir = Path(str(raw_log_dir)).expanduser() if isinstance(raw_log_dir, str) and raw_log_dir.strip() else None
 

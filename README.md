@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.6.5
+# timeshift-btrfs-sync v0.6.8
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -124,6 +124,12 @@ After creating the snapshot, the app re-reads `timeshift --list`. The new snapsh
 
 Automatic creation is skipped when `--snapshot <name>` is used, because that command targets one existing snapshot.
 
+## Run summaries
+
+Every `sync` now ends with a terminal-friendly `SYNC SUMMARY`. It shows how many full syncs and incremental syncs were planned or completed, how many entries were already synced, and which source/destination paths were used. Each transfer is labeled clearly as `FULL SYNC` or `INCREMENTAL`. When `log_dir` is enabled, this readable statistics block is written to `.succes`, not mixed into `.log`.
+
+Every `prune` now prints a `RETENTION SUMMARY` and, when applicable, a `RETENTION DELETE PLAN`. Delete candidates are labeled as `WOULD DELETE` in dry-run mode or `DELETE` in real mode, and each entry includes the Timeshift tags plus the reason it falls outside the active retention rules. When `log_dir` is enabled, these readable summaries are written to `.succes`, not mixed into `.log`.
+
 ## Pruning and retention
 
 Pruning applies destination retention rules. It can be enabled from config with `prune_after_sync = true` or from CLI with `sync --prune`.
@@ -153,16 +159,17 @@ Normal/user-created Timeshift on-demand snapshots are kept unless `retention.cle
 
 ## Logging and notifications
 
-Set top-level `log_dir` to enable split per-run logs. Logging starts immediately after the config is loaded and before command work begins. Normal app stdout is copied to `.log`. **All external-command stderr is mirrored to the terminal and written to `.err`**, including expected probe failures, mbuffer stderr, and Btrfs send/receive stderr. Transfer streams are still split into their specialized logs so they are easier to read:
+Set top-level `log_dir` to enable split per-run logs. Logging starts immediately after the config is loaded and before command work begins. Normal app stdout is copied to `.log`. Normal command stderr is copied to `.err`. Transfer stderr is handled differently because successful `btrfs send` and `mbuffer` both write normal status/progress to stderr: that transfer text is kept in `.btrfs`/`.mbuffer`, and is copied to `.err` only if the transfer pipeline fails.
 
 ```text
-*.log        normal command/control output
-*.err        every stderr stream and error output
-*.mbuffer    mbuffer progress and summary, also stderr-copy goes to .err
-*.btrfs-out  Btrfs send/receive verbose output, also stderr-copy goes to .err
+*.log      normal command/control output
+*.err      real command/pipeline error output
+*.btrfs    Btrfs send/receive command headers and status/verbose output
+*.mbuffer  mbuffer progress and summary
+*.succes   readable sync/retention statistics and success mail body
 ```
 
-Email notifications can attach these log files when `mail.attach_logs = true`. Missing files and 0-byte files are skipped. `mail.max_attachment_bytes` can limit attachment size.
+Email notifications can attach these log files when `mail.attach_logs = true`. Missing files and 0-byte files are skipped. `mail.max_attachment_bytes` can limit attachment size. When `.succes` exists and has content, its text is used as the plain-text email message body.
 
 MQTT notifications publish simple JSON status to the configured topic. Failure messages include exit code, error text, and latest captured stderr. MQTT uses optional `paho-mqtt`; email uses Python standard library `smtplib` / `email`.
 
@@ -365,7 +372,7 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | `to_addrs` | Recipient list. | Required when mail is enabled. |
 | `subject_prefix` | Prefix added to success/failure subjects. | Helps filter or recognize backup emails. |
 | `include_json` | Adds the JSON status payload to the email body. | Useful for debugging or parsing mail content. |
-| `attach_logs` | Attaches `.log`, `.err`, `.mbuffer`, and `.btrfs-out` if they exist and are non-empty. | Useful for failure diagnostics without logging into the backup host. Requires `log_dir`. |
+| `attach_logs` | Attaches non-empty `.log`, `.err`, `.btrfs`, `.mbuffer`, and `.succes` files. | Useful for diagnostics without logging into the backup host. Requires `log_dir`. The `.succes` text is also used as the email body when present. |
 | `max_attachment_bytes` | Per-file attachment size cap; `0` means no cap. | Prevents huge verbose logs from being mailed. |
 | `notify_on_success` | Sends success emails. | Disable if you only want failure mail. |
 | `notify_on_failure` | Sends failure emails. | Usually keep true so failed backups alert you. |
