@@ -20,7 +20,7 @@ from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
 from .log import emit_success_summary
-from .state import latest_synced_before, mark_subvolume_synced, refresh_snapshot_metadata_from_source, resolve_destination_path, save_state, snapshot_is_synced
+from .state import latest_synced_before, mark_subvolume_synced, refresh_state_metadata_and_report, resolve_destination_path, save_state, snapshot_is_synced
 
 
 class SyncError(RuntimeError):
@@ -938,19 +938,8 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         print("  sending rule: no special early send; snapshots are processed in normal oldest-to-newest order")
         _human_rule("----")
 
-    refreshed_metadata = refresh_snapshot_metadata_from_source(state, source_by_name.values())
+    refreshed_metadata = refresh_state_metadata_and_report(state, source_by_name.values(), config.state_file, dry_run=dry_run)
     if refreshed_metadata:
-        _human_blank()
-        print("STATE METADATA REFRESH")
-        print("  source: latest Timeshift --list metadata")
-        print("  updated fields: tags, comment, created, path")
-        print("  preserved fields: UUIDs, parent chain, send paths, destination paths, status")
-        print(f"  snapshot(s): {', '.join(refreshed_metadata)}")
-        if dry_run:
-            print("  dry-run: state.json would be updated, but was not written")
-        else:
-            save_state(config.state_file, state)
-            print("  state.json updated")
         _human_rule("----")
 
     sync_floor_name: str | None = None

@@ -17,7 +17,7 @@ from .mqtt import publish_status
 from .notify import build_notification_payload
 from .retention import prune
 from .ssh import SSHRunner
-from .state import load_state, refresh_snapshot_metadata_from_source, save_state
+from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
 from .timeshift import create_remote_manual_snapshot
 
@@ -182,29 +182,12 @@ def cmd_test_ssh(args) -> int:
 
 
 def _refresh_state_metadata_from_timeshift(config, state: dict, *, dry_run: bool) -> list[str]:
-    """Refresh mutable state metadata from one fast Timeshift list read.
-
-    This intentionally calls list_source_snapshots(..., include_btrfs_info=False)
-    so tags/comments can be kept current without running btrfs subvolume show for
-    every already-synced snapshot.
-    """
+    """Refresh mutable state metadata from one fast Timeshift list read."""
 
     ssh = SSHRunner(config.ssh)
     print("Refreshing state metadata from source Timeshift --list...")
     source_by_name = source_snapshot_index(list_source_snapshots(config, ssh, include_btrfs_info=False))
-    changed = refresh_snapshot_metadata_from_source(state, source_by_name.values())
-    if changed:
-        print("STATE METADATA REFRESH")
-        print("  updated fields: tags, comment, created, path")
-        print("  preserved fields: UUIDs, parent chain, send paths, destination paths, status")
-        print(f"  snapshot(s): {', '.join(changed)}")
-        if dry_run:
-            print("  dry-run: state.json would be updated, but was not written")
-        else:
-            save_state(config.state_file, state)
-            print("  state.json updated")
-        print()
-    return changed
+    return refresh_state_metadata_and_report(state, source_by_name.values(), config.state_file, dry_run=dry_run)
 
 def cmd_list_source(args) -> int:
     """List snapshots on the source machine.

@@ -88,7 +88,8 @@ selects verified full/incremental sends, runs the stream pipeline, updates
 - `empty_state()`: new state dict.
 - `_safe_relative_path()`, `destination_path_to_relative()`, `resolve_destination_path()`, `normalize_destination_paths()`: relative destination path handling.
 - `load_state()`, `save_state()`: JSON I/O.
-- `refresh_snapshot_metadata_from_source()`: update tags/comment/created/path from Timeshift.
+- `refresh_snapshot_metadata_from_source()`: update only mutable tags/comment/created/path.
+- `refresh_state_metadata_and_report()`: shared refresh/report/save helper used by sync and prune paths.
 - `snapshot_is_synced()`: check all expected subvolumes are ok.
 - `mark_subvolume_synced()`: save successful receive metadata.
 - `remove_snapshot_from_state()`: drop pruned snapshot.

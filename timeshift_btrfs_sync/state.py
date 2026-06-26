@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 import json
 import os
 import tempfile
@@ -144,7 +144,7 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
             pass
 
 
-def refresh_snapshot_metadata_from_source(state: dict[str, Any], snapshots: list[SnapshotMeta]) -> list[str]:
+def refresh_snapshot_metadata_from_source(state: dict[str, Any], snapshots: Iterable[SnapshotMeta]) -> list[str]:
     """Refresh mutable Timeshift metadata for already-known snapshots.
 
     Timeshift can later change snapshot tags/comments, for example promoting an
@@ -271,6 +271,30 @@ def remove_snapshot_from_state(state: dict[str, Any], snapshot: str) -> None:
     """Remove a pruned snapshot from state."""
 
     state.setdefault("snapshots", {}).pop(snapshot, None)
+
+
+def refresh_state_metadata_and_report(
+    state: dict[str, Any], snapshots: Iterable[SnapshotMeta], state_file: Path, *, dry_run: bool
+) -> list[str]:
+    """Refresh only Timeshift tags/comment/created/path, report, and save."""
+
+    changed = refresh_snapshot_metadata_from_source(state, snapshots)
+    if not changed:
+        return []
+    print(
+        "STATE METADATA REFRESH\n"
+        "  source: latest Timeshift --list metadata\n"
+        "  updated fields: tags, comment, created, path\n"
+        "  preserved fields: UUIDs, parent chain, send paths, destination paths, status\n"
+        f"  snapshot(s): {', '.join(changed)}"
+    )
+    if dry_run:
+        print("  dry-run: state.json would be updated, but was not written")
+    else:
+        save_state(state_file, state)
+        print("  state.json updated")
+    print()
+    return changed
 
 
 def latest_synced_before(state: dict[str, Any], snapshot_name: str, subvolume_name: str, source_names: set[str]) -> tuple[str, dict[str, Any]] | None:
