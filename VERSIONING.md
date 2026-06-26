@@ -1,8 +1,14 @@
 # Versioning
 
-This build is version `0.7.3`.
+This build is version `0.7.4`.
 
 ## Changelog
+
+### 0.7.4
+
+- Removed the huge embedded `EXAMPLE_CONFIG` string from the CLI.
+- `init-config` now copies the single packaged `timeshift_btrfs_sync/data/config.example.toml` template using `importlib.resources`.
+- Added package-data/PyInstaller handling so installed packages and built executables can still generate a config without duplicating the template in Python code.
 
 ### 0.7.3
 

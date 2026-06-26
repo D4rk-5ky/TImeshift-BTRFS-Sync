@@ -43,17 +43,11 @@ Email notifications use Python standard library modules, so they do not need an 
 
 ## Create a config
 
-Copy the example config and edit it:
-
-```bash
-cp config.example.toml config.toml
-nano config.toml
-```
-
-Or generate it with the installed command:
+Generate the included example config and edit it:
 
 ```bash
 ts-btrfs init-config --path ./config.toml
+nano config.toml
 ```
 
 Recommended first checks:

@@ -30,6 +30,8 @@ def build_args(*, mode: str, name: str, clean: bool, with_mqtt: bool, extra: lis
         "--console",
         "--paths",
         str(PROJECT_ROOT),
+        "--add-data",
+        f"{PROJECT_ROOT / 'timeshift_btrfs_sync' / 'data' / 'config.example.toml'}:timeshift_btrfs_sync/data",
     ]
     if clean:
         args.append("--clean")

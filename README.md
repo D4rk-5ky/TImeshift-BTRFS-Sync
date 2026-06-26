@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.7.3
+# timeshift-btrfs-sync v0.7.4
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -22,7 +22,7 @@ MIT License. See [`LICENSE`](LICENSE).
 
 It supports full and incremental sends, Timeshift snapshot discovery, writable source snapshots through a read-only send cache, safe destination pruning, optional automatic Timeshift on-demand snapshots, split logs, MQTT notifications, and email notifications with optional log attachments.
 
-Version history is kept in [`VERSIONING.md`](VERSIONING.md). The complete commented config template is [`config.example.toml`](config.example.toml).
+Version history is kept in [`VERSIONING.md`](VERSIONING.md). The complete commented config template is packaged at `timeshift_btrfs_sync/data/config.example.toml` and can be copied with `ts-btrfs init-config`.
 
 ## Safety model
 
@@ -226,20 +226,14 @@ ts-btrfs sync --config ./config.toml --run --prune --yes-delete
 
 ## Configuration
 
-Start from the included example:
-
-```bash
-cp config.example.toml config.toml
-nano config.toml
-```
-
-Or generate it:
+Generate the included example config:
 
 ```bash
 ts-btrfs init-config --path ./config.toml
+nano config.toml
 ```
 
-`config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
+The packaged `config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
 
 ## Command reference
 
@@ -324,7 +318,7 @@ Shows the local state tracking file.
 
 ## Config reference
 
-Every option below is present in `config.example.toml`. Commented entries are optional but supported.
+Every option below is present in the packaged `config.example.toml`. Commented entries are optional but supported.
 
 ### Top-level options
 
