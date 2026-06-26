@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.6.0
+# Config and CLI audit for v0.6.4
 
 This file records the audit requested after v0.2.3.
 
@@ -147,7 +147,6 @@ This file records the audit requested after v0.2.3.
 - `boot`
 - `ondemand`
 - `cleanup_ondemand`
-- `yearly`
 - `keep_latest`
 - `keep_latest_common_parent`
 - `protected_snapshots`

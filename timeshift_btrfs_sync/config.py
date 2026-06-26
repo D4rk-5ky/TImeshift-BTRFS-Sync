@@ -72,11 +72,10 @@ class SourceConfig:
     verify_subvolumes_at_discovery: bool = False
 
 
-    # Performance/safety balance. When true, the app verifies the first
-    # incremental parent for each subvolume name during a run, then trusts the
-    # Btrfs incremental chain for later snapshots in the same run. This avoids
-    # repeated source/destination UUID metadata checks for every incremental
-    # send while still preventing the initial "wrong OS/source" mistake.
+    # Performance/safety balance for the current run only. Parent paths from
+    # previous runs are always checked against destination received_uuid. When
+    # true, a source send_path that was just successfully sent/received by this
+    # process can be reused as the next parent without re-reading metadata.
     verify_incremental_parent_once_per_run: bool = True
 
     send_compressed_data: bool = False
@@ -144,8 +143,6 @@ class RetentionConfig:
     monthly: int = 6
     boot: int = 5
     ondemand: int = 10
-    yearly: int = 0
-
     # Independent prune switch for normal/user-created Timeshift tag O snapshots.
     # False is the safest default: user manual snapshots are kept unless this is
     # explicitly enabled. App-created O snapshots are controlled separately by
@@ -159,7 +156,7 @@ class RetentionConfig:
     def counts_by_tag(self) -> dict[str, int]:
         """Return retention counts keyed by Timeshift tag letters."""
 
-        return {"H": self.hourly, "D": self.daily, "W": self.weekly, "M": self.monthly, "B": self.boot, "O": self.ondemand, "Y": self.yearly}
+        return {"H": self.hourly, "D": self.daily, "W": self.weekly, "M": self.monthly, "B": self.boot, "O": self.ondemand}
 
 
 @dataclass(slots=True)
@@ -329,6 +326,15 @@ def load_config(path: str | Path) -> AppConfig:
     retention_raw = raw.get("retention", {})
     if not isinstance(retention_raw, dict):
         raise ConfigError("[retention] must be a TOML table")
+    removed_retention_options = {"yearly"}
+    removed_retention_present = sorted(removed_retention_options.intersection(retention_raw))
+    if removed_retention_present:
+        names = ", ".join(f"retention.{name}" for name in removed_retention_present)
+        raise ConfigError(
+            f"Removed retention option(s) still present: {names}. "
+            "Timeshift native retention tags are H, D, W, M, B, and O only; "
+            "remove yearly/Y retention configuration."
+        )
     retention = RetentionConfig(
         hourly=int(_as_int(retention_raw.get("hourly"), "retention.hourly", 6)),
         daily=int(_as_int(retention_raw.get("daily"), "retention.daily", 7)),
@@ -336,7 +342,6 @@ def load_config(path: str | Path) -> AppConfig:
         monthly=int(_as_int(retention_raw.get("monthly"), "retention.monthly", 6)),
         boot=int(_as_int(retention_raw.get("boot"), "retention.boot", 5)),
         ondemand=int(_as_int(retention_raw.get("ondemand"), "retention.ondemand", 10)),
-        yearly=int(_as_int(retention_raw.get("yearly"), "retention.yearly", 0)),
         cleanup_ondemand=_as_bool(retention_raw.get("cleanup_ondemand"), "retention.cleanup_ondemand", False),
         keep_latest=_as_bool(retention_raw.get("keep_latest"), "retention.keep_latest", True),
         keep_latest_common_parent=_as_bool(retention_raw.get("keep_latest_common_parent"), "retention.keep_latest_common_parent", True),

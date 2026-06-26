@@ -57,17 +57,57 @@ Corrected sequence:
 57th zip -> 0.5.7
 58th zip -> 0.5.8
 59th zip -> 0.6.0
+60th zip -> 0.6.1
+61st zip -> 0.6.2
+62nd zip -> 0.6.3
+63rd zip -> 0.6.4
 ```
 
-This build is version `0.6.0`.
+This build is version `0.6.4`.
 
-The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, 0.5.7 fixed source cache parent cleanup, 0.5.8 made state destination paths target-root-relative, and this release increments that by `0.0.1` to `0.6.0`.
+The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, 0.5.6 removed the separate read-only property probe, 0.5.7 fixed source cache parent cleanup, 0.5.8 made state destination paths target-root-relative, 0.5.9 removed the manual snapshot source-identity switch, 0.5.10 fixed the CLI wrapper regression, 0.6.0 was a version-only bump, 0.6.1 documents/enforces normal send ordering for app-created manual snapshots, 0.6.2 refreshes mutable Timeshift metadata in state.json, 0.6.3 adds strict parent send-path/original-source UUID validation, and 0.6.4 removes non-native yearly/Y retention support.
 
 
 ## Changelog
 
 
+### 0.6.4
+
+- Removed non-native yearly/Y retention support.
+- Destination retention now uses only native Timeshift tags: H, D, W, M, B, and O.
+- Removed `retention.yearly` from the config model, config examples, embedded `init-config` output, docs, and retention tag map.
+- Removed `Y` from the Timeshift tag parser.
+- Old configs containing `retention.yearly` now fail with a clear config error.
+
+### 0.6.3
+
+- Added strict incremental parent source-path selection. For an existing destination parent, the app now checks the saved state `send_path` first and requires its current source UUID to match the destination `received_uuid`.
+- If the saved `send_path` is missing or does not match, the app tries the original Timeshift source path and only uses it if its UUID matches the destination `received_uuid`.
+- Parent selection no longer creates a replacement cache snapshot. A recreated cache snapshot has a new UUID and cannot be a valid parent for an already received destination snapshot.
+- If the newest parent candidate cannot be proven, the app walks back to older synced parent candidates before failing.
+- If no candidate parent path matches, sync fails with a detailed error explaining the checked candidates and cache-parent situation.
+
+### 0.6.2
+
+- Refreshed mutable Timeshift metadata in `state.json` from the latest `timeshift --list` during sync. Existing synced snapshots now update `tags`, `comment`, `created`, and top-level target-relative `path` without re-sending data or changing UUID/parent/send identity fields.
+- Improved Timeshift tag parsing so separated tag tokens such as `B H D W M` are recognized as tags instead of partly becoming the comment.
+
+### 0.6.1
+
+- Clarified and guarded the automatic manual/on-demand snapshot flow: the app may create a source-side Timeshift snapshot before syncing, but it never sends that snapshot directly or as a special priority target.
+- After creating a manual snapshot, sync re-reads `timeshift --list`, reports newly detected snapshot names, and sends them only through the normal oldest-to-newest sync loop.
+- Added a dedicated `_snapshots_in_sync_order()` helper so all send order decisions stay in one obvious place.
+
 ### 0.6.0
+
+- Version-only bump from `0.5.10` to `0.6.0` at user request.
+
+### 0.5.10
+
+- Restored the CLI logging/notification wrapper helpers after the previous patch accidentally left `cmd_sync` referencing `_with_logging` without defining it.
+- Fixed `Error: name '_with_logging' is not defined`.
+
+### 0.5.9
 
 - Removed the manual snapshot source-identity config switch and all runtime branches that allowed skipping source identity checks.
 - Manual/on-demand snapshot creation now follows the same destination safety rule as sync: if the destination already contains snapshots, the source must be UUID-confirmed against state/destination history before creating a new source snapshot; if the destination is empty, a first full seed is allowed.

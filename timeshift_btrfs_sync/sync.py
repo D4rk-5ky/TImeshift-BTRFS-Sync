@@ -19,7 +19,7 @@ from .commands import stream_pipeline
 from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
-from .state import latest_synced_before, mark_subvolume_synced, resolve_destination_path, save_state, snapshot_is_synced
+from .state import latest_synced_before, mark_subvolume_synced, refresh_snapshot_metadata_from_source, resolve_destination_path, save_state, snapshot_is_synced
 
 
 class SyncError(RuntimeError):
@@ -121,12 +121,18 @@ def _maybe_create_manual_snapshot(
 ) -> bool:
     """Optionally create a source Timeshift tag O snapshot before sync.
 
-    This is controlled by [manual_snapshot]. For safety, the source list is read
-    before this function is called. If the destination already contains
-    snapshots, the app walks state.json newest-to-oldest and requires a
-    UUID-confirmed match between the configured source and an already received
-    destination snapshot before it asks Timeshift to create a new snapshot.
-    If the destination is empty, the first full seed is allowed.
+    This function only creates the source-side Timeshift snapshot. It never
+    sends it directly and never turns it into a special targeted sync. After a
+    real creation the caller must re-read ``timeshift --list``; the newly
+    created snapshot is then handled by the normal oldest-to-newest sync loop,
+    exactly like any other Timeshift snapshot.
+
+    For safety, the source list is read before this function is called. If the
+    destination already contains snapshots, the app walks state.json
+    newest-to-oldest and requires a UUID-confirmed match between the configured
+    source and an already received destination snapshot before it asks Timeshift
+    to create a new snapshot. If the destination is empty, the first full seed
+    is allowed.
 
     Returns True only when a real source snapshot was created and the caller
     should read `timeshift --list` again.
@@ -181,6 +187,22 @@ def _maybe_create_manual_snapshot(
     print("Requested source Timeshift on-demand snapshot. Reading source list after creation.")
     _human_rule("----")
     return True
+
+
+def _snapshots_in_sync_order(snapshots: list[SnapshotMeta]) -> list[SnapshotMeta]:
+    """Return snapshots in the only order used for sending.
+
+    Timeshift output can vary by version/theme and may be newest-first in the
+    terminal. Btrfs incremental send chains are safest and easiest to reason
+    about when processed oldest-to-newest by the Timeshift timestamp name.
+
+    A snapshot created by [manual_snapshot] is deliberately not prioritized.
+    After creation, sync re-reads ``timeshift --list`` and this function places
+    it wherever its timestamp belongs in the normal chain.
+    """
+
+    return sorted(snapshots, key=lambda s: s.sort_key())
+
 
 def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
     """Print source snapshots in table form."""
@@ -432,100 +454,141 @@ def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, 
     _human_rule("---")
 
 
-def _read_remote_send_metadata(config: AppConfig, ssh: SSHRunner, path: str, subvolume_name: str) -> SubvolumeMeta:
-    """Read Btrfs metadata for the exact source path that will be sent.
-
-    This is intentionally called only for selected send paths, not for every
-    snapshot during discovery.
-    """
-
-    meta = btrfs.remote_try_subvolume_show(ssh, config.source.sudo, config.source.btrfs_command, path, subvolume_name)
-    if not meta:
-        raise SyncError(f"Source send path is not a Btrfs subvolume or cannot be read: {path}")
-    return meta
-
-
-def _parent_metadata_matches(remote_parent: SubvolumeMeta, local_parent: SubvolumeMeta, state_parent: dict | None = None) -> tuple[bool, str]:
-    """Compare source parent metadata with destination parent metadata.
-
-    For a received Btrfs subvolume, `Received UUID` should match the UUID of the
-    source snapshot that was sent. That is the strongest cheap check that the
-    local destination parent actually belongs to the current source parent.
-    """
-
-    if remote_parent.uuid and local_parent.received_uuid and remote_parent.uuid == local_parent.received_uuid:
-        return True, "destination received_uuid matches current source parent uuid"
-
-    # Fallback for state created by previous versions. This is weaker than the
-    # local received_uuid comparison, but it can still help explain/validate old
-    # state if destination metadata is incomplete.
-    if state_parent:
-        old_source_uuid = state_parent.get("source_uuid")
-        old_destination_uuid = state_parent.get("destination_uuid")
-        if remote_parent.uuid and old_source_uuid and remote_parent.uuid == old_source_uuid:
-            if not old_destination_uuid or old_destination_uuid == local_parent.uuid:
-                return True, "state source_uuid matches current source parent uuid"
-
-    details = (
-        f"source uuid={remote_parent.uuid}, "
-        f"destination uuid={local_parent.uuid}, "
-        f"destination received_uuid={local_parent.received_uuid}"
-    )
-    return False, details
-
-
-def _verify_incremental_parent(
+def _read_local_destination_parent_metadata(
     config: AppConfig,
-    ssh: SSHRunner,
     *,
     parent_name: str,
-    parent_subvol: SubvolumeMeta,
-    parent_send_path: str,
     subvolume_name: str,
-    state_parent: dict | None,
-) -> None:
-    """Verify that the selected incremental parent is safe to use.
+) -> SubvolumeMeta:
+    """Read metadata for the destination snapshot that would be the receiver parent."""
 
-    This prevents this dangerous situation:
-
-      * destination already contains snapshots from OS-A,
-      * config now points at OS-B,
-      * snapshot names happen to overlap,
-      * app tries to use OS-A destination snapshot as parent for OS-B source.
-
-    The check costs only two Btrfs metadata reads for the selected parent:
-      * remote/source `btrfs subvolume show <parent_send_path>`
-      * local/destination `btrfs subvolume show <target_root>/snapshots/<parent>/@`
-    """
-
-    remote_parent = _read_remote_send_metadata(config, ssh, parent_send_path, subvolume_name)
     local_parent_path = _dest_subvolume_path(config, parent_name, subvolume_name)
     if not local_parent_path.exists():
         raise SyncError(f"Incremental parent is recorded but missing on destination: {local_parent_path}")
 
     try:
-        local_parent = btrfs.local_subvolume_show(local_parent_path, config.destination.sudo, subvolume_name, config.destination.btrfs_command)
+        return btrfs.local_subvolume_show(
+            local_parent_path,
+            config.destination.sudo,
+            subvolume_name,
+            config.destination.btrfs_command,
+        )
     except Exception as exc:
         raise SyncError(f"Cannot read destination parent metadata: {local_parent_path}: {exc}") from exc
 
-    ok, reason = _parent_metadata_matches(remote_parent, local_parent, state_parent)
-    if ok:
-        _human_blank()
-        print(f"  {subvolume_name}: parent guard ok for {parent_name} ({reason})")
-        _human_blank()
-        return
 
-    message = (
-        f"Refusing incremental send: source/destination parent mismatch for {parent_name}/{subvolume_name}.\n"
-        f"The selected destination parent does not match the current source parent.\n"
-        f"This can happen if the destination contains snapshots from another OS/source, "
-        f"or if state/cache data no longer matches the source.\n"
-        f"Details: {reason}\n"
-        f"Use a separate empty target_root for a new full backup, or repair the state/cache "
-        f"so a matching parent can be proven."
+def _try_parent_source_candidate(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    candidate_label: str,
+    candidate_path: str,
+    subvolume_name: str,
+    local_parent: SubvolumeMeta,
+) -> tuple[str | None, str]:
+    """Return candidate_path if its UUID matches destination received_uuid.
+
+    This intentionally does not create cache snapshots. A recreated cache snapshot
+    gets a new Btrfs UUID, so it cannot be a valid parent for a destination that
+    was received from the old cached UUID.
+    """
+
+    remote_parent = btrfs.remote_try_subvolume_show(
+        ssh,
+        config.source.sudo,
+        config.source.btrfs_command,
+        candidate_path,
+        subvolume_name,
     )
-    raise SyncError(message)
+    if not remote_parent:
+        return None, f"{candidate_label} not found or is not a readable Btrfs subvolume: {candidate_path}"
+    if not remote_parent.uuid:
+        return None, f"{candidate_label} has no UUID in btrfs subvolume show output: {candidate_path}"
+    if not local_parent.received_uuid:
+        return None, "destination parent has no received_uuid; cannot prove matching source parent"
+    if remote_parent.uuid != local_parent.received_uuid:
+        return (
+            None,
+            f"{candidate_label} UUID {remote_parent.uuid} does not match "
+            f"destination received_uuid {local_parent.received_uuid}: {candidate_path}",
+        )
+    if remote_parent.readonly is False:
+        return (
+            None,
+            f"{candidate_label} UUID matches destination received_uuid, but it is not read-only: {candidate_path}",
+        )
 
+    readonly_note = "read-only confirmed" if remote_parent.readonly is True else "read-only flag not reported"
+    return candidate_path, f"destination received_uuid matches {candidate_label} UUID ({readonly_note})"
+
+
+def _select_verified_parent_send_path(
+    config: AppConfig,
+    ssh: SSHRunner,
+    *,
+    parent_name: str,
+    parent_subvol: SubvolumeMeta,
+    subvolume_name: str,
+    state_parent: dict | None,
+) -> tuple[str | None, str]:
+    """Select the exact safe source parent path for an incremental send.
+
+    Valid choices are deliberately limited:
+
+    1. The saved state.json send_path, if it still exists and its current UUID
+       matches the destination parent's received_uuid.
+    2. The original Timeshift snapshot path, if its current UUID matches the
+       destination parent's received_uuid.
+
+    The function never calls _ensure_source_send_path() for a parent. If a cached
+    parent was deleted, recreating it would produce a new UUID and cannot match
+    the already received destination snapshot.
+    """
+
+    local_parent = _read_local_destination_parent_metadata(
+        config,
+        parent_name=parent_name,
+        subvolume_name=subvolume_name,
+    )
+
+    candidates: list[tuple[str, str]] = []
+    saved_send_path = state_parent.get("send_path") if state_parent else None
+    if isinstance(saved_send_path, str) and saved_send_path:
+        candidates.append(("saved state send_path", saved_send_path))
+
+    original_source_path = parent_subvol.path
+    if original_source_path and all(path != original_source_path for _, path in candidates):
+        candidates.append(("original Timeshift source path", original_source_path))
+
+    failures: list[str] = []
+    for label, path in candidates:
+        selected_path, reason = _try_parent_source_candidate(
+            config,
+            ssh,
+            candidate_label=label,
+            candidate_path=path,
+            subvolume_name=subvolume_name,
+            local_parent=local_parent,
+        )
+        if selected_path:
+            return selected_path, reason
+        failures.append(reason)
+
+    cache_hint = ""
+    if isinstance(saved_send_path, str) and btrfs.path_is_under_cache(saved_send_path, config.source.cache_root):
+        cache_hint = (
+            "\n\nThe saved source parent was a read-only cache snapshot. If that cache "
+            "snapshot was deleted, a recreated cache snapshot would get a new Btrfs "
+            "UUID and cannot be used as the parent for this destination snapshot."
+        )
+
+    destination_path = _dest_subvolume_path(config, parent_name, subvolume_name)
+    reason = "; ".join(failures) if failures else "no source parent candidates were available"
+    return (
+        None,
+        f"destination parent {destination_path} has received_uuid={local_parent.received_uuid}; "
+        f"no source parent path matched. {reason}{cache_hint}",
+    )
 
 
 def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: str) -> set[str]:
@@ -736,15 +799,16 @@ def _select_parent(
     subvolume_name: str,
     *,
     dry_run: bool,
-    verified_parent_subvolumes: set[str] | None = None,
+    trusted_parent_send_paths: set[str] | None = None,
 ) -> tuple[str | None, str | None]:
-    """Choose and optionally verify newest valid incremental parent.
+    """Choose the newest valid incremental parent.
 
-    Fast discovery does not have metadata for every remote snapshot. This
-    function keeps things fast by reading metadata only for the candidate parent
-    that would actually be used for the first incremental send for a subvolume
-    type during this run. After that, the chain is trusted for the same
-    subvolume name because every new parent was just created by this process.
+    The source parent path is chosen by UUID identity, not by recreating cache
+    snapshots. For each candidate destination parent, the app tries the saved
+    state send_path first, then the original Timeshift source path. One of those
+    paths must currently have a UUID matching the destination parent's
+    received_uuid. Otherwise the candidate is rejected and the next older parent
+    candidate is tried.
     """
 
     source_names = set(source_by_name.keys())
@@ -757,12 +821,26 @@ def _select_parent(
         candidate_names.append(parent_name)
         state_parent_data[parent_name] = parent_state
 
+    # If the newest state parent no longer matches because its source cache was
+    # deleted, an older state parent can still be a valid incremental parent. Add
+    # every older synced state candidate, newest first, so the validator can walk
+    # back until it finds a source path whose UUID matches destination received_uuid.
+    for name in sorted(state.get("snapshots", {}).keys(), reverse=True):
+        if name >= snapshot.name or name not in source_names or name in candidate_names:
+            continue
+        item = state.get("snapshots", {}).get(name, {})
+        sub = item.get("subvolumes", {}).get(subvolume_name) if isinstance(item, dict) else None
+        if isinstance(sub, dict) and sub.get("status") == "ok":
+            candidate_names.append(name)
+            state_parent_data[name] = sub
+
     # Also look at the filesystem for matching date-named snapshots. This helps
     # if state.json is missing but destination snapshots are present.
     for name in _filesystem_parent_candidates(config, snapshot.name, subvolume_name, source_names):
         if name not in candidate_names:
             candidate_names.append(name)
 
+    candidate_failures: list[str] = []
     for parent_name in candidate_names:
         parent_snapshot = source_by_name.get(parent_name)
         if not parent_snapshot:
@@ -776,48 +854,53 @@ def _select_parent(
             # parent before using it.
             return parent_name, _preview_send_path(config, parent_name, parent_subvol)
 
-        # Prefer the exact parent send_path already saved in state. This avoids
-        # re-running source-side readonly/cache checks for a parent that was just
-        # sent earlier in the same run. If state is missing/incomplete, fall back
-        # to ensuring the source parent path exists.
         parent_state = state_parent_data.get(parent_name)
-        parent_send_path = parent_state.get("send_path") if parent_state else None
-        if not parent_send_path:
-            parent_send_path = _ensure_source_send_path(config, ssh, parent_name, parent_subvol)
-
-        already_verified = bool(
-            verified_parent_subvolumes is not None
+        saved_send_path = parent_state.get("send_path") if parent_state else None
+        if (
+            isinstance(saved_send_path, str)
+            and saved_send_path
+            and trusted_parent_send_paths is not None
             and config.source.verify_incremental_parent_once_per_run
-            and subvolume_name in verified_parent_subvolumes
-        )
-        if already_verified:
+            and saved_send_path in trusted_parent_send_paths
+        ):
             _human_blank()
-            print(f"  {subvolume_name}: parent guard already verified earlier in this run; trusting incremental chain")
-            _human_blank()
-        else:
-            _verify_incremental_parent(
-                config,
-                ssh,
-                parent_name=parent_name,
-                parent_subvol=parent_subvol,
-                parent_send_path=parent_send_path,
-                subvolume_name=subvolume_name,
-                state_parent=parent_state,
+            print(
+                f"  {subvolume_name}: parent guard already proven in this run for {parent_name}; "
+                "using the just-sent source parent path"
             )
-            if verified_parent_subvolumes is not None:
-                verified_parent_subvolumes.add(subvolume_name)
-        return parent_name, parent_send_path
+            _human_blank()
+            return parent_name, saved_send_path
+
+        parent_send_path, reason = _select_verified_parent_send_path(
+            config,
+            ssh,
+            parent_name=parent_name,
+            parent_subvol=parent_subvol,
+            subvolume_name=subvolume_name,
+            state_parent=parent_state,
+        )
+        if parent_send_path:
+            _human_blank()
+            print(f"  {subvolume_name}: parent guard ok for {parent_name} ({reason})")
+            _human_blank()
+            return parent_name, parent_send_path
+
+        candidate_failures.append(f"{parent_name}/{subvolume_name}: {reason}")
 
     # No usable parent was found. Full send is allowed only when the destination
     # has no snapshots at all. If snapshots already exist in the backup target,
     # refusing is safer than mixing a new full-send chain into the wrong folder.
     if _destination_has_existing_snapshots(config):
+        details = ""
+        if candidate_failures:
+            details = "\n\nChecked parent candidate(s):\n  " + "\n  ".join(candidate_failures)
         raise SyncError(
             "Destination already contains snapshots, but no usable matching incremental parent "
             "was found for the current source snapshot. Refusing to guess because this could "
             "mix snapshots from different OS installs or backup chains. Use an empty/separate "
             "target_root for a new full backup, or restore/repair state.json/source cache so a "
             "matching source/destination parent can be proven."
+            + details
         )
     return None, None
 
@@ -868,6 +951,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         return discovered, {snap.name: snap for snap in discovered}
 
     snapshots, source_by_name = discover_source_snapshot_list(reason="before manual snapshot safety check")
+    before_manual_snapshot_names = set(source_by_name)
 
     created_manual_snapshot = _maybe_create_manual_snapshot(
         config,
@@ -879,6 +963,30 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     )
     if created_manual_snapshot:
         snapshots, source_by_name = discover_source_snapshot_list(reason="after manual snapshot creation")
+        created_names = sorted(set(source_by_name) - before_manual_snapshot_names)
+        _human_blank()
+        print("MANUAL SNAPSHOT SYNC ORDER")
+        if created_names:
+            print(f"  detected new snapshot(s): {', '.join(created_names)}")
+        else:
+            print("  warning: no new snapshot name was detected after Timeshift create")
+        print("  sending rule: no special early send; snapshots are processed in normal oldest-to-newest order")
+        _human_rule("----")
+
+    refreshed_metadata = refresh_snapshot_metadata_from_source(state, snapshots)
+    if refreshed_metadata:
+        _human_blank()
+        print("STATE METADATA REFRESH")
+        print("  source: latest Timeshift --list metadata")
+        print("  updated fields: tags, comment, created, path")
+        print("  preserved fields: UUIDs, parent chain, send paths, destination paths, status")
+        print(f"  snapshot(s): {', '.join(refreshed_metadata)}")
+        if dry_run:
+            print("  dry-run: state.json would be updated, but was not written")
+        else:
+            save_state(config.state_file, state)
+            print("  state.json updated")
+        _human_rule("----")
 
     sync_floor_name: str | None = None
     if only_snapshot:
@@ -898,14 +1006,15 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
     transferred = 0
 
-    # Tracks which subvolume chains have already passed the expensive parent
-    # guard during this run. Example: once @ has matched source-parent UUID to
-    # destination received_uuid, later @ incrementals in the same run do not
-    # repeat the same remote/local metadata comparison.
-    verified_parent_subvolumes: set[str] = set()
+    # Tracks source parent paths that were successfully sent and received during
+    # this run. When verify_incremental_parent_once_per_run is true, those freshly
+    # created paths can be reused as the next parent without re-reading metadata.
+    # Parent paths from previous runs are still validated against destination
+    # received_uuid before use.
+    trusted_parent_send_paths: set[str] = set()
 
     skipped_by_floor = 0
-    for snapshot in sorted(snapshots, key=lambda s: s.sort_key()):
+    for snapshot in _snapshots_in_sync_order(snapshots):
         if sync_floor_name and snapshot.name <= sync_floor_name:
             skipped_by_floor += 1
             continue
@@ -944,7 +1053,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 snapshot,
                 subvol_name,
                 dry_run=dry_run,
-                verified_parent_subvolumes=verified_parent_subvolumes,
+                trusted_parent_send_paths=trusted_parent_send_paths,
             )
             current_send_path = _preview_send_path(config, snapshot.name, subvolume) if dry_run else _ensure_source_send_path(config, ssh, snapshot.name, subvolume)
             mode = "incremental" if parent_send_path else "full"
@@ -958,10 +1067,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 print(f"    dest:   {dest_path}")
                 if parent_name:
                     print()
-                    if config.source.verify_incremental_parent_once_per_run:
-                        print("    safety: real run verifies the first incremental parent per subvolume, then trusts the chain")
-                    else:
-                        print("    safety: real run verifies every incremental parent source UUID against destination received_uuid")
+                    print("    safety: real run verifies the selected parent send_path or original source UUID against destination received_uuid")
                 if config.stream.use_mbuffer:
                     print()
                     print(f"    stream: would use {' '.join(config.stream.command() or [])}")
@@ -1047,6 +1153,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
             mark_subvolume_synced(state, snapshot=snapshot, subvolume=subvolume, destination_path=dest_path, destination_root=config.destination.target_root, parent_snapshot=parent_name, parent_source_path=parent_send_path, send_path=current_send_path, received_meta=received_meta, original_meta=original_meta, send_meta=send_meta)
             save_state(config.state_file, state)
+            trusted_parent_send_paths.add(current_send_path)
 
             # Source-side read-only cache snapshots are temporary. After a
             # successful incremental receive, the old parent cache is no longer

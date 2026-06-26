@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.6.0 config
+# timeshift-btrfs-sync v0.6.4 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -156,6 +156,9 @@ extra_args = ["-o", "BatchMode=yes"]
 # The command intentionally omits explicit --tags O. Timeshift defaults to
 # on-demand/tag O when no tag is supplied, and some Timeshift versions reject
 # explicit --tags O even though the help text lists O as valid.
+# After creation, the app re-reads timeshift --list. The new snapshot is not
+# sent directly or prioritized; it is sent only when the normal oldest-to-newest
+# sync loop reaches its timestamp.
 # Dry-run only prints what would happen. If --snapshot is used, automatic
 # creation is skipped because that command is a targeted sync.
 enabled = true
@@ -205,10 +208,11 @@ verify_subvolumes_at_discovery = false
 # compares current source Btrfs UUID metadata with destination `received_uuid`
 # metadata. Parent mismatch is always a hard error.
 
-# Performance/safety balance. When true, the first incremental parent for each
-# subvolume name (@, @home) is verified during a run. Later incrementals in the
-# same run trust the chain that this process just created, avoiding repeated
-# remote/local UUID checks for every single incremental send.
+# Performance/safety balance for the current run only. Parent paths from previous
+# runs are always checked against destination received_uuid before use. When true,
+# a source send_path that was just successfully sent and received by this same
+# process can be reused as the next incremental parent without re-reading Btrfs
+# metadata. This never allows creating a replacement parent cache snapshot.
 verify_incremental_parent_once_per_run = true
 
 # Source-side read-only cache for writable Timeshift snapshots.
@@ -324,8 +328,6 @@ ondemand = 10
 # controlled independently by [manual_snapshot].cleanup_enabled.
 cleanup_ondemand = false
 
-# Optional extension. Yearly is not native Timeshift behavior.
-yearly = 0
 
 # Extra safety: always keep newest snapshot and latest likely incremental parent.
 keep_latest = true

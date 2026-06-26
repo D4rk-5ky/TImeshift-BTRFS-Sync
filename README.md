@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.6.0
+# timeshift-btrfs-sync v0.6.4
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -57,6 +57,8 @@ The destination `target_root` is the backup job folder. The app creates and owns
 
 State destination paths are stored relative to `destination.target_root`, for example `snapshots/2026-06-23_07-10-24/@`. This means you can move the whole target root to another mount point, update `destination.target_root`, and the app will resolve existing state paths under the new target root. Older absolute state paths are normalized when the state is loaded.
 
+During `sync` and before standalone `prune`, mutable Timeshift metadata for already-synced snapshots is refreshed from the latest `timeshift --list`. This updates snapshot-level `tags`, `comment`, `created`, and `path` in `state.json` without re-sending data and without changing Btrfs UUID, parent-chain, send-path, destination-path, or status fields. This lets retention follow Timeshift when it later promotes or changes flags such as `O`, `H`, `D`, `W`, or `M`. The metadata refresh uses the fast Timeshift list path and does not run `btrfs subvolume show` for every already-synced snapshot.
+
 A full reset means deleting both `snapshots/` and `.ts-btrfs-sync/`. Received `@` and `@home` entries are Btrfs subvolumes, so delete them with `btrfs subvolume delete` before removing ordinary folders.
 
 ## How sync works
@@ -94,7 +96,7 @@ The parent must represent the same Btrfs snapshot on both source and destination
 source parent UUID == destination parent Received UUID
 ```
 
-This protects the backup from mixing snapshots from another OS, another source host, or a reset backup chain. By default, the first incremental parent for each subvolume name is checked during a run. Later incrementals in the same run trust the chain that the app just created.
+This protects the backup from mixing snapshots from another OS, another source host, or a reset backup chain. Parent paths from previous runs are always checked before use. The app first tries the saved `send_path` from state.json; if that does not exist or does not match, it tries the original Timeshift source snapshot. It never creates a replacement cache snapshot while choosing an existing parent, because a recreated cache snapshot gets a new UUID and cannot match the destination parent.
 
 ## Source read-only send cache
 
@@ -118,6 +120,8 @@ When `manual_snapshot.enabled = true`, `sync` can create a source Timeshift on-d
 The app first runs `timeshift --list`. If the destination already contains snapshots, it checks the configured source against existing `state.json` history by Btrfs UUID before creating the new source snapshot. If the destination is empty, the run may create a first snapshot and seed the backup with a full send; later snapshots then become incremental.
 
 The create command intentionally omits `--tags O` because Timeshift creates on-demand/tag `O` snapshots by default, and some Timeshift versions reject explicit `--tags O`.
+
+After creating the snapshot, the app re-reads `timeshift --list`. The new snapshot is not sent directly or prioritized. It is sent only when the normal oldest-to-newest snapshot loop reaches its timestamp, using the same full/incremental parent logic as every other snapshot.
 
 Automatic creation is skipped when `--snapshot <name>` is used, because that command targets one existing snapshot.
 
@@ -442,7 +446,6 @@ Every option below is present in `config.example.toml`. Commented entries are op
 | `boot` | Number of newest Timeshift `B` snapshots to keep. | Controls boot snapshot history on the destination. |
 | `ondemand` | Number of newest normal/user-created Timeshift `O` snapshots to keep when `cleanup_ondemand = true`. | Ignored unless normal on-demand cleanup is explicitly enabled. |
 | `cleanup_ondemand` | Allows pruning normal/user-created Timeshift `O` snapshots. | Default false protects manually created Timeshift snapshots. |
-| `yearly` | Optional non-native yearly retention count. | Available for custom tagging/extension; Timeshift does not normally use yearly tags. |
 | `keep_latest` | Always keeps the newest synced snapshot. | Extra safety so retention does not remove the newest backup. |
 | `keep_latest_common_parent` | Keeps the newest likely common parent for incremental safety. | Reduces risk of pruning the parent needed for future incrementals. |
 | `protected_snapshots` | Snapshot names that are never pruned. | Use for important snapshots you want retention to ignore. |

@@ -10,7 +10,7 @@ from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
 
 SNAPSHOT_RE = re.compile(r"(?P<name>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})")
-TAG_CHARS = set("HDWMBOY")
+TAG_CHARS = set("HDWMBO")
 
 
 def timeshift_cmd(sudo: str, timeshift_command: str, args: list[str]) -> str:
@@ -46,11 +46,16 @@ def parse_timeshift_list(output: str, snapshot_root: str) -> list[SnapshotMeta]:
         tags: list[str] = []
         comment: str | None = None
         if after:
-            parts = after.split(maxsplit=1)
-            first = parts[0].strip()
-            if first and all(ch.upper() in TAG_CHARS for ch in first):
-                tags = normalize_tags(first)
-                comment = parts[1] if len(parts) > 1 else None
+            # Timeshift versions/themes may render tags either compact (DWM) or
+            # separated by spaces (D W M). Collect all leading tag-only tokens
+            # before treating the rest of the line as the comment.
+            tokens = after.split()
+            tag_tokens: list[str] = []
+            while tokens and all(ch.upper() in TAG_CHARS for ch in tokens[0]):
+                tag_tokens.append(tokens.pop(0))
+            if tag_tokens:
+                tags = normalize_tags("".join(tag_tokens))
+                comment = " ".join(tokens) if tokens else None
             else:
                 comment = after
         snapshots.append(SnapshotMeta(name=name, path=str(Path(snapshot_root) / name), tags=tags, comment=comment, created=name))

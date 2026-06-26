@@ -144,6 +144,51 @@ def save_state(path: Path, state: dict[str, Any]) -> None:
             pass
 
 
+def refresh_snapshot_metadata_from_source(state: dict[str, Any], snapshots: list[SnapshotMeta]) -> list[str]:
+    """Refresh mutable Timeshift metadata for already-known snapshots.
+
+    Timeshift can later change snapshot tags/comments, for example promoting an
+    existing daily snapshot to weekly/monthly retention. Those changes should
+    update state.json without re-sending the snapshot and without touching the
+    Btrfs UUID/parent/send metadata that proves transfer identity.
+
+    Matching is by Timeshift snapshot name/timestamp. Only snapshot-level
+    mutable metadata is changed:
+      * tags
+      * comment
+      * created
+      * path
+
+    ``path`` is the destination target-root-relative snapshot directory used in
+    state.json, not the source Timeshift path.
+
+    Returns the sorted snapshot names whose metadata changed.
+    """
+
+    snapshots_state = state.setdefault("snapshots", {})
+    changed: list[str] = []
+    for snapshot in snapshots:
+        item = snapshots_state.get(snapshot.name)
+        if not isinstance(item, dict):
+            continue
+        new_values = {
+            "tags": list(snapshot.tags),
+            "comment": snapshot.comment,
+            "created": snapshot.created,
+            "path": (Path("snapshots") / snapshot.name).as_posix(),
+        }
+        touched = False
+        for key, value in new_values.items():
+            if item.get(key) != value:
+                item[key] = value
+                touched = True
+        if touched:
+            item.setdefault("name", snapshot.name)
+            item.setdefault("subvolumes", {})
+            changed.append(snapshot.name)
+    return sorted(changed)
+
+
 def snapshot_is_synced(state: dict[str, Any], snapshot: str, required_subvolumes: list[str] | None = None) -> bool:
     """Return True when a snapshot is recorded as fully synced."""
 
