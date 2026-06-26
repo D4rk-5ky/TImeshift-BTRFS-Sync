@@ -56,15 +56,22 @@ Corrected sequence:
 56th zip -> 0.5.6
 57th zip -> 0.5.7
 58th zip -> 0.5.8
+59th zip -> 0.6.0
 ```
 
-This build is version `0.5.8`.
+This build is version `0.6.0`.
 
-The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, 0.5.7 fixed source cache parent cleanup, and this release increments that by `0.0.1` to `0.5.8`.
+The version line was intentionally bumped to `0.4.0` at user request. Version `0.5.3` was intentionally requested by the user, `0.5.4` removed the unsafe no-parent-match escape hatch, `0.5.5` made incremental parent verification mandatory, and 0.5.6 removed the separate read-only property probe, 0.5.7 fixed source cache parent cleanup, 0.5.8 made state destination paths target-root-relative, and this release increments that by `0.0.1` to `0.6.0`.
 
 
 ## Changelog
 
+
+### 0.6.0
+
+- Removed the manual snapshot source-identity config switch and all runtime branches that allowed skipping source identity checks.
+- Manual/on-demand snapshot creation now follows the same destination safety rule as sync: if the destination already contains snapshots, the source must be UUID-confirmed against state/destination history before creating a new source snapshot; if the destination is empty, a first full seed is allowed.
+- Old configs that still contain the removed manual snapshot source-identity option now fail with a clear config error.
 
 ### 0.5.8
 
@@ -206,7 +213,7 @@ The version line was intentionally bumped to `0.4.0` at user request. Version `0
 
 ### 0.2.14
 
-- Added `manual_snapshot.require_verified_source`, default `true`.
+- Added the original manual snapshot source-identity guard, which was later made mandatory and no longer configurable.
 - Automatic manual snapshot creation now runs `timeshift --list` first and verifies the configured source against `state.json` with Btrfs UUID metadata before creating a new Timeshift snapshot.
 - If the newest state snapshot is not on the source, the app walks backward through state until it finds a source snapshot that still exists and matches by UUID.
 - If no UUID-confirmed source anchor exists, the app refuses to create a manual snapshot instead of risking creation on the wrong mounted OS/source.

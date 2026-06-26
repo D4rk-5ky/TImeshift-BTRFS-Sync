@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.5.8
+# timeshift-btrfs-sync v0.6.0
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -115,7 +115,7 @@ The newest cache snapshot is kept because it is the next incremental parent. Old
 
 When `manual_snapshot.enabled = true`, `sync` can create a source Timeshift on-demand snapshot before normal syncing.
 
-The app first runs `timeshift --list`. If `manual_snapshot.require_verified_source = true`, it checks the configured source against existing `state.json` history by Btrfs UUID. This avoids creating snapshots on the wrong mounted OS or wrong source host.
+The app first runs `timeshift --list`. If the destination already contains snapshots, it checks the configured source against existing `state.json` history by Btrfs UUID before creating the new source snapshot. If the destination is empty, the run may create a first snapshot and seed the backup with a full send; later snapshots then become incremental.
 
 The create command intentionally omits `--tags O` because Timeshift creates on-demand/tag `O` snapshots by default, and some Timeshift versions reject explicit `--tags O`.
 
@@ -231,7 +231,7 @@ Or generate it:
 ts-btrfs init-config --path ./config.toml
 ```
 
-`config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true`, `manual_snapshot.require_verified_source = true`, and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match.
+`config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
 
 ## Command reference
 
@@ -389,7 +389,6 @@ Every option below is present in `config.example.toml`. Commented entries are op
 |---|---|---|
 | `enabled` | Makes normal `sync` create one source Timeshift on-demand snapshot before syncing. | Useful when you want every sync run to start with a fresh source snapshot. |
 | `cleanup_enabled` | Allows destination prune to delete old app-created on-demand snapshots recognized by marker. | Keeps app-created manual snapshots from growing forever. Real deletion still needs prune plus `--yes-delete`. |
-| `require_verified_source` | Requires a UUID-confirmed source/state match before creating a source snapshot. | Prevents creating stale snapshots on the wrong mounted OS, wrong source, or wrong `snapshot_root`. |
 | `comment` | Comment passed to `timeshift --create --comments`. | Makes the snapshot recognizable in Timeshift and should include the marker. |
 | `marker` | Text used to recognize app-created on-demand snapshots. | Separates app-created on-demand snapshots from your normal manual Timeshift snapshots. |
 | `retention_count` | Number of app-created on-demand snapshots to keep by marker. | Gives app-created snapshots independent retention from normal `O` snapshots. |

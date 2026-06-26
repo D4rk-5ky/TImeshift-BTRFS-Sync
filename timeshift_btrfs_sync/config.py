@@ -26,13 +26,10 @@ class ManualSnapshotConfig:
     # Even when true, real deletion still requires prune to run and --yes-delete.
     cleanup_enabled: bool = True
 
-    # Safety guard for automatic source-side snapshot creation. When true, the
-    # app first runs timeshift --list, walks state.json newest-to-oldest, and
-    # requires a UUID-confirmed match between the configured source and an
-    # already received destination snapshot before creating a new Timeshift
-    # on-demand snapshot. This prevents creating stale snapshots on the wrong
-    # mounted OS/source.
-    require_verified_source: bool = True
+    # Source identity checking is not configurable. If the destination already
+    # contains snapshots, manual snapshot creation requires a UUID-confirmed
+    # source/destination anchor. If the destination is empty, a first full seed
+    # is allowed.
 
     # Comment passed to `timeshift --create --comments`. The comment should
     # contain marker so later retention can recognize snapshots created by this
@@ -356,12 +353,18 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError("manual_snapshot.comment must be non-empty when manual_snapshot.enabled = true")
     if manual_enabled and not manual_marker:
         raise ConfigError("manual_snapshot.marker must be non-empty when manual_snapshot.enabled = true")
+    if "require_verified_source" in manual_raw:
+        raise ConfigError(
+            "Removed manual snapshot option still present: manual_snapshot.require_verified_source. "
+            "Manual snapshot source identity checks are now mandatory when the destination "
+            "already contains snapshots. A first full seed is allowed only when the "
+            "destination target_root has no existing backup snapshots."
+        )
     manual_snapshot = ManualSnapshotConfig(
         enabled=manual_enabled,
         comment=manual_comment or "ts-btrfs-sync automatic on-demand snapshot",
         marker=manual_marker or "ts-btrfs-sync",
         cleanup_enabled=_as_bool(manual_raw.get("cleanup_enabled"), "manual_snapshot.cleanup_enabled", True),
-        require_verified_source=_as_bool(manual_raw.get("require_verified_source"), "manual_snapshot.require_verified_source", True),
         retention_count=int(_as_int(manual_raw.get("retention_count"), "manual_snapshot.retention_count", 10)),
     )
 

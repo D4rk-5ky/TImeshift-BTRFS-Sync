@@ -1,4 +1,4 @@
-# Config and CLI audit for v0.5.8
+# Config and CLI audit for v0.6.0
 
 This file records the audit requested after v0.2.3.
 
@@ -90,7 +90,6 @@ This file records the audit requested after v0.2.3.
 
 - `enabled`
 - `cleanup_enabled`
-- `require_verified_source`
 - `comment`
 - `marker`
 - `retention_count`
@@ -208,11 +207,11 @@ python3 -m timeshift_btrfs_sync show-state --help
 
 ## 0.2.14 audit addition
 
-- Added and documented `manual_snapshot.require_verified_source`.
+- The old manual snapshot source-identity switch was later removed; source identity checks are mandatory when the destination already contains snapshots.
 - Confirmed `config.example.toml` includes the new source verification guard.
 - Confirmed `init-config` writes the same full commented config including the verification guard.
 - Confirmed no new CLI flags were needed; verified automatic manual snapshot creation is controlled from config.
-- Confirmed the existing `create-manual` command also respects `manual_snapshot.require_verified_source` by default.
+- Confirmed the existing `create-manual` command uses the same mandatory source/destination identity guard as automatic manual snapshot creation.
 
 
 ## 0.2.13 audit addition

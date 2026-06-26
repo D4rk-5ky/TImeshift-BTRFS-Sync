@@ -85,27 +85,27 @@ def verify_source_identity_for_manual_snapshot(
     state: dict,
     source_by_name: dict[str, SnapshotMeta],
 ) -> tuple[str, str]:
-    """Require the configured source to match existing state before creating.
+    """Require the configured source to match existing destination snapshots.
 
     This is used before the app asks source Timeshift to create a new manual
-    snapshot. It prevents writing a new stale snapshot to the wrong mounted OS
-    or wrong source host. The match is not name-only: it walks state.json
-    newest-to-oldest, finds an entry that still exists in `timeshift --list`,
-    and confirms Btrfs UUID / destination received_uuid identity.
+    snapshot when the destination already contains backups. It prevents writing
+    a new stale snapshot to the wrong mounted OS or wrong source host. The match
+    is not name-only: it walks state.json newest-to-oldest, finds an entry that
+    still exists in `timeshift --list`, and confirms Btrfs UUID / destination
+    received_uuid identity.
     """
 
     confirmed_name, reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
     if not confirmed_name:
         raise SyncError(
             "Refusing to create manual Timeshift snapshot.\n\n"
-            "manual_snapshot.require_verified_source = true, but the configured source "
+            "The destination already contains snapshots, but the configured source "
             "could not be matched to any already received snapshot in state.json.\n"
             "This may be the wrong mounted OS, wrong snapshot_root, wrong source host, "
-            "or a first-ever sync with no trusted state yet.\n"
+            "or a backup target from another source.\n"
             f"Reason: {reason}\n\n"
-            "Run a normal sync first with manual_snapshot.enabled = false, or set "
-            "manual_snapshot.require_verified_source = false only if you intentionally "
-            "want to allow first-run/unverified manual snapshot creation."
+            "Use an empty/separate target_root for a new full backup, or repair "
+            "state/cache so a matching source/destination parent can be proven."
         )
     return confirmed_name, reason
 
@@ -122,10 +122,11 @@ def _maybe_create_manual_snapshot(
     """Optionally create a source Timeshift tag O snapshot before sync.
 
     This is controlled by [manual_snapshot]. For safety, the source list is read
-    before this function is called. When manual_snapshot.require_verified_source
-    is true, the app walks state.json newest-to-oldest and requires a
+    before this function is called. If the destination already contains
+    snapshots, the app walks state.json newest-to-oldest and requires a
     UUID-confirmed match between the configured source and an already received
     destination snapshot before it asks Timeshift to create a new snapshot.
+    If the destination is empty, the first full seed is allowed.
 
     Returns True only when a real source snapshot was created and the caller
     should read `timeshift --list` again.
@@ -139,23 +140,20 @@ def _maybe_create_manual_snapshot(
         _human_rule("----")
         return False
 
-    if manual.require_verified_source:
-        _human_blank()
-        print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
-        print("  require_verified_source: true")
+    _human_blank()
+    print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
+    if _destination_has_existing_snapshots(config):
+        print("  destination: existing snapshots found")
         print("  checking existing source Timeshift list against state.json UUID history")
 
         confirmed_name, reason = verify_source_identity_for_manual_snapshot(config, ssh, state, source_by_name)
 
         print(f"  confirmed source anchor: {confirmed_name}")
         print(f"  reason: {reason}")
-        _human_rule("----")
     else:
-        _human_blank()
-        print("MANUAL SNAPSHOT SOURCE IDENTITY CHECK")
-        print("  require_verified_source: false")
-        print("  WARNING: creating a manual Timeshift snapshot without UUID-confirming the source first")
-        _human_rule("----")
+        print("  destination: no existing snapshots found")
+        print("  first full seed is allowed; later snapshots in the same run become incremental")
+    _human_rule("----")
 
     _human_blank()
     print("MANUAL SNAPSHOT CREATE")
@@ -234,6 +232,12 @@ def _destination_has_existing_snapshots(config: AppConfig) -> bool:
             if (child / subvol_name).exists():
                 return True
     return False
+
+
+def destination_has_existing_snapshots(config: AppConfig) -> bool:
+    """Public wrapper used by CLI commands that need the same destination guard."""
+
+    return _destination_has_existing_snapshots(config)
 
 
 def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: SubvolumeMeta) -> str:

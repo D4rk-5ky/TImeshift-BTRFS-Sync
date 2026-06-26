@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.5.8 config
+# timeshift-btrfs-sync v0.6.0 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -147,8 +147,10 @@ extra_args = ["-o", "BatchMode=yes"]
 
 [manual_snapshot]
 # Optional source-side Timeshift on-demand snapshot creation before a normal sync.
-# When enabled = true, `sync` first reads sudo timeshift --list, verifies the
-# configured source if require_verified_source is true, then creates the snapshot:
+# When enabled = true, `sync` may create a source-side on-demand snapshot before
+# normal syncing. If the destination already contains backup snapshots, the app
+# first requires a UUID-confirmed source/destination anchor. If the destination
+# is empty, first full seed creation is allowed. It then creates the snapshot:
 #   sudo -n timeshift --create --scripted --comments <comment>
 #
 # The command intentionally omits explicit --tags O. Timeshift defaults to
@@ -163,14 +165,6 @@ enabled = true
 # It does not affect normal/user-created Timeshift on-demand snapshots.
 # Real deletion still requires prune to run with --run --yes-delete.
 cleanup_enabled = true
-
-# Safety guard for creating source-side on-demand snapshots. Keep true.
-# Before creating a manual snapshot, the app first runs timeshift --list and
-# requires the configured source to match an already received state.json entry
-# by Btrfs UUID. This prevents creating stale snapshots on the wrong mounted OS.
-# First-ever sync with no state should normally run with manual_snapshot.enabled
-# = false first, or this can be explicitly set false if you accept the risk.
-require_verified_source = true
 
 # Comment passed to Timeshift. Keep the marker text inside the comment so the
 # destination prune logic can recognize snapshots created by this app.
