@@ -37,11 +37,11 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `cli.py` | Command-line parser, command handlers, logging wrapper, notifications. |
 | `config.py` | TOML dataclasses and validation. |
 | `sync.py` | Main send/receive transaction and Btrfs safety decisions. |
-| `btrfs.py` | Btrfs command builders, metadata parser, source cache helpers. |
+| `btrfs.py` | Btrfs command builders, metadata parser, source send-cache helpers. |
 | `timeshift.py` | Remote Timeshift list/create command helpers and parser. |
 | `commands.py` | Local subprocess runner and send/receive stream pipeline. |
 | `state.py` | `state.json` loading, saving, relative paths, metadata refresh, sync markers. |
-| `retention.py` | Retention keep/delete planning, destination pruning, and matching source cache pruning. |
+| `retention.py` | Retention keep/delete planning, destination pruning, and matching source send-cache pruning. |
 | `log.py` | Split run logs: `.log`, `.err`, `.btrfs`, `.mbuffer`, `.succes`. |
 | `notify.py` | Shared notification payload/timestamp builder. |
 | `mail.py` | Optional SMTP status email with safe attachment filtering. |
@@ -151,9 +151,8 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   path, not a similarly named Timeshift path elsewhere.
 - `remote_list_child_subvolumes()`: lists existing child subvolumes below a source
   cache parent.
-- `remote_cache_existing_paths()`: lists `source.cache_root` once and returns only
-  requested cache subvolumes that currently exist, so prune skips missing source
-  cache paths without noisy delete errors.
+- `remote_cache_existing_paths()`: lists `source.cache_root` once and returns requested timestamp cache parent subvolumes that currently exist. It is intentionally not used to prove nested `@`/`@home` children because Btrfs may only list the timestamp parents from that root.
+- `remote_cache_existing_child_paths()`: lists one timestamp cache parent and returns nested `@`/`@home` cache children that actually exist. This fixes the earlier false "already gone" cleanup report when the root listing showed only parents.
 - `remote_cache_contains()`: tests if a specific cache subvolume exists.
 - `remote_cache_is_empty()`: checks whether a cache parent has any children left.
 - `cache_child_display_path()`: formats cache child paths for logs.
@@ -225,8 +224,8 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_maybe_create_manual_snapshot()`: optionally creates a Timeshift manual
   snapshot, then forces a fresh `timeshift --list` so the new snapshot is handled
   by the normal send loop.
-- `_snapshots_in_sync_order()`: filters/sorts source snapshots by requested name
-  and safe sync order.
+- `_snapshots_in_sync_order()`: sorts source snapshots oldest-to-newest for safe send order.
+- `_select_initial_sync_snapshots()`: on a fresh/empty destination, applies the retention planner to the source Timeshift list and selects only snapshots that would be kept, avoiding first-sync transfers that prune would immediately delete.
 - `print_snapshot_table()`: displays source snapshots and tags.
 - `_dest_subvolume_path()`: destination path for one received subvolume.
 - `_target_snapshot_dir()`: destination path for one snapshot folder.
@@ -251,11 +250,14 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   confirming source/destination UUID history.
 - `_filesystem_parent_candidates()`: finds older candidates present in both source
   and state.
-- `_select_parent()`: chooses full seed or verified incremental parent and refuses
-  unsafe existing-destination sends.
+- `_select_parent()`: chooses full seed or verified incremental parent. It allows
+  parentless full sends only when the destination was empty at run start, so
+  multi-subvolume first seeds can finish after the first subvolume makes the
+  destination non-empty; normal existing-destination sends still require UUID
+  proof.
 - `sync_once()`: complete sync transaction for one config/run, including source
   discovery, optional manual creation, metadata refresh, send/receive, state
-  writes, and summaries. It intentionally keeps all created source cache snapshots; cache cleanup happens later through retention/prune.
+  writes, and summaries. It intentionally keeps all created source send-cache snapshots; cache cleanup happens later through retention/prune.
 
 ### `retention.py`
 
@@ -268,19 +270,29 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_delete_reason_for_snapshot()`: explains the first applicable delete reason.
 - `_delete_reasons()`: returns all human-readable delete reasons.
 - `_source_cache_delete_paths()`: returns cached `send_path` entries for a snapshot
-  selected by destination retention. It only returns paths under `source.cache_root`.
-- `_cleanup_source_cache_for_pruned_snapshot()`: after destination deletion succeeds,
-  checks which matching source cache subvolumes still exist, skips missing paths,
-  best-effort deletes existing paths, and removes the timestamp cache parent only
-  when Btrfs says no cached child subvolumes remain.
+  selected by retention. It only returns app-created paths under `source.cache_root`.
+- `_destination_delete_paths()`: returns tracked destination subvolume paths for
+  the same prune item so the delete plan shows both sides before execution.
+- `source_snapshot_state()`: builds temporary state-like data from the source Timeshift list so fresh/full sync can reuse the exact same retention planner without writing transfer identity fields.
+- `initial_sync_keep_names()`: returns the retained source snapshot names for a fresh destination seed. It prevents sending snapshots that would be pruned immediately after the first sync.
+- `_cleanup_source_cache_for_pruned_snapshot()`: checks one timestamp send-cache parent, then lists that parent to find nested `@`/`@home` children before deleting them. This exists because listing only `source.cache_root` can show timestamp parents but not nested child subvolumes, which previously made cleanup report children as missing while they still existed.
 - `build_prune_plan()`: computes retention keep/delete decisions from state,
   source tags, and config; it does not delete anything.
-- `_delete_snapshot()`: deletes destination Btrfs subvolumes for one snapshot.
+- `_delete_destination_snapshot_for_prune()`: deletes destination Btrfs
+  subvolumes for one snapshot and returns true only when destination paths are
+  confirmed gone or already absent. It reports an unavailable destination root
+  without aborting so source send-cache cleanup can still be attempted.
+- `_delete_prune_item()`: runs the coordinated per-snapshot delete. It attempts
+  destination cleanup and source send-cache cleanup before deciding whether the
+  `state.json` entry can be removed. This prevents stale state removal when only
+  one side was cleaned up.
 - `print_prune_plan()`: prints retention summary and delete plan to terminal and
-  `.succes`, including source cache paths that would follow each destination delete.
-- `prune()`: refreshes metadata if needed, prints plan, and only deletes in real
-  mode with explicit confirmation. Source cache cleanup follows the same delete plan
-  and runs only after destination deletion succeeds.
+  `.succes`, including destination paths and source send-cache paths for each
+  delete candidate.
+- `prune()`: prints the plan and only deletes in real mode with explicit
+  confirmation. It removes `state.json` entries only after destination paths and
+  app source send-cache paths are confirmed gone or already absent, making failed
+  cleanup safely retryable.
 
 ### `log.py`
 

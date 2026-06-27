@@ -20,6 +20,7 @@ from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta, tags_text
 from .ssh import SSHRunner
 from .log import emit_success_summary
+from .retention import initial_sync_keep_names
 from .state import latest_synced_before, mark_subvolume_synced, refresh_state_metadata_and_report, resolve_destination_path, save_state, snapshot_is_synced
 
 
@@ -272,6 +273,26 @@ def _snapshots_in_sync_order(snapshots) -> list[SnapshotMeta]:
     """Return source snapshots oldest-to-newest for Btrfs send."""
 
     return sorted(snapshots, key=lambda s: s.sort_key())
+
+
+def _select_initial_sync_snapshots(config: AppConfig, source_by_name: dict[str, SnapshotMeta]) -> list[SnapshotMeta]:
+    """Return retention-kept source snapshots for a fresh destination seed."""
+
+    keep_names = initial_sync_keep_names(config, source_by_name.values())
+    selected = [source_by_name[name] for name in sorted(keep_names) if name in source_by_name]
+    skipped = len(source_by_name) - len(selected)
+    _human_blank()
+    print("FULL SYNC RETENTION SELECTION")
+    print(f"  source snapshots:  {len(source_by_name)}")
+    print(f"  selected to send:  {len(selected)}")
+    print(f"  skipped by rules:  {skipped}")
+    if selected:
+        print(f"  first selected:    {selected[0].name}")
+        print(f"  newest selected:   {selected[-1].name}")
+    print("  sending order:     oldest selected to newest selected")
+    print("  reason:            fresh destination only receives snapshots kept by retention")
+    _human_rule("----")
+    return selected
 
 def print_snapshot_table(snapshots: list[SnapshotMeta]) -> None:
     """Print source snapshots in table form."""
@@ -689,6 +710,7 @@ def _select_parent(
     *,
     dry_run: bool,
     trusted_parent_send_paths: set[str] | None = None,
+    allow_full_seed: bool = False,
 ) -> tuple[str | None, str | None]:
     """Choose the newest valid incremental parent.
 
@@ -698,6 +720,11 @@ def _select_parent(
     paths must currently have a UUID matching the destination parent's
     received_uuid. Otherwise the candidate is rejected and the next older parent
     candidate is tried.
+
+    If the destination was empty when this sync run started, missing parents are
+    allowed to fall back to full send. This is needed while seeding the first
+    backup snapshot: after @ is received, the destination is no longer globally
+    empty, but @home may still need its first full send.
     """
 
     source_names = source_by_name.keys()
@@ -776,9 +803,17 @@ def _select_parent(
 
         candidate_failures.append(f"{parent_name}/{subvolume_name}: {reason}")
 
-    # No usable parent was found. Full send is allowed only when the destination
-    # has no snapshots at all. If snapshots already exist in the backup target,
-    # refusing is safer than mixing a new full-send chain into the wrong folder.
+    # No usable parent was found. Full send is allowed when the destination was
+    # empty at run start, because all snapshots/subvolumes created during that
+    # run belong to this newly seeded chain. This fixes first-run multi-subvolume
+    # seeding where @ makes the destination non-empty before @home is sent.
+    if allow_full_seed:
+        return None, None
+
+    # Outside an empty-at-start seed run, full send is allowed only while the
+    # destination has no snapshots at all. If snapshots already exist in the
+    # backup target, refusing is safer than mixing a new full-send chain into the
+    # wrong folder.
     if _destination_has_existing_snapshots(config):
         details = ""
         if candidate_failures:
@@ -807,6 +842,8 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         _human_rule("----")
     else:
         prepare_destination(config)
+
+    destination_empty_at_start = not _destination_has_existing_snapshots(config)
 
     # Create one SSH runner. The same runner config supplies the SSH command and
     # optional SSHPASS environment for normal commands and streaming sends.
@@ -857,16 +894,19 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         if not snapshots_to_sync:
             raise SyncError(f"Source snapshot not found: {only_snapshot}")
     else:
-        snapshots_to_sync = source_by_name.values()
-        sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
-        if sync_floor_name:
-            print(f"Sync floor: confirmed {sync_floor_name} ({sync_floor_reason})")
-            print("Source snapshots older than or equal to this floor are skipped, so pruned destination snapshots are not re-sent.")
-            _human_rule("----")
-        elif state.get("snapshots"):
-            print(f"Sync floor: none confirmed ({sync_floor_reason})")
-            print("The app will not skip old source snapshots by high-watermark because UUID confirmation failed.")
-            _human_rule("----")
+        if destination_empty_at_start:
+            snapshots_to_sync = _select_initial_sync_snapshots(config, source_by_name)
+        else:
+            snapshots_to_sync = source_by_name.values()
+            sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(config, ssh, state, source_by_name)
+            if sync_floor_name:
+                print(f"Sync floor: confirmed {sync_floor_name} ({sync_floor_reason})")
+                print("Source snapshots older than or equal to this floor are skipped, so pruned destination snapshots are not re-sent.")
+                _human_rule("----")
+            elif state.get("snapshots"):
+                print(f"Sync floor: none confirmed ({sync_floor_reason})")
+                print("The app will not skip old source snapshots by high-watermark because UUID confirmation failed.")
+                _human_rule("----")
 
     transferred = 0
     already_synced = 0
@@ -922,6 +962,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 subvol_name,
                 dry_run=dry_run,
                 trusted_parent_send_paths=trusted_parent_send_paths,
+                allow_full_seed=destination_empty_at_start,
             )
             current_send_path = _preview_send_path(config, snapshot.name, subvolume) if dry_run else _ensure_source_send_path(config, ssh, snapshot.name, subvolume)
             mode = "incremental" if parent_send_path else "full"

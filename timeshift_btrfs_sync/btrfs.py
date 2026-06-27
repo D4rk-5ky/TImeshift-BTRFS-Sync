@@ -180,6 +180,32 @@ def remote_cache_existing_paths(
     }
 
 
+def remote_cache_existing_child_paths(
+    ssh: SSHRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str | None,
+    parent_path: str,
+    paths: list[str],
+) -> set[str] | None:
+    """Return requested nested cache subvolumes found below one cache parent."""
+
+    if not cache_root or not path_is_under_cache(parent_path, cache_root):
+        return set()
+    candidates = [path for path in paths if path_is_under_cache(path, parent_path)]
+    if not candidates:
+        return set()
+    listed_paths = remote_list_child_subvolumes(ssh, sudo=sudo, btrfs_command=btrfs_command, path=parent_path)
+    if listed_paths is None:
+        return None
+    return {
+        path
+        for path in candidates
+        if any(_listed_cache_path_matches(listed, cache_root, path) for listed in listed_paths)
+    }
+
+
 def remote_cache_contains(
     ssh: SSHRunner,
     sudo: str,

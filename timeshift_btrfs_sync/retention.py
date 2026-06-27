@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 from . import btrfs
 from .config import AppConfig
-from .models import tags_text
+from .models import SnapshotMeta, tags_text
 from .state import remove_snapshot_from_state, resolve_destination_path, save_state
-from .log import emit_success_summary
+from .log import emit_success_summary, get_logger
 from .ssh import SSHRunner
 
 
@@ -93,7 +94,7 @@ def _delete_reasons(plan: PrunePlan, name: str) -> list[str]:
     return reasons or ["outside retention"]
 
 def _source_cache_delete_paths(config: AppConfig, snapshot_state: dict) -> list[tuple[str, str]]:
-    """Return source cache send paths that follow a destination prune decision."""
+    """Return source send-cache paths that follow a destination prune decision."""
 
     if not config.source.cleanup_superseded_cache or not config.source.cache_root:
         return []
@@ -105,51 +106,116 @@ def _source_cache_delete_paths(config: AppConfig, snapshot_state: dict) -> list[
     return sorted(paths.items())
 
 
+def _destination_delete_paths(config: AppConfig, snapshot_state: dict) -> list[tuple[str, Path]]:
+    """Return tracked destination subvolume paths for a prune decision."""
+
+    paths: dict[str, Path] = {}
+    for subvol_name, subvol in snapshot_state.get("subvolumes", {}).items():
+        destination_path = subvol.get("destination_path")
+        if destination_path:
+            paths[subvol_name] = resolve_destination_path(config.destination.target_root, destination_path)
+    return sorted(paths.items())
+
+
+def source_snapshot_state(snapshots: Iterable[SnapshotMeta]) -> dict:
+    """Return temporary state-like data from source Timeshift snapshots.
+
+    Initial/full sync uses this to apply the same retention rules before
+    transferring anything. Only snapshot-level Timeshift metadata is needed for
+    that decision; transfer identity fields are intentionally absent because no
+    destination state exists yet.
+    """
+
+    return {
+        "version": 1,
+        "snapshots": {
+            snap.name: {
+                "name": snap.name,
+                "tags": list(snap.tags),
+                "comment": snap.comment,
+                "created": snap.created,
+                "path": (Path("snapshots") / snap.name).as_posix(),
+                "subvolumes": {},
+            }
+            for snap in snapshots
+        },
+    }
+
+
+def initial_sync_keep_names(config: AppConfig, snapshots: Iterable[SnapshotMeta]) -> set[str]:
+    """Return source snapshot names that a fresh destination should seed.
+
+    This uses the same retention planner as prune so a new/full sync does not
+    waste time sending snapshots that the post-sync retention step would delete
+    immediately.
+    """
+
+    return build_prune_plan(config, source_snapshot_state(snapshots)).keep
+
+
 def _cleanup_source_cache_for_pruned_snapshot(
     config: AppConfig,
     ssh: SSHRunner,
     snapshot_name: str,
     snapshot_state: dict,
-) -> None:
-    """Best-effort source cache cleanup for one destination-pruned snapshot."""
+) -> bool:
+    """Return True when source send-cache for one pruned snapshot is gone or absent."""
 
     cache_paths = _source_cache_delete_paths(config, snapshot_state)
     if not cache_paths:
-        return
+        print("  source send-cache: no tracked cache paths; confirmed gone")
+        return True
 
-    print()
-    print("SOURCE CACHE RETENTION CLEANUP")
-    print(f"  snapshot: {snapshot_name}")
+    print("  source send-cache: deleting/checking app-created cache paths")
 
-    existing_paths = btrfs.remote_cache_existing_paths(
-        ssh,
-        sudo=config.source.sudo,
-        btrfs_command=config.source.btrfs_command,
-        cache_root=config.source.cache_root,
-        paths=[send_path for _, send_path in cache_paths],
-    )
-    if existing_paths is None:
-        print("  warning: could not list source cache; skipping source cache cleanup")
-        return
-
-    parent_dirs: set[str] = set()
+    ok = True
+    by_parent: dict[str, list[tuple[str, str]]] = {}
     for subvol_name, send_path in cache_paths:
-        if send_path not in existing_paths:
-            print(f"  cache {subvol_name}: missing on source, skipping {send_path}")
-            continue
-        parent_dirs.add(str(Path(send_path).parent))
-        print(f"  cache {subvol_name}: deleting {send_path}")
-        result = btrfs.remote_delete_subvolume(
-            ssh,
-            config.source.sudo,
-            config.source.btrfs_command,
-            send_path,
-            check=False,
-        )
-        if result.returncode != 0:
-            print("  warning: source cache subvolume cleanup failed; leaving it in place")
+        by_parent.setdefault(str(Path(send_path).parent), []).append((subvol_name, send_path))
 
-    for parent_dir in sorted(parent_dirs):
+    for parent_dir, paths in sorted(by_parent.items()):
+        parent_exists = btrfs.remote_cache_existing_paths(
+            ssh,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            cache_root=config.source.cache_root,
+            paths=[parent_dir],
+        )
+        if parent_exists is None:
+            print("  warning: could not list source send-cache root; keeping state entry for retry")
+            return False
+        if parent_dir not in parent_exists:
+            print(f"  cache parent: already gone on source, confirmed {parent_dir}")
+            continue
+
+        existing_children = btrfs.remote_cache_existing_child_paths(
+            ssh,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            cache_root=config.source.cache_root,
+            parent_path=parent_dir,
+            paths=[send_path for _, send_path in paths],
+        )
+        if existing_children is None:
+            print(f"  warning: could not list source send-cache children; keeping state entry for retry: {parent_dir}")
+            return False
+
+        for subvol_name, send_path in sorted(paths):
+            if send_path not in existing_children:
+                print(f"  cache {subvol_name}: already gone on source, confirmed {send_path}")
+                continue
+            print(f"  cache {subvol_name}: deleting {send_path}")
+            result = btrfs.remote_delete_subvolume(
+                ssh,
+                config.source.sudo,
+                config.source.btrfs_command,
+                send_path,
+                check=False,
+            )
+            if result.returncode != 0:
+                ok = False
+                print("  warning: source send-cache subvolume cleanup failed; keeping state entry for retry")
+
         empty = btrfs.remote_cache_is_empty(
             ssh,
             sudo=config.source.sudo,
@@ -168,11 +234,15 @@ def _cleanup_source_cache_for_pruned_snapshot(
             if result.returncode == 0:
                 print(f"  cache parent: deleted {parent_dir}")
             else:
-                print("  warning: source cache parent cleanup failed; leaving it in place")
+                ok = False
+                print("  warning: source send-cache parent cleanup failed; keeping state entry for retry")
         elif empty is None:
-            print(f"  cache parent: could not verify empty, keeping {parent_dir}")
+            ok = False
+            print(f"  cache parent: could not verify empty, keeping state entry for retry: {parent_dir}")
         else:
-            print(f"  cache parent: still has cached subvolumes, keeping {parent_dir}")
+            ok = False
+            print(f"  cache parent: still has cached subvolumes, keeping state entry for retry: {parent_dir}")
+    return ok
 
 
 def build_prune_plan(config: AppConfig, state: dict) -> PrunePlan:
@@ -260,25 +330,82 @@ def build_prune_plan(config: AppConfig, state: dict) -> PrunePlan:
     return plan
 
 
-def _delete_snapshot(config: AppConfig, state: dict, snapshot_name: str) -> None:
-    """Delete one received destination snapshot."""
+def _delete_destination_snapshot_for_prune(config: AppConfig, state: dict, snapshot_name: str) -> bool:
+    """Return True when destination subvolumes for one pruned snapshot are gone."""
+
+    if not config.destination.target_root.exists():
+        print(f"  destination: target root unavailable, keeping state entry for retry: {config.destination.target_root}")
+        return False
 
     item = state.get("snapshots", {}).get(snapshot_name, {})
     snap_path = config.destination.target_root / "snapshots" / snapshot_name
-    subvol_paths = [
-        resolve_destination_path(config.destination.target_root, sub["destination_path"])
-        for sub in item.get("subvolumes", {}).values()
-        if sub.get("destination_path")
-    ]
-    for subvol_path in sorted(subvol_paths, key=lambda p: len(p.parts), reverse=True):
-        if subvol_path.exists():
+    destination_paths = _destination_delete_paths(config, item)
+    subvol_paths = [path for _, path in destination_paths]
+    if not subvol_paths:
+        print("  destination: no tracked destination subvolume paths; checking snapshot parent only")
+    ok = True
+    for subvol_name, subvol_path in sorted(destination_paths, key=lambda item: len(item[1].parts), reverse=True):
+        if not subvol_path.exists():
+            print(f"  destination {subvol_name}: already gone, confirmed {subvol_path}")
+            continue
+        print(f"  destination {subvol_name}: deleting {subvol_path}")
+        try:
             btrfs.delete_local_subvolume(subvol_path, config.destination.sudo, config.destination.btrfs_command)
+        except Exception as exc:
+            ok = False
+            print(f"  warning: destination subvolume cleanup failed; keeping state entry for retry: {exc}")
     if snap_path.exists():
         try:
             snap_path.rmdir()
         except OSError:
             pass
-    remove_snapshot_from_state(state, snapshot_name)
+    destination_gone = not any(path.exists() for path in subvol_paths) and not snap_path.exists()
+    if destination_gone:
+        print("  destination: confirmed gone")
+    elif ok:
+        print(f"  destination: still present, keeping state entry for retry: {snap_path}")
+    return ok and destination_gone
+
+
+def _delete_prune_item(
+    config: AppConfig,
+    state: dict,
+    plan: PrunePlan,
+    source_cache_ssh: SSHRunner | None,
+    name: str,
+) -> bool:
+    """Delete both sides for one prune item, then remove state only after confirmation."""
+
+    snapshot_state = state.get("snapshots", {}).get(name, {})
+    print()
+    print("RETENTION DELETE")
+    print(f"  snapshot: {name}")
+    print(f"  tags:     {tags_text(snapshot_state.get('tags', []))}")
+    for reason in _delete_reasons(plan, name):
+        print(f"  why:      {reason}")
+    print("  action:   deleting destination subvolumes and source send-cache; state is removed after both sides are confirmed gone")
+
+    print()
+    print("Retention Delete Destination")
+    destination_gone = _delete_destination_snapshot_for_prune(config, state, name)
+
+    print()
+    print("Retention Delete Source send-cache")
+    source_cache_gone = True
+    if source_cache_ssh:
+        source_cache_gone = _cleanup_source_cache_for_pruned_snapshot(config, source_cache_ssh, name, snapshot_state)
+    else:
+        print("  source send-cache: not checked this run")
+
+    print()
+    print("State")
+    if destination_gone and source_cache_gone:
+        remove_snapshot_from_state(state, name)
+        print("  removed; destination and source send-cache are confirmed gone")
+        return True
+
+    print("  kept; cleanup can be retried safely on the next prune")
+    return False
 
 
 def print_prune_plan(config: AppConfig, plan: PrunePlan, state: dict, *, dry_run: bool) -> None:
@@ -306,9 +433,14 @@ def print_prune_plan(config: AppConfig, plan: PrunePlan, state: dict, *, dry_run
         snapshot_state = snapshots.get(name, {})
         action = "WOULD DELETE" if dry_run else "DELETE"
         lines.append(f"  [{action}] {name}  tags={tags_text(snapshot_state.get('tags', []))}")
+        destination_paths = _destination_delete_paths(config, snapshot_state)
+        if destination_paths:
+            lines.append("      destination subvolumes:")
+            for subvol_name, destination_path in destination_paths:
+                lines.append(f"        {subvol_name}: {destination_path}")
         cache_paths = _source_cache_delete_paths(config, snapshot_state)
         if cache_paths:
-            lines.append("      source cache cleanup follows this destination prune decision:")
+            lines.append("      source send-cache subvolumes:")
             for subvol_name, send_path in cache_paths:
                 lines.append(f"        {subvol_name}: {send_path}")
         for reason in _delete_reasons(plan, name):
@@ -334,29 +466,23 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
         else None
     )
     for name in sorted(plan.delete):
-        snapshot_state = state.get("snapshots", {}).get(name, {})
-        print()
-        print("RETENTION DELETE")
-        print(f"  snapshot: {name}")
-        print(f"  tags:     {tags_text(snapshot_state.get('tags', []))}")
-        for reason in _delete_reasons(plan, name):
-            print(f"  why:      {reason}")
-        print("  action:   deleting destination subvolumes and removing state.json entry")
-        _delete_snapshot(config, state, name)
-        if source_cache_ssh:
-            _cleanup_source_cache_for_pruned_snapshot(config, source_cache_ssh, name, snapshot_state)
-        deleted += 1
+        if _delete_prune_item(config, state, plan, source_cache_ssh, name):
+            deleted += 1
     save_state(config.state_file, state)
-    emit_success_summary(
-        "\n".join(
-            [
-                "",
-                "RETENTION DELETE SUMMARY",
-                "========================",
-                f"  deleted snapshots: {deleted}",
-                f"  remaining in state:{len(state.get('snapshots', {})):>5}",
-                "",
-            ]
-        )
+    summary = "\n".join(
+        [
+            "",
+            "RETENTION DELETE SUMMARY",
+            "========================",
+            f"  attempted snapshots: {len(plan.delete)}",
+            f"  completed snapshots: {deleted}",
+            f"  retry snapshots:     {len(plan.delete) - deleted}",
+            f"  remaining in state:{len(state.get('snapshots', {})):>5}",
+            "",
+        ]
     )
+    print(summary)
+    logger = get_logger()
+    if logger:
+        logger.success_text(summary + "\n")
     return plan

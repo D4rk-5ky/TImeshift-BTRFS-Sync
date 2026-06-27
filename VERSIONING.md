@@ -1,8 +1,53 @@
 # Versioning
 
-This build is version `0.8.6`.
+This build is version `0.9.4`.
 
 ## Changelog
+
+### 0.9.4
+
+- Fresh/full sync now preselects only source snapshots that the active retention rules would keep, then sends that reduced set oldest-to-newest.
+- This avoids wasting time and disk wear sending old snapshots that post-sync prune would immediately delete. Existing non-empty destination sync behavior is unchanged.
+
+### 0.9.3
+
+- Moved per-snapshot prune state result into its own unindented `State` section with a blank line before it.
+- Output-only readability change; prune/delete logic is unchanged.
+
+### 0.9.2
+
+- Readability-only prune output change: each retention delete item now separates destination deletion from source send-cache deletion with clear section headers.
+
+### 0.9.1
+
+- Version-only bump from 0.8.11.
+
+### 0.8.11
+
+- Reworked prune deletion as one coordinated per-snapshot item: destination subvolumes and source send-cache are both attempted before state is removed.
+- Prune now keeps the state entry unless destination and source send-cache are both confirmed gone or already absent, while still attempting the available side when the other side is missing/unavailable.
+- Retention delete plans now show both destination subvolume paths and source send-cache paths for each candidate.
+
+### 0.8.10
+
+- Fixed source send-cache prune cleanup for nested `@` and `@home` cache subvolumes. The app now lists the timestamp cache parent before deciding child cache subvolumes are missing.
+- Renamed prune output from `SOURCE CACHE RETENTION CLEANUP` to `SOURCE SEND-CACHE RETENTION CLEANUP` to avoid confusion with original Timeshift snapshots.
+- Prints a retention delete summary to the normal run log as well as the success summary.
+
+### 0.8.9
+
+- Made retention deletion idempotent: state entries are removed only after destination and source cache cleanup are confirmed gone or already absent.
+- Kept state entries when source cache cleanup cannot be verified so a later prune can retry safely.
+
+### 0.8.8
+
+- Fixed retention-based source cache cleanup so it also checks the timestamp cache parent. If `@`/`@home` are already missing but the empty parent still exists, prune now deletes the parent instead of stopping after child skips.
+- Source cache cleanup still only deletes app-created cache paths under `source.cache_root`; it does not delete original Timeshift source snapshots.
+
+### 0.8.7
+
+- Fixed first-run multi-subvolume seeding: when the destination was empty at sync start, remaining first-chain subvolumes may still full-send after the first subvolume makes the destination non-empty.
+- Preserved the strict mixed-chain guard for normal non-empty destinations.
 
 ### 0.8.6
 

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.8.6
+# timeshift-btrfs-sync v0.9.4
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -42,7 +42,7 @@ ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/btrfs *
 ts-btrfs-sync-user ALL=(root) NOPASSWD: /usr/bin/timeshift *
 ```
 
-This is needed because Timeshift listing/creation, Btrfs send, Btrfs metadata checks, read-only cache creation, and source cache cleanup require elevated source access.
+This is needed because Timeshift listing/creation, Btrfs send, Btrfs metadata checks, read-only cache creation, and source send-cache cleanup require elevated source access.
 
 ## Destination layout
 
@@ -99,7 +99,7 @@ This protects the backup from mixing snapshots from another OS, another source h
 
 ## Source read-only send cache
 
-`btrfs send` requires read-only source snapshots. If Timeshift snapshots are writable, the app can create read-only source cache snapshots under `source.cache_root`.
+`btrfs send` requires read-only source snapshots. If Timeshift snapshots are writable, the app can create read-only source send-cache snapshots under `source.cache_root`.
 
 Only the top-level `cache_root` should be created manually. Per-snapshot cache parents and read-only send snapshots are created with Btrfs commands:
 
@@ -108,9 +108,11 @@ sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
 sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
 ```
 
-The app checks cache paths with `btrfs subvolume list -o <cache_root>` so normal Timeshift snapshot paths with the same date/name are not mistaken for existing cache snapshots.
+The app checks cache paths with Btrfs subvolume listings under `source.cache_root` and, for deletion, under each timestamp cache parent. This prevents normal Timeshift snapshot paths with the same date/name from being mistaken for app-created send-cache snapshots.
 
-Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. When `prune` deletes a destination snapshot, source cache cleanup follows the same retention decision. It first lists the source cache and skips matching cache subvolumes that are already missing, then deletes only cache subvolumes that still exist. The app then checks `btrfs subvolume list -o <cache_root>/<snapshot-name>` and deletes the timestamp cache parent only when no child subvolumes remain.
+Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. For each pruned snapshot, `prune` attempts both destination deletion and matching source send-cache deletion in one coordinated item. It removes the `state.json` entry only after destination subvolumes and source send-cache are both confirmed gone or already absent. If either side is unavailable, it still attempts the available side and keeps state so the next prune can retry.
+
+On a fresh/full sync into an empty destination, the app first applies the active retention rules to the source Timeshift list and sends only the snapshots that would be kept. For example, if retention keeps the newest 6 hourly, 5 daily, 2 weekly, and 6 monthly snapshots, the first seed starts at the oldest snapshot in that kept set and then sends the kept snapshots in date order. Existing non-empty destinations still use the normal UUID-confirmed parent/floor safety logic.
 
 ## Optional automatic on-demand snapshots
 
@@ -128,7 +130,7 @@ Automatic creation is skipped when `--snapshot <name>` is used, because that com
 
 Every `sync` now ends with a terminal-friendly `SYNC SUMMARY`. It shows how many full syncs and incremental syncs were planned or completed, how many entries were already synced, and which source/destination paths were used. Each transfer is labeled clearly as `FULL SYNC` or `INCREMENTAL`. When `log_dir` is enabled, this readable statistics block is written to `.succes`, not mixed into `.log`.
 
-Every `prune` now prints a `RETENTION SUMMARY` and, when applicable, a `RETENTION DELETE PLAN`. Delete candidates are labeled as `WOULD DELETE` in dry-run mode or `DELETE` in real mode, and each entry includes the Timeshift tags plus the reason it falls outside the active retention rules. When `log_dir` is enabled, these readable summaries are written to `.succes`, not mixed into `.log`.
+Every `prune` now prints a `RETENTION SUMMARY`, a `RETENTION DELETE PLAN`, and a `RETENTION DELETE SUMMARY` after real deletion. Delete candidates are labeled as `WOULD DELETE` in dry-run mode or `DELETE` in real mode, and each entry includes the destination subvolumes, source send-cache subvolumes, Timeshift tags, and the reason it falls outside the active retention rules. The final summary reports attempted, completed, retry, and remaining state counts. When `log_dir` is enabled, these readable summaries are written to `.succes` and the normal run log.
 
 ## Pruning and retention
 
@@ -408,7 +410,7 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 | `verify_incremental_parent_once_per_run` | Verifies only the first parent per subvolume name during a run, then trusts the chain created by that run. | Reduces repeated metadata checks while keeping the initial safety check. |
 | `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |
-| `cleanup_superseded_cache` | Backward-compatible name for source cache cleanup during prune. | `sync` keeps all created cache snapshots; `prune` deletes cache snapshots only when the same destination snapshot is deleted by retention. |
+| `cleanup_superseded_cache` | Backward-compatible name for source send-cache cleanup during prune. | `sync` keeps all created cache snapshots; `prune` deletes cache snapshots only when the same destination snapshot is deleted by retention. |
 | `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want destination compression. |
 | `send_proto` | Adds `btrfs send --proto <N>`. | Needed only when you intentionally want a specific Btrfs send protocol version. |
 
