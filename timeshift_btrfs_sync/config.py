@@ -257,6 +257,9 @@ def load_config(path: str | Path) -> AppConfig:
         password_file=password_file,
         compression=_bool(ssh_raw, "ssh", "compression", False),
         cipher=_optional_str(ssh_raw, "cipher"),
+        control_master=_bool(ssh_raw, "ssh", "control_master", False),
+        control_persist=_optional_str(ssh_raw, "control_persist"),
+        control_path=_optional_str(ssh_raw, "control_path"),
         extra_args=extra_args,
     )
 

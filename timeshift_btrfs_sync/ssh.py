@@ -23,6 +23,9 @@ class SSHConfig:
     password_file: str | None = None
     compression: bool = False
     cipher: str | None = None
+    control_master: bool = False
+    control_persist: str | None = None
+    control_path: str | None = None
     extra_args: list[str] = field(default_factory=list)
 
     @property
@@ -69,6 +72,11 @@ class SSHConfig:
             cmd += ["-C"]
         if self.cipher:
             cmd += ["-c", self.cipher]
+        if self.control_master:
+            cmd += ["-o", "ControlMaster=auto"]
+            cmd += ["-o", f"ControlPersist={self.control_persist or '10m'}"]
+            if self.control_path:
+                cmd += ["-o", f"ControlPath={self.control_path}"]
         cmd += self.extra_args
         cmd.append(self.target)
         return cmd

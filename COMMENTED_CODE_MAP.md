@@ -28,6 +28,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `prune` | Applies destination retention rules. | Real deletion requires `--run --yes-delete`. |
 | `create-manual` | Creates a source Timeshift on-demand snapshot. | Existing destination requires UUID-confirmed source identity first. |
 | `show-state` | Prints local `state.json`. | Read-only; can show raw JSON with `--json`. |
+| `destroy-leftovers` | Destroys configured source send-cache/destination leftovers when retiring the app setup. | Dry-run by default; real deletion requires explicit target flag, `--run`, long danger flag, and two typed confirmations. It never deletes `source.snapshot_root`. |
 
 ## Module purpose
 
@@ -38,6 +39,8 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `config.py` | TOML dataclasses and validation. |
 | `sync.py` | Main send/receive transaction and Btrfs safety decisions. |
 | `btrfs.py` | Btrfs command builders, metadata parser, source send-cache helpers. |
+| `destroy.py` | Destructive retirement cleanup for configured source send-cache root and destination target root. |
+| `remote_index.py` | Per-run Btrfs subvolume indexes used to reduce repeated SSH metadata probes. |
 | `timeshift.py` | Remote Timeshift list/create command helpers and parser. |
 | `commands.py` | Local subprocess runner and send/receive stream pipeline. |
 | `state.py` | `state.json` loading, saving, relative paths, metadata refresh, sync markers. |
@@ -102,7 +105,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `SSHConfig._read_password()`: reads password text from either inline config or
   password file.
 - `SSHConfig.environment()`: builds environment variables for password auth.
-- `SSHConfig.base_command()`: builds the base `ssh`/`sshpass ssh` argv.
+- `SSHConfig.base_command()`: builds the base `ssh`/`sshpass ssh` argv, including optional ControlMaster/ControlPersist connection reuse.
 - `SSHRunner`: helper that owns an `SSHConfig` and remote command defaults.
 - `SSHRunner.__init__()`: stores SSH config for later command building.
 - `SSHRunner.command()`: wraps a remote command in the configured SSH command.
@@ -133,6 +136,27 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   status like `At subvol ...` to stderr. That status goes to `.btrfs`/`.mbuffer`
   during success and is copied to `.err` only if the pipeline fails.
 
+### `remote_index.py`
+
+- `BtrfsIndex`: short-lived path/UUID lookup table for one Btrfs root.
+- `BtrfsIndex.add()`: stores one `SubvolumeMeta` by path, UUID, and received UUID.
+- `BtrfsIndex.discard()`: removes one path and its UUID lookup entries after deletion.
+- `BtrfsIndex.contains()`: checks if a path is indexed as a Btrfs subvolume.
+- `BtrfsIndex.meta()`: returns indexed metadata for a path.
+- `BtrfsIndex.child_paths()`: returns indexed descendants deepest-first.
+- `BtrfsIndex.is_empty()`: checks whether an indexed path has indexed child subvolumes.
+- `BtrfsIndex.remove_tree()`: removes a deleted root and descendants from the index.
+- `normalize_path()`: normalizes path strings for stable dictionary keys.
+- `is_under()`: confirms path/root containment without broad matching.
+- `listed_path_to_absolute()`: converts Btrfs relative list paths back to configured absolute paths.
+- `parse_subvolume_list()`: parses `btrfs subvolume list -u -q -R` output into metadata.
+- `_index_from_list_output()`: helper for constructing an index from list output.
+- `build_local_btrfs_index()`: builds a destination index without SSH.
+- `_remote_recursive_index_script()`: builds the single remote shell script used to recursively list source cache subvolumes in one SSH session.
+- `build_remote_btrfs_index()`: builds a source cache index with one SSH command, while still using only restricted sudo+btrfs operations remotely.
+- `refresh_remote_path()`: refreshes one source cache path after creation/deletion-sensitive work.
+- `refresh_local_path()`: refreshes one destination path after receive/delete-sensitive work.
+
 ### `btrfs.py`
 
 - `_clean_uuid()`: normalizes Btrfs `-` UUID output to `None`.
@@ -156,9 +180,9 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `remote_cache_contains()`: tests if a specific cache subvolume exists.
 - `remote_cache_is_empty()`: checks whether a cache parent has any children left.
 - `cache_child_display_path()`: formats cache child paths for logs.
-- `remote_ensure_cache_parent()`: creates the timestamp cache parent if missing.
+- `remote_ensure_cache_parent()`: creates the timestamp cache parent if missing and updates the source cache index when one is supplied.
 - `remote_ensure_readonly_send_path()`: returns an existing read-only source path
-  or creates a read-only cache snapshot for the current send. It may create the
+  or creates a read-only cache snapshot for the current send. It can use the per-run source cache index instead of repeatedly listing the cache root. It may create the
   current send snapshot, but parent selection elsewhere must not recreate missing
   parent cache snapshots because the UUID would change.
 - `path_is_under_cache()`: tells cleanup whether a path belongs to cache root.
@@ -383,9 +407,41 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `cmd_prune()`: loads config, refreshes metadata, and runs retention pruning.
 - `cmd_create_manual()`: runs the standalone manual snapshot command after the
   same source identity guard used by automatic manual creation.
+- `cmd_destroy_leftovers()`: loads config and runs the destructive retirement cleanup command.
 - `cmd_show_state()`: prints local state summary or raw JSON.
 - `build_parser()`: builds the top-level argparse parser and active subcommands.
 - `main()`: CLI entrypoint and final exception-to-exit-code handler.
+
+### `destroy.py`
+
+- `DestroyResult`: summary object for one destructive cleanup root.
+- `DestroyResult.success`: true when a target has no cleanup errors.
+- `_safe_cleanup_path()`: refuses relative paths, `/`, and broad system roots before any destructive delete.
+- `_listed_path_to_absolute()`: converts Btrfs `subvolume list` relative paths back to absolute paths below the configured root. This is needed because Btrfs often reports paths relative to the filesystem top-level.
+- `_is_under()`: verifies a candidate path stays inside the selected cleanup root.
+- `_sort_deepest_first()`: orders subvolumes deepest-first so child subvolumes are deleted before parents.
+- `_collect_recursive_subvolumes()`: walks Btrfs child subvolumes one level at a time so nested cache children such as `<date>/@` and `<date>/@home` are found before deleting the timestamp parent.
+- `_run_quiet()`: runs cleanup probes/deletes without duplicating expected stderr noise.
+- `_run_remote_quiet()`: SSH wrapper for quiet source-side cleanup commands.
+- `_path_exists_status()`: separates missing paths from probe failures so reruns can be idempotent.
+- `_local_exists()`: checks local destination path existence using configured sudo.
+- `_remote_exists()`: checks source path existence using configured sudo over SSH.
+- `_local_subvolume_meta()`: detects whether a local cleanup root itself is a Btrfs subvolume.
+- `_remote_subvolume_meta()`: detects whether a source cleanup root itself is a Btrfs subvolume.
+- `_local_child_subvolumes()`: lists local child Btrfs subvolumes below a cleanup root.
+- `_remote_child_subvolumes()`: lists source child Btrfs subvolumes below a cleanup root.
+- `_local_remove_empty_child_dirs()`: removes empty ordinary directories left by deleted local child subvolumes before parent deletion.
+- `_remote_remove_empty_child_dirs()`: removes empty ordinary directories left by deleted source child subvolumes before parent deletion.
+- `_local_remove_stale_path()`: removes an ordinary local directory that remains at a path after the subvolume at that path was deleted.
+- `_remote_remove_stale_path()`: removes an ordinary source directory that remains at a path after the subvolume at that path was deleted.
+- `_confirm_or_raise()`: requires exact typed confirmation instead of yes/no.
+- `_remote_delete_subvolumes_batched()`: deletes many source-cache subvolumes in one SSH session during `destroy-leftovers`.
+- `_delete_local_tree()`: recursively discovers and deletes local child subvolumes deepest-first, then removes stale ordinary directories/files.
+- `_delete_remote_tree()`: recursively discovers and deletes source child subvolumes deepest-first, then removes stale ordinary directories/files.
+- `_mode_text()`: returns the exact typed phrase for the chosen destructive mode.
+- `_print_target()`: prints one configured cleanup root before any deletion.
+- `_print_result()`: prints one target result with subvolume count and errors.
+- `destroy_leftovers()`: main retirement cleanup entry point. It ignores retention/state by design and attempts source/destination targets independently so one failing side does not prevent the other side from being cleaned.
 
 ### `lock.py`
 
@@ -419,6 +475,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   fails.
 - **Real pruning requires `--run --yes-delete`.** Dry-run and explicit delete
   confirmation are separate so a config mistake cannot silently delete backups.
+- **Destroy-leftovers is deliberately separate from prune.** It ignores state and retention only for retiring the setup, refuses broad paths, and requires `--run`, a long danger flag, and two typed confirmations.
 - **Manual snapshot creation checks source identity on non-empty destinations.** It
   prevents creating a fresh source snapshot for the wrong mounted OS/source host
   and then appending it to an existing backup chain.

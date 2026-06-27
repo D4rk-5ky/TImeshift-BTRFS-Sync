@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 from . import btrfs
+from . import remote_index
 from .config import AppConfig
 from .models import SnapshotMeta, tags_text
 from .state import remove_snapshot_from_state, resolve_destination_path, save_state
@@ -158,6 +159,7 @@ def _cleanup_source_cache_for_pruned_snapshot(
     ssh: SSHRunner,
     snapshot_name: str,
     snapshot_state: dict,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
 ) -> bool:
     """Return True when source send-cache for one pruned snapshot is gone or absent."""
 
@@ -167,6 +169,9 @@ def _cleanup_source_cache_for_pruned_snapshot(
         return True
 
     print("  source send-cache: deleting/checking app-created cache paths")
+    if source_cache_index is not None and source_cache_index.root_missing:
+        print("  warning: source send-cache root could not be indexed; keeping state entry for retry")
+        return False
 
     ok = True
     by_parent: dict[str, list[tuple[str, str]]] = {}
@@ -174,31 +179,37 @@ def _cleanup_source_cache_for_pruned_snapshot(
         by_parent.setdefault(str(Path(send_path).parent), []).append((subvol_name, send_path))
 
     for parent_dir, paths in sorted(by_parent.items()):
-        parent_exists = btrfs.remote_cache_existing_paths(
-            ssh,
-            sudo=config.source.sudo,
-            btrfs_command=config.source.btrfs_command,
-            cache_root=config.source.cache_root,
-            paths=[parent_dir],
-        )
-        if parent_exists is None:
-            print("  warning: could not list source send-cache root; keeping state entry for retry")
-            return False
-        if parent_dir not in parent_exists:
-            print(f"  cache parent: already gone on source, confirmed {parent_dir}")
-            continue
+        if source_cache_index is not None:
+            if not source_cache_index.contains(parent_dir):
+                print(f"  cache parent: already gone on source, confirmed {parent_dir}")
+                continue
+            existing_children = {send_path for _, send_path in paths if source_cache_index.contains(send_path)}
+        else:
+            parent_exists = btrfs.remote_cache_existing_paths(
+                ssh,
+                sudo=config.source.sudo,
+                btrfs_command=config.source.btrfs_command,
+                cache_root=config.source.cache_root,
+                paths=[parent_dir],
+            )
+            if parent_exists is None:
+                print("  warning: could not list source send-cache root; keeping state entry for retry")
+                return False
+            if parent_dir not in parent_exists:
+                print(f"  cache parent: already gone on source, confirmed {parent_dir}")
+                continue
 
-        existing_children = btrfs.remote_cache_existing_child_paths(
-            ssh,
-            sudo=config.source.sudo,
-            btrfs_command=config.source.btrfs_command,
-            cache_root=config.source.cache_root,
-            parent_path=parent_dir,
-            paths=[send_path for _, send_path in paths],
-        )
-        if existing_children is None:
-            print(f"  warning: could not list source send-cache children; keeping state entry for retry: {parent_dir}")
-            return False
+            existing_children = btrfs.remote_cache_existing_child_paths(
+                ssh,
+                sudo=config.source.sudo,
+                btrfs_command=config.source.btrfs_command,
+                cache_root=config.source.cache_root,
+                parent_path=parent_dir,
+                paths=[send_path for _, send_path in paths],
+            )
+            if existing_children is None:
+                print(f"  warning: could not list source send-cache children; keeping state entry for retry: {parent_dir}")
+                return False
 
         for subvol_name, send_path in sorted(paths):
             if send_path not in existing_children:
@@ -212,16 +223,23 @@ def _cleanup_source_cache_for_pruned_snapshot(
                 send_path,
                 check=False,
             )
-            if result.returncode != 0:
+            if result.returncode == 0:
+                if source_cache_index is not None:
+                    source_cache_index.discard(send_path)
+            else:
                 ok = False
                 print("  warning: source send-cache subvolume cleanup failed; keeping state entry for retry")
 
-        empty = btrfs.remote_cache_is_empty(
-            ssh,
-            sudo=config.source.sudo,
-            btrfs_command=config.source.btrfs_command,
-            cache_root=config.source.cache_root,
-            path=parent_dir,
+        empty = (
+            source_cache_index.is_empty(parent_dir)
+            if source_cache_index is not None
+            else btrfs.remote_cache_is_empty(
+                ssh,
+                sudo=config.source.sudo,
+                btrfs_command=config.source.btrfs_command,
+                cache_root=config.source.cache_root,
+                path=parent_dir,
+            )
         )
         if empty is True:
             result = btrfs.remote_delete_subvolume(
@@ -232,6 +250,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
                 check=False,
             )
             if result.returncode == 0:
+                if source_cache_index is not None:
+                    source_cache_index.discard(parent_dir)
                 print(f"  cache parent: deleted {parent_dir}")
             else:
                 ok = False
@@ -373,6 +393,7 @@ def _delete_prune_item(
     plan: PrunePlan,
     source_cache_ssh: SSHRunner | None,
     name: str,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
 ) -> bool:
     """Delete both sides for one prune item, then remove state only after confirmation."""
 
@@ -393,7 +414,13 @@ def _delete_prune_item(
     print("Retention Delete Source send-cache")
     source_cache_gone = True
     if source_cache_ssh:
-        source_cache_gone = _cleanup_source_cache_for_pruned_snapshot(config, source_cache_ssh, name, snapshot_state)
+        source_cache_gone = _cleanup_source_cache_for_pruned_snapshot(
+            config,
+            source_cache_ssh,
+            name,
+            snapshot_state,
+            source_cache_index=source_cache_index,
+        )
     else:
         print("  source send-cache: not checked this run")
 
@@ -465,8 +492,22 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
         if plan.delete and config.source.cleanup_superseded_cache and config.source.cache_root
         else None
     )
+    source_cache_index = (
+        remote_index.build_remote_btrfs_index(
+            source_cache_ssh,
+            config.source.cache_root,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            include_root=True,
+        )
+        if source_cache_ssh and config.source.cache_root
+        else None
+    )
+    if source_cache_index is not None:
+        print()
+        print(f"Source send-cache index: {len(source_cache_index.by_path)} indexed subvolume(s) below {source_cache_index.root}")
     for name in sorted(plan.delete):
-        if _delete_prune_item(config, state, plan, source_cache_ssh, name):
+        if _delete_prune_item(config, state, plan, source_cache_ssh, name, source_cache_index=source_cache_index):
             deleted += 1
     save_state(config.state_file, state)
     summary = "\n".join(

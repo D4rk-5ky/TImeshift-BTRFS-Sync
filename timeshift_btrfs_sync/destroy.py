@@ -1,0 +1,514 @@
+"""Destructive leftover cleanup for removing a ts-btrfs setup."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+import os
+import shlex
+import subprocess
+
+from . import btrfs
+from . import remote_index
+from .commands import quote_join, run_local, sudo_prefix
+from .config import AppConfig
+from .ssh import SSHRunner
+
+PROTECTED_PATHS = {
+    "/",
+    "/home",
+    "/mnt",
+    "/media",
+    "/var",
+    "/run",
+    "/tmp",
+    "/usr",
+    "/etc",
+    "/root",
+    "/boot",
+}
+
+
+@dataclass(slots=True)
+class DestroyResult:
+    """Result summary for one destructive cleanup root."""
+
+    label: str
+    path: str
+    location: str
+    exists: bool = False
+    root_is_subvolume: bool = False
+    subvolumes: list[str] = field(default_factory=list)
+    deleted_subvolumes: int = 0
+    removed_tree: bool = False
+    removed_stale_dirs: int = 0
+    errors: list[str] = field(default_factory=list)
+
+    @property
+    def success(self) -> bool:
+        """Return True when the target is gone or dry-run found no blocking errors."""
+
+        return not self.errors
+
+
+def _safe_cleanup_path(path: str | Path, label: str) -> str:
+    """Return a normalized absolute path or raise for dangerous cleanup roots."""
+
+    text = os.path.normpath(str(path).strip())
+    if not text or text == "." or not text.startswith("/"):
+        raise RuntimeError(f"Refusing unsafe {label} path; it must be absolute: {path!r}")
+    if ".." in Path(text).parts:
+        raise RuntimeError(f"Refusing unsafe {label} path containing '..': {text}")
+    if text.rstrip("/") in PROTECTED_PATHS:
+        raise RuntimeError(f"Refusing to destroy protected broad path for {label}: {text}")
+    if len([part for part in Path(text).parts if part not in {"/", ""}]) < 2:
+        raise RuntimeError(f"Refusing suspiciously broad {label} path: {text}")
+    return text.rstrip("/")
+
+
+def _listed_path_to_absolute(root_path: str, listed_path: str) -> str | None:
+    """Convert a Btrfs-listed path back to an absolute path below root_path."""
+
+    listed = os.path.normpath(listed_path.strip())
+    if listed.startswith("/"):
+        return listed if _is_under(listed, root_path) else None
+
+    root_parts = [part for part in Path(root_path).parts if part not in {"/", ""}]
+    listed_parts = [part for part in Path(listed).parts if part not in {"/", ""}]
+    for index in range(len(root_parts)):
+        suffix = root_parts[index:]
+        if listed_parts[: len(suffix)] == suffix:
+            absolute = "/" + "/".join(root_parts[:index] + listed_parts)
+            return absolute if _is_under(absolute, root_path) else None
+    return None
+
+
+def _is_under(path: str, root: str) -> bool:
+    """Return True when path is root or below root."""
+
+    path_norm = os.path.normpath(path).rstrip("/")
+    root_norm = os.path.normpath(root).rstrip("/")
+    return path_norm == root_norm or path_norm.startswith(root_norm + "/")
+
+
+def _sort_deepest_first(paths: list[str]) -> list[str]:
+    """Return unique paths deepest first for safe Btrfs subvolume deletion."""
+
+    return sorted(set(paths), key=lambda item: (item.count("/"), item), reverse=True)
+
+
+def _collect_recursive_subvolumes(root_path: str, child_loader) -> list[str] | None:
+    """List all descendant Btrfs subvolumes by walking one level at a time."""
+
+    seen: set[str] = set()
+    pending = [root_path]
+    while pending:
+        current = pending.pop(0)
+        children = child_loader(current)
+        if children is None:
+            return None
+        for child in children:
+            if _is_under(child, root_path) and child not in seen:
+                seen.add(child)
+                pending.append(child)
+    return _sort_deepest_first(list(seen))
+
+
+def _run_quiet(cmd: list[str], *, env: dict[str, str] | None = None):
+    """Run a probe/delete command without duplicating expected stderr."""
+
+    try:
+        return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False, env=env)
+    except FileNotFoundError as exc:
+        return subprocess.CompletedProcess(cmd, 127, "", str(exc))
+
+
+def _run_remote_quiet(ssh: SSHRunner, remote_command: str):
+    """Run one SSH command quietly for structured destroy output."""
+
+    return _run_quiet(ssh.command(remote_command), env=ssh.config.environment())
+
+
+def _path_exists_status(result) -> tuple[bool | None, str]:
+    """Return True/False for test -e, or None when the check itself failed."""
+
+    if result.returncode == 0:
+        return True, ""
+    if result.returncode == 1:
+        return False, ""
+    return None, result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+
+
+def _local_exists(path: str, sudo: str) -> tuple[bool | None, str]:
+    """Return local path existence status, using sudo if configured."""
+
+    return _path_exists_status(_run_quiet(sudo_prefix(sudo) + ["test", "-e", path]))
+
+
+def _remote_exists(ssh: SSHRunner, path: str, sudo: str) -> tuple[bool | None, str]:
+    """Return remote path existence status, using source sudo if configured."""
+
+    result = _run_remote_quiet(ssh, quote_join(sudo_prefix(sudo) + ["test", "-e", path]))
+    return _path_exists_status(result)
+
+
+def _local_subvolume_meta(path: str, sudo: str, btrfs_command: str):
+    """Return local Btrfs subvolume metadata, or None for ordinary/missing paths."""
+
+    result = _run_quiet(btrfs.local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]))
+    return btrfs.parse_subvolume_show(result.stdout, Path(path).name, path) if result.returncode == 0 else None
+
+
+def _remote_subvolume_meta(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str):
+    """Return remote Btrfs subvolume metadata, or None for ordinary/missing paths."""
+
+    result = _run_remote_quiet(ssh, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]))
+    return btrfs.parse_subvolume_show(result.stdout, Path(path).name, path) if result.returncode == 0 else None
+
+
+def _local_child_subvolumes(path: str, sudo: str, btrfs_command: str) -> list[str] | None:
+    """Return absolute local child subvolume paths below path."""
+
+    result = _run_quiet(btrfs.local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", path]))
+    if result.returncode != 0:
+        return None
+    converted = [_listed_path_to_absolute(path, item) for item in btrfs._subvolume_list_paths(result.stdout)]
+    return [item for item in converted if item]
+
+
+def _remote_child_subvolumes(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str) -> list[str] | None:
+    """Return absolute remote child subvolume paths below path."""
+
+    result = _run_remote_quiet(ssh, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", path]))
+    if result.returncode != 0:
+        return None
+    converted = [_listed_path_to_absolute(path, item) for item in btrfs._subvolume_list_paths(result.stdout)]
+    return [item for item in converted if item]
+
+
+def _local_remove_empty_child_dirs(path: str, sudo: str) -> int:
+    """Remove empty ordinary directories directly under path before deleting path as a subvolume."""
+
+    cmd = sudo_prefix(sudo) + ["find", path, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-empty", "-delete", "-print"]
+    result = _run_quiet(cmd)
+    return 0 if result.returncode != 0 else len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _remote_remove_empty_child_dirs(ssh: SSHRunner, path: str, sudo: str) -> int:
+    """Remove empty ordinary directories directly under remote path."""
+
+    cmd = quote_join(sudo_prefix(sudo) + ["find", path, "-mindepth", "1", "-maxdepth", "1", "-type", "d", "-empty", "-delete", "-print"])
+    result = _run_remote_quiet(ssh, cmd)
+    return 0 if result.returncode != 0 else len([line for line in result.stdout.splitlines() if line.strip()])
+
+
+def _local_remove_stale_path(path: str, sudo: str) -> bool:
+    """Remove an ordinary directory left behind after local subvolume delete."""
+
+    exists, _ = _local_exists(path, sudo)
+    if not exists:
+        return False
+    result = _run_quiet(sudo_prefix(sudo) + ["rm", "-rf", "--", path])
+    return result.returncode == 0
+
+
+def _remote_remove_stale_path(ssh: SSHRunner, path: str, sudo: str) -> bool:
+    """Remove an ordinary directory left behind after remote subvolume delete."""
+
+    exists, _ = _remote_exists(ssh, path, sudo)
+    if not exists:
+        return False
+    result = _run_remote_quiet(ssh, quote_join(sudo_prefix(sudo) + ["rm", "-rf", "--", path]))
+    return result.returncode == 0
+
+
+def _confirm_or_raise(prompt: str, expected: str) -> None:
+    """Require an exact typed confirmation."""
+
+    answer = input(prompt).strip()
+    if answer != expected:
+        raise RuntimeError("Confirmation did not match; destructive cleanup aborted")
+
+
+def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
+    """Delete one local tree after deleting nested Btrfs subvolumes deepest-first."""
+
+    result = DestroyResult(label=label, path=path, location="destination")
+    exists, exists_error = _local_exists(path, sudo)
+    if exists is None:
+        result.errors.append(f"could not check local path existence: {exists_error}")
+        return result
+    result.exists = exists
+    if not result.exists:
+        return result
+
+    meta = _local_subvolume_meta(path, sudo, btrfs_command)
+    result.root_is_subvolume = meta is not None
+    children = _collect_recursive_subvolumes(path, lambda current: _local_child_subvolumes(current, sudo, btrfs_command))
+    if children is None:
+        if result.root_is_subvolume:
+            result.errors.append("could not recursively list local child subvolumes")
+            return result
+        children = []
+
+    result.subvolumes = _sort_deepest_first(children + ([path] if result.root_is_subvolume else []))
+    if dry_run:
+        return result
+
+    for subvol in result.subvolumes:
+        result.removed_stale_dirs += _local_remove_empty_child_dirs(subvol, sudo)
+        try:
+            btrfs.delete_local_subvolume(Path(subvol), sudo, btrfs_command)
+            result.deleted_subvolumes += 1
+            if _local_remove_stale_path(subvol, sudo):
+                result.removed_stale_dirs += 1
+        except Exception as exc:
+            result.errors.append(f"failed deleting local subvolume {subvol}: {exc}")
+
+    if not result.root_is_subvolume and Path(path).exists():
+        rm = _run_quiet(sudo_prefix(sudo) + ["rm", "-rf", "--", path])
+        if rm.returncode == 0:
+            result.removed_tree = True
+        else:
+            result.errors.append(f"failed removing local directory tree {path}: {rm.stderr.strip() or rm.stdout.strip()}")
+    return result
+
+
+
+def _remote_delete_subvolumes_batched(ssh: SSHRunner, paths: list[str], sudo: str, btrfs_command: str) -> tuple[int, int, list[str]]:
+    """Delete many remote subvolumes in one SSH session."""
+
+    if not paths:
+        return 0, 0, []
+    sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
+    btrfs_q = shlex.quote(btrfs_command)
+    path_lines = "\n".join(paths)
+    script = f"""
+sudo_words={shlex.quote(sudo_words)}
+btrfs_cmd={btrfs_q}
+run_btrfs() {{
+    if [ -n "$sudo_words" ]; then
+        # shellcheck disable=SC2086
+        $sudo_words "$btrfs_cmd" "$@"
+    else
+        "$btrfs_cmd" "$@"
+    fi
+}}
+run_sudo() {{
+    if [ -n "$sudo_words" ]; then
+        # shellcheck disable=SC2086
+        $sudo_words "$@"
+    else
+        "$@"
+    fi
+}}
+while IFS= read -r subvol; do
+    [ -n "$subvol" ] || continue
+    stale_count=$(run_sudo find "$subvol" -mindepth 1 -maxdepth 1 -type d -empty -delete -print 2>/dev/null | wc -l | tr -d ' ')
+    output=$(run_btrfs subvolume delete "$subvol" 2>&1)
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        echo "TSBTRFS_DELETED	$subvol	$stale_count"
+        if run_sudo test -e "$subvol"; then
+            if run_sudo rm -rf -- "$subvol" >/dev/null 2>&1; then
+                echo "TSBTRFS_STALE_REMOVED	$subvol"
+            fi
+        fi
+    else
+        safe_output=$(printf '%s' "$output" | tr '\n' ' ')
+        echo "TSBTRFS_DELETE_ERROR	$subvol	$safe_output"
+    fi
+done <<'TSBTRFS_PATHS'
+{path_lines}
+TSBTRFS_PATHS
+""".strip()
+    result = _run_remote_quiet(ssh, "sh -c " + shlex.quote(script))
+    deleted = 0
+    stale_removed = 0
+    errors: list[str] = []
+    if result.returncode != 0:
+        errors.append(result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}")
+        return deleted, stale_removed, errors
+    for line in result.stdout.splitlines():
+        if line.startswith("TSBTRFS_DELETED\t"):
+            _tag, subvol, stale = line.split("\t", 2)
+            deleted += 1
+            try:
+                stale_removed += int(stale)
+            except ValueError:
+                pass
+        elif line.startswith("TSBTRFS_STALE_REMOVED\t"):
+            stale_removed += 1
+        elif line.startswith("TSBTRFS_DELETE_ERROR\t"):
+            _tag, subvol, detail = line.split("\t", 2)
+            errors.append(f"failed deleting remote subvolume {subvol}: {detail}")
+    return deleted, stale_removed, errors
+
+def _delete_remote_tree(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
+    """Delete one remote tree after deleting nested Btrfs subvolumes deepest-first."""
+
+    result = DestroyResult(label=label, path=path, location="source")
+    exists, exists_error = _remote_exists(ssh, path, sudo)
+    if exists is None:
+        result.errors.append(f"could not check remote path existence: {exists_error}")
+        return result
+    result.exists = exists
+    if not result.exists:
+        return result
+
+    index = remote_index.build_remote_btrfs_index(
+        ssh,
+        path,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        include_root=True,
+    )
+    if index.errors:
+        result.errors.extend(f"could not build remote Btrfs index: {error}" for error in index.errors)
+        return result
+
+    result.root_is_subvolume = index.contains(path)
+    result.subvolumes = _sort_deepest_first(index.child_paths(path) + ([path] if result.root_is_subvolume else []))
+    if dry_run:
+        return result
+
+    deleted, stale_removed, errors = _remote_delete_subvolumes_batched(ssh, result.subvolumes, sudo, btrfs_command)
+    result.deleted_subvolumes = deleted
+    result.removed_stale_dirs += stale_removed
+    result.errors.extend(errors)
+
+    exists_after, _ = _remote_exists(ssh, path, sudo)
+    if not result.root_is_subvolume and exists_after:
+        rm = _run_remote_quiet(ssh, quote_join(sudo_prefix(sudo) + ["rm", "-rf", "--", path]))
+        if rm.returncode == 0:
+            result.removed_tree = True
+        else:
+            result.errors.append(f"failed removing remote directory tree {path}: {rm.stderr.strip() or rm.stdout.strip()}")
+    return result
+
+
+def _mode_text(delete_source: bool, delete_destination: bool) -> str:
+    """Return uppercase confirmation text for the selected destroy mode."""
+
+    if delete_source and delete_destination:
+        return "DELETE BOTH"
+    if delete_source:
+        return "DELETE SOURCE"
+    return "DELETE DESTINATION"
+
+
+def _print_target(label: str, path: str) -> None:
+    """Print one destroy target path."""
+
+    print(f"{label}:")
+    print(f"  {path}")
+
+
+def _print_result(result: DestroyResult, *, dry_run: bool) -> None:
+    """Print one target cleanup result."""
+
+    action = "would delete" if dry_run else "deleted"
+    print(f"{result.label}:")
+    print(f"  path:       {result.path}")
+    if not result.exists:
+        print("  result:     already missing")
+        return
+    print(f"  subvolumes: {len(result.subvolumes)}")
+    if dry_run:
+        for path in result.subvolumes:
+            print(f"    would delete subvolume: {path}")
+        print(f"  result:     {action} ordinary files/directories after subvolumes")
+        return
+    print(f"  deleted subvolumes: {result.deleted_subvolumes}")
+    print(f"  removed stale directories: {result.removed_stale_dirs}")
+    print(f"  removed ordinary tree: {'yes' if result.removed_tree or result.root_is_subvolume else 'no'}")
+    if result.errors:
+        print("  result:     incomplete")
+        for error in result.errors:
+            print(f"    error: {error}")
+    else:
+        print("  result:     complete")
+
+
+def destroy_leftovers(
+    config: AppConfig,
+    *,
+    delete_source: bool,
+    delete_destination: bool,
+    dry_run: bool,
+    danger_confirmed: bool,
+    interactive: bool = True,
+) -> list[DestroyResult]:
+    """Destroy configured source/destination leftovers for retiring this app setup."""
+
+    if not delete_source and not delete_destination:
+        raise RuntimeError("Choose exactly one of --delete-source, --delete-destination, or --delete-both")
+
+    targets: list[tuple[str, str, str]] = []
+    if delete_source:
+        if not config.source.cache_root:
+            raise RuntimeError("--delete-source requires source.cache_root; source.snapshot_root is Timeshift-owned and is never destroyed")
+        targets.append(("Source send-cache root", _safe_cleanup_path(config.source.cache_root, "source.cache_root"), "source"))
+    if delete_destination:
+        targets.append(("Destination target_root", _safe_cleanup_path(config.destination.target_root, "destination.target_root"), "destination"))
+
+    mode_text = _mode_text(delete_source, delete_destination)
+    print("DESTRUCTIVE LEFTOVER CLEANUP")
+    print("============================")
+    print("This command is for permanently removing a ts-btrfs setup.")
+    print("It ignores state.json and retention rules.")
+    print("It recursively deletes Btrfs subvolumes and leftover files/directories.")
+    print("It only deletes app-created source send-cache paths when --delete-source is used.")
+    print()
+    print(f"Run mode: {'dry-run' if dry_run else 'REAL DELETION'}")
+    print(f"Selected mode: {mode_text}")
+    print(f"Configured job: {config.name}")
+    print()
+    for label, path, _ in targets:
+        _print_target(label, path)
+    print()
+
+    if not dry_run:
+        if not danger_confirmed:
+            raise RuntimeError("Real destroy-leftovers requires --i-understand-this-destroys-data")
+        if interactive:
+            _confirm_or_raise(f"Type {mode_text} to continue: ", mode_text)
+            _confirm_or_raise(f"Type the configured job name ({config.name}) to continue: ", config.name)
+
+    ssh = SSHRunner(config.ssh) if delete_source else None
+
+    results: list[DestroyResult] = []
+    print("DESTROY PLAN" if dry_run else "DESTROY EXECUTION")
+    print("============" if dry_run else "=================")
+    for label, path, location in targets:
+        if location == "source":
+            assert ssh is not None
+            result = _delete_remote_tree(
+                ssh,
+                path,
+                config.source.sudo,
+                config.source.btrfs_command,
+                dry_run=dry_run,
+                label=label,
+            )
+        else:
+            result = _delete_local_tree(
+                path,
+                config.destination.sudo,
+                config.destination.btrfs_command,
+                dry_run=dry_run,
+                label=label,
+            )
+        results.append(result)
+        _print_result(result, dry_run=dry_run)
+        print()
+
+    failures = [result for result in results if result.errors]
+    print("DESTROY SUMMARY")
+    print("===============")
+    print(f"  targets:    {len(results)}")
+    print(f"  complete:   {len(results) - len(failures)}")
+    print(f"  incomplete: {len(failures)}")
+    if failures:
+        raise RuntimeError("destroy-leftovers finished with incomplete target cleanup; inspect errors above and rerun after fixing them")
+    return results

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.0.95 config
+# timeshift-btrfs-sync v0.0.99 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -136,6 +136,15 @@ compression = false
 # cipher = "chacha20-poly1305@openssh.com"
 # cipher = "aes128-gcm@openssh.com"
 
+# Optional OpenSSH connection reuse. This helps a lot when identity_file is
+# password protected with high KDF iterations: the first SSH command unlocks the
+# key, then later metadata/send commands can reuse the master connection.
+# The directory used by control_path must already exist and be accessible by the
+# user running ts-btrfs. You can also configure these through extra_args.
+control_master = false
+control_persist = "10m"
+# control_path = "/run/ts-btrfs-ssh-%r@%h:%p"
+
 # Optional password authentication through sshpass on the DESTINATION machine.
 # Key-based auth is safer. If password/password_file is set, remove BatchMode=yes.
 # password = "your-ssh-password"
@@ -262,6 +271,10 @@ send_compressed_data = true
 # Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.
 # Received @ and @home entries are Btrfs subvolumes, so delete those with
 # `btrfs subvolume delete` before removing the ordinary folders.
+# If you are retiring this app setup entirely, use the dangerous explicit command:
+#   ts-btrfs destroy-leftovers --config ./config.toml --delete-both --dry-run
+# Real deletion additionally requires --run, --i-understand-this-destroys-data,
+# and two typed confirmations.
 target_root = "/Backups/Kubuntu/timeshift-btrfs"
 
 # Local sudo prefix for btrfs receive/delete/show commands.

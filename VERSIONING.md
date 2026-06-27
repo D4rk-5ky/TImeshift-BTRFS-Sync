@@ -1,8 +1,32 @@
 # Versioning
 
-This build is version `0.0.95`.
+This build is version `0.0.99`.
 
 ## Changelog
+
+### 0.0.99
+
+- Added `remote_index.py`, a per-run Btrfs subvolume index used to cache source send-cache and destination path/UUID lookups.
+- Sync now builds a source send-cache index and destination index once per run, then reuses those dictionaries for parent/floor validation where safe.
+- Source cache index entries are refreshed after cache snapshot creation; destination index entries are refreshed after each receive; prune removes deleted cache paths from the index.
+- Prune source send-cache cleanup now uses the per-run source cache index instead of repeatedly listing cache parents/children.
+- `destroy-leftovers` now builds the remote source cache tree in one SSH command and deletes remote source cache subvolumes in one batched SSH command.
+- Added optional `[ssh]` `control_master`, `control_persist`, and `control_path` settings for OpenSSH connection reuse, useful with password-protected keys and high KDF iterations.
+
+### 0.0.98
+
+- Changed `destroy-leftovers --delete-source` so it never deletes `source.snapshot_root`, because that path belongs to Timeshift and contains the user's original OS snapshots.
+- `--delete-source` now only deletes app-created source send-cache paths under `source.cache_root`; `--delete-both` deletes source send-cache plus destination target.
+
+### 0.0.97
+
+- Fixed destroy-leftovers recursive Btrfs cleanup so nested source send-cache subvolumes are discovered before deleting timestamp parent subvolumes.
+- After each subvolume delete, removes stale ordinary directories that can be left behind before deleting parent subvolumes.
+
+### 0.0.96
+
+- Added `destroy-leftovers`, a destructive retirement cleanup command for deleting configured cleanup leftovers and/or destination target root after the app is no longer used. Superseded by 0.0.99: source.snapshot_root is no longer a destroy target.
+- Real deletion requires `--run`, `--i-understand-this-destroys-data`, an explicit target flag, and two typed confirmations.
 
 ### 0.0.95
 

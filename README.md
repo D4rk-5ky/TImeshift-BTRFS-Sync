@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.0.95
+# timeshift-btrfs-sync v0.0.99
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -112,6 +112,18 @@ The app checks cache paths with Btrfs subvolume listings under `source.cache_roo
 
 Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. For each pruned snapshot, `prune` attempts both destination deletion and matching source send-cache deletion in one coordinated item. It removes the `state.json` entry only after destination subvolumes and source send-cache are both confirmed gone or already absent. If either side is unavailable, it still attempts the available side and keeps state so the next prune can retry.
 
+## Remote index/cache optimization
+
+At the beginning of a sync run, the app builds short-lived Btrfs indexes for `source.cache_root` and `destination.target_root`. These indexes store paths, UUIDs, parent UUIDs, received UUIDs, and read-only state where Btrfs reports it. Later parent checks, sync-floor checks, and source send-cache cleanup can use dictionary lookups instead of repeatedly starting new SSH sessions for small `btrfs subvolume list/show` probes.
+
+The index is deliberately per-run only. It is refreshed or updated after operations that change the filesystem: cache snapshot creation refreshes the new source cache path, a successful receive refreshes the new destination path, and prune removes deleted source cache paths from the index. Safety-critical incremental matching still requires the same identity rule:
+
+```text
+source parent UUID == destination parent Received UUID
+```
+
+This reduces the overhead from many small SSH calls, especially when the SSH identity file is password-protected with high key-derivation iterations. The actual `btrfs send`/`receive` stream still uses one SSH pipeline per snapshot/subvolume that must be transferred.
+
 On a fresh/full sync into an empty destination, the app first applies the active retention rules to the source Timeshift list and sends only the snapshots that would be kept. For example, if retention keeps the newest 6 hourly, 5 daily, 2 weekly, and 6 monthly snapshots, the first seed starts at the oldest snapshot in that kept set and then sends the kept snapshots in date order. Existing non-empty destinations still use the normal UUID-confirmed parent/floor safety logic.
 
 ## Optional automatic on-demand snapshots
@@ -158,6 +170,59 @@ ts-btrfs sync --config ./config.toml --run --prune --yes-delete
 ```
 
 Normal/user-created Timeshift on-demand snapshots are kept unless `retention.cleanup_ondemand = true`. App-created on-demand snapshots are controlled separately by `manual_snapshot.cleanup_enabled` and `manual_snapshot.retention_count`.
+
+## Destroy leftovers when retiring this setup
+
+`destroy-leftovers` is a separate destructive command for the case where you no longer want to use this app/setup and want to remove app-created source send-cache and/or destination backup leftovers. It ignores retention rules and `state.json` because it is not a normal prune operation. It never deletes `source.snapshot_root`, because that belongs to Timeshift and contains the user's own source snapshots.
+
+Dry-run is the default:
+
+```bash
+# Preview removal of app-created source send-cache root
+ts-btrfs destroy-leftovers --config ./config.toml --delete-source
+
+# Preview removal of destination target_root
+ts-btrfs destroy-leftovers --config ./config.toml --delete-destination
+
+# Preview both sides
+ts-btrfs destroy-leftovers --config ./config.toml --delete-both
+```
+
+Real deletion requires all of these:
+
+```text
+1. valid config file
+2. obvious command: destroy-leftovers
+3. exactly one target flag: --delete-source, --delete-destination, or --delete-both
+4. --run
+5. --i-understand-this-destroys-data
+6. typed confirmation: DELETE SOURCE / DELETE DESTINATION / DELETE BOTH
+7. typed confirmation: the configured job name
+```
+
+Example real deletion:
+
+```bash
+ts-btrfs destroy-leftovers --config ./config.toml --delete-both --run --i-understand-this-destroys-data
+```
+
+Target meanings:
+
+```text
+--delete-source
+  deletes source.cache_root when configured
+  never deletes source.snapshot_root
+
+--delete-destination
+  deletes destination.target_root
+
+--delete-both
+  deletes source.cache_root when configured
+  never deletes source.snapshot_root
+  deletes destination.target_root
+```
+
+The command refuses broad dangerous roots such as `/`, `/media`, `/mnt`, `/home`, `/var`, and `/run`. It deletes Btrfs subvolumes deepest-first, then removes ordinary leftover directories/files. Source and destination are attempted independently, so if one side fails the other side can still complete.
 
 ## Logging and notifications
 
@@ -318,6 +383,20 @@ Shows the local state tracking file.
 | `--config`, `-c` | Loads the chosen TOML config. | Needed to locate `state.json`. |
 | `--json` | Prints raw `state.json`. | Useful for debugging parent metadata or automation parsing. |
 
+### `destroy-leftovers`
+
+Destroys configured source/destination leftover trees when this app setup is being retired. This is not a prune command and does not use retention or `state.json` safety.
+
+| Flag | What it does | Why it may be needed |
+|---|---|---|
+| `--config`, `-c` | Loads the chosen TOML config. | Required so the app knows the exact configured paths and job name. |
+| `--delete-source` | Deletes `source.cache_root` when configured. | Removes app-created source send-cache leftovers only; never deletes `source.snapshot_root`. |
+| `--delete-destination` | Deletes `destination.target_root`. | Removes the backup target tree, including received snapshots and `.ts-btrfs-sync`. |
+| `--delete-both` | Deletes `source.cache_root` and `destination.target_root`. | Full retirement cleanup for app-created source send-cache plus backup destination; never deletes `source.snapshot_root`. |
+| `--dry-run` | Shows the destructive cleanup plan. | Default mode; does not delete anything. |
+| `--run` | Allows real deletion. | Still requires the long danger flag and typed confirmations. |
+| `--i-understand-this-destroys-data` | Required with `--run`. | Prevents accidental execution of this destructive command. |
+
 ## Config reference
 
 Every option below is present in the packaged `config.example.toml`. Commented entries are optional but supported.
@@ -383,6 +462,9 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 | `identity_file` | SSH private key path passed with `ssh -i`. | Recommended for unattended scheduled jobs. |
 | `compression` | Adds `ssh -C`. | Can help on slow links; often unnecessary on fast LANs or already-compressed streams. |
 | `cipher` | Adds `ssh -c <cipher>`. | Lets you choose a fast cipher for your hardware/network. Omit for OpenSSH defaults. |
+| `control_master` | Adds OpenSSH `ControlMaster=auto`. | Reuses an existing SSH connection so password-protected keys are unlocked fewer times. |
+| `control_persist` | Adds OpenSSH `ControlPersist=<value>`. | Keeps the master connection alive between metadata probes and send commands. Default example is `10m`. |
+| `control_path` | Adds OpenSSH `ControlPath=<path>`. | Lets you choose the control socket path. The parent directory must already exist. |
 | `password` | SSH password passed through `sshpass -e`. | Less safe than key auth; use only if needed. Do not use with `BatchMode=yes`. |
 | `password_file` | File containing the SSH password for `sshpass -e`. | Safer than storing the SSH password directly in config. |
 | `extra_args` | Extra OpenSSH arguments as a string list. | Commonly used for `BatchMode=yes` with key auth or host-key behavior. |

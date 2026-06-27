@@ -16,6 +16,7 @@ from .mail import send_status as send_mail_status
 from .mqtt import publish_status
 from .notify import build_notification_payload
 from .retention import prune
+from .destroy import destroy_leftovers
 from .ssh import SSHRunner
 from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
@@ -301,6 +302,22 @@ def cmd_create_manual(args) -> int:
     return _with_logging(config, "create-manual", _run)
 
 
+
+
+def cmd_destroy_leftovers(args) -> int:
+    """Destroy configured leftovers when this app setup is being retired."""
+
+    config = load_config(args.config)
+    dry_run = not args.run
+    destroy_leftovers(
+        config,
+        delete_source=args.delete_source or args.delete_both,
+        delete_destination=args.delete_destination or args.delete_both,
+        dry_run=dry_run,
+        danger_confirmed=args.i_understand_this_destroys_data,
+    )
+    return 0
+
 def cmd_show_state(args) -> int:
     config = load_config(args.config)
 
@@ -329,8 +346,9 @@ Available commands:
   list-source    List source Timeshift snapshots.
   sync           Pull missing snapshots and optionally prune.
   prune          Apply destination retention rules only.
-  create-manual  Create a source Timeshift on-demand snapshot.
-  show-state     Show local state.json.
+  create-manual      Create a source Timeshift on-demand snapshot.
+  show-state         Show local state.json.
+  destroy-leftovers  Permanently delete app-created source send-cache and/or destination leftovers.
 
 Command-specific flags are shown by asking the command for help, for example:
   ts-btrfs sync --help
@@ -432,6 +450,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_config_arg(p)
     p.add_argument("--comment", required=True, help="comment passed to timeshift --create --comments")
+
+    p = new_subparser(
+        sub,
+        "destroy-leftovers",
+        "destroy app-created leftovers",
+        (
+            "Permanently delete app-created source send-cache and/or destination leftover trees.\n"
+            "This ignores state.json and retention rules. Dry-run is the default.\n"
+            "Real deletion requires --run, --i-understand-this-destroys-data, and two typed confirmations."
+        ),
+        cmd_destroy_leftovers,
+    )
+    add_config_arg(p)
+    target = p.add_mutually_exclusive_group(required=True)
+    target.add_argument("--delete-source", action="store_true", help="destroy source.cache_root only; never destroys source.snapshot_root")
+    target.add_argument("--delete-destination", action="store_true", help="destroy destination.target_root")
+    target.add_argument("--delete-both", action="store_true", help="destroy source.cache_root and destination.target_root; never destroys source.snapshot_root")
+    add_run_mode_args(
+        p,
+        dry_run_help="show the destructive cleanup plan; do not delete anything",
+        run_help="perform real destructive cleanup; also requires --i-understand-this-destroys-data and typed confirmations",
+    )
+    p.add_argument(
+        "--i-understand-this-destroys-data",
+        action="store_true",
+        help="required with --run; confirms you understand this recursively destroys configured paths",
+    )
 
     p = new_subparser(sub, "show-state", "show local sync state", "Show state.json, which records completed transfers and incremental parent metadata.", cmd_show_state)
     add_config_arg(p)

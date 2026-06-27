@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 from .commands import quote_join, run_local, sudo_prefix
 from .models import SubvolumeMeta
 from .ssh import SSHRunner
+
+if TYPE_CHECKING:
+    from .remote_index import BtrfsIndex
 
 UUID_KEYS = {"UUID": "uuid", "Parent UUID": "parent_uuid", "Received UUID": "received_uuid"}
 
@@ -255,10 +259,13 @@ def remote_ensure_cache_parent(
     btrfs_command: str,
     cache_root: str,
     cache_parent: str,
+    cache_index: "BtrfsIndex | None" = None,
 ) -> None:
     """Ensure the per-snapshot cache parent exists as a Btrfs subvolume."""
 
-    if remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_parent):
+    if cache_index is not None and cache_index.contains(cache_parent):
+        return
+    if cache_index is None and remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_parent):
         return
 
     result = ssh.run(
@@ -266,13 +273,22 @@ def remote_ensure_cache_parent(
         check=False,
     )
     if result.returncode == 0:
+        if cache_index is not None:
+            from .remote_index import refresh_remote_path
+
+            refresh_remote_path(cache_index, ssh, cache_parent, sudo=sudo, btrfs_command=btrfs_command)
         return
 
     # Race/previous-subvolume case: another subvolume path may have created the
     # date parent just before this command. Re-check with the non-probing list
     # helper and continue if it really exists as a Btrfs subvolume.
     if "target path already exists" in result.stderr.lower():
-        if remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_parent):
+        if cache_index is not None:
+            from .remote_index import refresh_remote_path
+
+            if refresh_remote_path(cache_index, ssh, cache_parent, sudo=sudo, btrfs_command=btrfs_command):
+                return
+        elif remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_parent):
             return
         raise RuntimeError(
             "Source cache parent path already exists but is not detected as a Btrfs subvolume:\n"
@@ -293,6 +309,7 @@ def remote_ensure_readonly_send_path(
     snapshot_name: str,
     subvolume_name: str,
     create_readonly_cache: bool,
+    cache_index: "BtrfsIndex | None" = None,
 ) -> str:
     """Return the original read-only source or create/reuse a read-only cache snapshot."""
 
@@ -310,7 +327,9 @@ def remote_ensure_readonly_send_path(
     cache_parent = readonly_cache_parent_path(cache_root, snapshot_name)
     cache_path = readonly_cache_path(cache_root, snapshot_name, subvolume_name)
 
-    if remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_path):
+    if cache_index is not None and cache_index.contains(cache_path):
+        return cache_path
+    if cache_index is None and remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_path):
         return cache_path
 
     remote_ensure_cache_parent(
@@ -319,6 +338,7 @@ def remote_ensure_readonly_send_path(
         btrfs_command=btrfs_command,
         cache_root=cache_root,
         cache_parent=cache_parent,
+        cache_index=cache_index,
     )
 
     result = ssh.run(
@@ -326,10 +346,19 @@ def remote_ensure_readonly_send_path(
         check=False,
     )
     if result.returncode == 0:
+        if cache_index is not None:
+            from .remote_index import refresh_remote_path
+
+            refresh_remote_path(cache_index, ssh, cache_path, name=subvolume_name, sudo=sudo, btrfs_command=btrfs_command)
         return cache_path
 
     if "target path already exists" in result.stderr.lower():
-        if remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_path):
+        if cache_index is not None:
+            from .remote_index import refresh_remote_path
+
+            if refresh_remote_path(cache_index, ssh, cache_path, name=subvolume_name, sudo=sudo, btrfs_command=btrfs_command):
+                return cache_path
+        elif remote_cache_contains(ssh, sudo, btrfs_command, cache_root, cache_path):
             return cache_path
     raise RuntimeError("Failed to create read-only source cache snapshot.\n" + result.stderr.strip())
 
