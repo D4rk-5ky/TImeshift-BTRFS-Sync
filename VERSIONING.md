@@ -1,8 +1,18 @@
 # Versioning
 
-This build is version `0.9.4`.
+This build is version `0.0.95`.
 
 ## Changelog
+
+### 0.0.95
+
+- Version-only renumber from 0.9.5 to match the old release-count scheme where 0.9.5 corresponds to release 95.
+- No code behavior changed.
+
+### 0.9.5
+
+- Existing-destination sync can now use a saved source send-cache parent even when Timeshift has already pruned the original parent snapshot.
+- This lets a delayed backup continue incrementally from the newest UUID-confirmed destination/source-cache parent, then prune normally afterward.
 
 ### 0.9.4
 

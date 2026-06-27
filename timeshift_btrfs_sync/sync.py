@@ -500,7 +500,7 @@ def _select_verified_parent_send_path(
     ssh: SSHRunner,
     *,
     parent_name: str,
-    parent_subvol: SubvolumeMeta,
+    parent_subvol: SubvolumeMeta | None,
     subvolume_name: str,
     state_parent: dict | None,
 ) -> tuple[str | None, str]:
@@ -512,7 +512,7 @@ def _select_verified_parent_send_path(
     if isinstance(saved_send_path, str) and saved_send_path:
         candidates.append(("saved state send_path", saved_send_path))
 
-    original_source_path = parent_subvol.path
+    original_source_path = parent_subvol.path if parent_subvol else ""
     if original_source_path and all(path != original_source_path for _, path in candidates):
         candidates.append(("original Timeshift source path", original_source_path))
 
@@ -597,8 +597,8 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
     * has matching Btrfs UUID identity between source and destination.
 
     Source snapshots older than or equal to this confirmed floor are skipped by
-    normal sync. If the newest state entry no longer exists on the source, the
-    search automatically walks backward until it finds a safe matching anchor.
+    normal sync. If the original Timeshift snapshot no longer exists, the search
+    can still confirm a floor through the saved app-created send_path in state.
     """
 
     state_snapshots = state.get("snapshots", {})
@@ -610,24 +610,23 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
     checked_mismatch: list[str] = []
 
     for name in sorted(state_snapshots.keys(), reverse=True):
+        source_snapshot = source_by_name.get(name)
         if name not in source_names:
             checked_missing += 1
-            continue
         if not snapshot_is_synced(state, name, config.source.subvolumes):
             continue
 
-        source_snapshot = source_by_name[name]
         state_snapshot = state_snapshots.get(name, {})
         state_subvolumes = state_snapshot.get("subvolumes", {})
 
         reasons: list[str] = []
         ok = True
         for subvolume_name in config.source.subvolumes:
-            source_subvol = source_snapshot.subvolumes.get(subvolume_name)
+            source_subvol = source_snapshot.subvolumes.get(subvolume_name) if source_snapshot else None
             state_subvol = state_subvolumes.get(subvolume_name)
-            if not source_subvol or not state_subvol:
+            if not state_subvol:
                 ok = False
-                reasons.append(f"{subvolume_name}: missing source or state subvolume")
+                reasons.append(f"{subvolume_name}: missing state subvolume")
                 break
             destination_path_text = state_subvol.get("destination_path")
             if not isinstance(destination_path_text, str) or not destination_path_text:
@@ -642,8 +641,12 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
                 break
 
             sub_reasons: list[str] = []
-            source_path = source_subvol.path
+            source_path = source_subvol.path if source_subvol else ""
             candidate_paths = [path for path in (state_subvol.get("send_path"), source_path) if isinstance(path, str) and path]
+            if not candidate_paths:
+                ok = False
+                reasons.append(f"{subvolume_name}: no saved send_path and original source snapshot is not listed")
+                break
             for path in dict.fromkeys(candidate_paths):
                 sub_ok, reason = _match_source_path_to_destination_received_uuid(
                     config,
@@ -664,6 +667,8 @@ def _find_confirmed_sync_floor(config: AppConfig, ssh: SSHRunner, state: dict, s
                 break
 
         if ok:
+            if name not in source_names:
+                return name, "newest state snapshot is no longer in Timeshift, but saved source send-cache UUIDs are confirmed"
             if checked_missing:
                 return name, f"newest state snapshot was not on source; walked back {checked_missing} entr{'y' if checked_missing == 1 else 'ies'} and confirmed UUIDs"
             return name, "newest state/source snapshot confirmed by UUIDs"
@@ -739,14 +744,14 @@ def _select_parent(
 
     # If the newest state parent no longer matches because its source cache was
     # deleted, an older state parent can still be a valid incremental parent. Add
-    # every older synced state candidate, newest first, so the validator can walk
-    # back until it finds a source path whose UUID matches destination received_uuid.
+    # every older synced state candidate, newest first. A candidate may be used
+    # through its saved send_path even if Timeshift already pruned the original.
     for name in sorted(state.get("snapshots", {}).keys(), reverse=True):
-        if name >= snapshot.name or name not in source_names or name in candidate_names:
+        if name >= snapshot.name or name in candidate_names:
             continue
         item = state.get("snapshots", {}).get(name, {})
         sub = item.get("subvolumes", {}).get(subvolume_name) if isinstance(item, dict) else None
-        if isinstance(sub, dict) and sub.get("status") == "ok":
+        if isinstance(sub, dict) and sub.get("status") == "ok" and (name in source_names or sub.get("send_path")):
             candidate_names.append(name)
             state_parent_data[name] = sub
 
@@ -759,19 +764,19 @@ def _select_parent(
     candidate_failures: list[str] = []
     for parent_name in candidate_names:
         parent_snapshot = source_by_name.get(parent_name)
-        if not parent_snapshot:
-            continue
-        parent_subvol = parent_snapshot.subvolumes.get(subvolume_name)
-        if not parent_subvol:
+        parent_subvol = parent_snapshot.subvolumes.get(subvolume_name) if parent_snapshot else None
+        parent_state = state_parent_data.get(parent_name)
+        saved_send_path = parent_state.get("send_path") if parent_state else None
+        if not parent_subvol and not saved_send_path:
             continue
 
         if dry_run:
             # Dry-run remains fast. It explains that real mode will verify the
             # parent before using it.
+            if isinstance(saved_send_path, str) and saved_send_path:
+                return parent_name, saved_send_path
             return parent_name, _preview_send_path(config, parent_name, parent_subvol)
 
-        parent_state = state_parent_data.get(parent_name)
-        saved_send_path = parent_state.get("send_path") if parent_state else None
         if (
             isinstance(saved_send_path, str)
             and saved_send_path

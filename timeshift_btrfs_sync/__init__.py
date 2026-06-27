@@ -1,3 +1,3 @@
 """Package metadata for timeshift-btrfs-sync."""
 
-__version__ = "0.9.4"
+__version__ = "0.0.95"

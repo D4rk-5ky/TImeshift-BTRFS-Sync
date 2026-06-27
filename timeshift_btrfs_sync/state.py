@@ -297,16 +297,23 @@ def refresh_state_metadata_and_report(
     return changed
 
 
-def latest_synced_before(state: dict[str, Any], snapshot_name: str, subvolume_name: str, source_names: set[str]) -> tuple[str, dict[str, Any]] | None:
-    """Return newest synced parent snapshot for incremental send."""
+def latest_synced_before(state: dict[str, Any], snapshot_name: str, subvolume_name: str, source_names: set[str] | None = None) -> tuple[str, dict[str, Any]] | None:
+    """Return newest older synced parent candidate.
+
+    A parent may be usable even after Timeshift removed the original source
+    snapshot, as long as state still has an app-created read-only send_path.
+    """
 
     candidates: list[tuple[str, dict[str, Any]]] = []
     for name, item in state.get("snapshots", {}).items():
-        if name >= snapshot_name or name not in source_names:
+        if name >= snapshot_name:
             continue
         sub = item.get("subvolumes", {}).get(subvolume_name)
-        if sub and sub.get("status") == "ok":
-            candidates.append((name, sub))
+        if not sub or sub.get("status") != "ok":
+            continue
+        if source_names and name not in source_names and not sub.get("send_path"):
+            continue
+        candidates.append((name, sub))
     if not candidates:
         return None
     candidates.sort(key=lambda x: x[0])

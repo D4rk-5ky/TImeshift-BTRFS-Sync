@@ -199,7 +199,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `remove_snapshot_from_state()`: removes a snapshot after successful pruning.
 - `refresh_state_metadata_and_report()`: shared sync/prune helper that refreshes
   mutable metadata, reports changed snapshot names, and saves only when allowed.
-- `latest_synced_before()`: finds the newest older synced parent candidate.
+- `latest_synced_before()`: finds the newest older synced parent candidate, including saved send-cache parents when the original Timeshift snapshot was pruned.
 
 ### `sync.py`
 
