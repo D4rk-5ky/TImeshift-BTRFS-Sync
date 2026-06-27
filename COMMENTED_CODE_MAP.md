@@ -49,7 +49,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `notify.py` | Shared notification payload/timestamp builder. |
 | `mail.py` | Optional SMTP status email with safe attachment filtering. |
 | `mqtt.py` | Optional MQTT status JSON publishing. |
-| `ssh.py` | SSH command wrapper and password-file environment handling. |
+| `ssh.py` | SSH command wrapper, password-file environment handling, and safe ControlMaster socket validation. |
 | `lock.py` | Per-config lock file guard. |
 | `models.py` | Shared dataclasses and display helpers. |
 
@@ -95,9 +95,16 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `load_config()`: reads TOML, builds all config dataclasses, and performs
   safety validation. Password/password_file pair checks remain explicit because
   that validation protects secrets and should not be hidden in a broad helper.
+  When `ssh.control_master` is enabled, it validates that `ssh.control_path` uses
+  a private local socket directory before any SSH command can run.
 
 ### `ssh.py`
 
+- `_is_relative_to()`: path containment helper used to reject shared temporary
+  ControlPath locations without broad string matching.
+- `validate_control_path_safety()`: verifies that SSH ControlMaster has an
+  explicit absolute ControlPath whose parent directory exists, is owned by the
+  user running the app, is private, and is not under shared temporary storage.
 - `SSHConfig`: immutable SSH connection/auth settings.
 - `SSHConfig.target()`: returns the `user@host` or `host` target string.
 - `SSHConfig.uses_password_auth()`: reports whether password/sshpass mode is

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.0.99 config
+# timeshift-btrfs-sync v0.1.0 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -136,14 +136,31 @@ compression = false
 # cipher = "chacha20-poly1305@openssh.com"
 # cipher = "aes128-gcm@openssh.com"
 
-# Optional OpenSSH connection reuse. This helps a lot when identity_file is
-# password protected with high KDF iterations: the first SSH command unlocks the
-# key, then later metadata/send commands can reuse the master connection.
-# The directory used by control_path must already exist and be accessible by the
-# user running ts-btrfs. You can also configure these through extra_args.
+# Optional OpenSSH connection reuse. Disabled by default.
+#
+# What it is:
+#   OpenSSH ControlMaster creates one local control socket. Later SSH commands
+#   reuse that already-authenticated connection instead of unlocking the private
+#   key again. This can greatly speed up encrypted keys with high KDF iterations.
+#
+# Security warning:
+#   Anyone who can access the control socket may be able to reuse the source SSH
+#   connection without the private key passphrase. Only enable this on a trusted
+#   destination machine, and only with a private ControlPath directory.
+#
+# Safe setup when ts-btrfs runs as root:
+#   sudo mkdir -p /run/ts-btrfs-ssh
+#   sudo chown root:root /run/ts-btrfs-ssh
+#   sudo chmod 0700 /run/ts-btrfs-ssh
+# /run is usually cleared on reboot, so recreate this directory before scheduled
+# jobs, or use a systemd pre-start step / tmpfiles.d rule.
+#
+# The app refuses control_master=true unless control_path is absolute and its
+# parent directory already exists, is owned by the user running ts-btrfs, is not
+# group/other accessible, and is not inside /tmp, /var/tmp, or /dev/shm.
 control_master = false
 control_persist = "10m"
-# control_path = "/run/ts-btrfs-ssh-%r@%h:%p"
+# control_path = "/run/ts-btrfs-ssh/%C"
 
 # Optional password authentication through sshpass on the DESTINATION machine.
 # Key-based auth is safer. If password/password_file is set, remove BatchMode=yes.

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 import tomllib
 
-from .ssh import SSHConfig
+from .ssh import SSHConfig, validate_control_path_safety
 from .mqtt import MQTTConfig
 from .mail import MailConfig
 
@@ -248,6 +248,15 @@ def load_config(path: str | Path) -> AppConfig:
     extra_args = _string_list(ssh_raw.get("extra_args"), "ssh.extra_args")
     if (password or password_file) and any("BatchMode=yes" in arg for arg in extra_args):
         raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
+    control_master = _bool(ssh_raw, "ssh", "control_master", False)
+    control_persist = _optional_str(ssh_raw, "control_persist")
+    control_path = _optional_str(ssh_raw, "control_path")
+    if control_master:
+        try:
+            validate_control_path_safety(control_path)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
+
     ssh = SSHConfig(
         host=_as_str(ssh_raw.get("host"), "ssh.host"),
         user=_optional_str(ssh_raw, "user"),
@@ -257,9 +266,9 @@ def load_config(path: str | Path) -> AppConfig:
         password_file=password_file,
         compression=_bool(ssh_raw, "ssh", "compression", False),
         cipher=_optional_str(ssh_raw, "cipher"),
-        control_master=_bool(ssh_raw, "ssh", "control_master", False),
-        control_persist=_optional_str(ssh_raw, "control_persist"),
-        control_path=_optional_str(ssh_raw, "control_path"),
+        control_master=control_master,
+        control_persist=control_persist,
+        control_path=control_path,
         extra_args=extra_args,
     )
 

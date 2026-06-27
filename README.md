@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.0.99
+# timeshift-btrfs-sync v0.1.0
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -462,12 +462,41 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 | `identity_file` | SSH private key path passed with `ssh -i`. | Recommended for unattended scheduled jobs. |
 | `compression` | Adds `ssh -C`. | Can help on slow links; often unnecessary on fast LANs or already-compressed streams. |
 | `cipher` | Adds `ssh -c <cipher>`. | Lets you choose a fast cipher for your hardware/network. Omit for OpenSSH defaults. |
-| `control_master` | Adds OpenSSH `ControlMaster=auto`. | Reuses an existing SSH connection so password-protected keys are unlocked fewer times. |
+| `control_master` | Adds OpenSSH `ControlMaster=auto`. | Reuses an existing SSH connection so password-protected keys are unlocked fewer times. Disabled by default because the local control socket must be protected. |
 | `control_persist` | Adds OpenSSH `ControlPersist=<value>`. | Keeps the master connection alive between metadata probes and send commands. Default example is `10m`. |
-| `control_path` | Adds OpenSSH `ControlPath=<path>`. | Lets you choose the control socket path. The parent directory must already exist. |
+| `control_path` | Adds OpenSSH `ControlPath=<path>`. | Required when `control_master = true`. The parent directory must already exist, be owned by the user running the app, and be chmod `0700`. |
 | `password` | SSH password passed through `sshpass -e`. | Less safe than key auth; use only if needed. Do not use with `BatchMode=yes`. |
 | `password_file` | File containing the SSH password for `sshpass -e`. | Safer than storing the SSH password directly in config. |
 | `extra_args` | Extra OpenSSH arguments as a string list. | Commonly used for `BatchMode=yes` with key auth or host-key behavior. |
+
+#### Safe SSH ControlMaster use
+
+`control_master` is optional OpenSSH connection multiplexing. The first SSH command authenticates normally, then OpenSSH keeps a local master connection alive for `control_persist`. Later `ssh` commands reuse a Unix-domain control socket instead of unlocking the private key again. This is useful when the private key has a passphrase with high KDF iterations, because the app runs many short metadata commands around the larger `btrfs send` pipeline.
+
+The security tradeoff is important: anyone who can access the local control socket may be able to reuse the already-authenticated SSH connection without knowing the private key passphrase. In this app that connection reaches the source SSH user, which often has restricted passwordless `sudo btrfs`/`timeshift` permissions, so the socket must be private.
+
+Safe setup when the app runs as root on the destination:
+
+```bash
+sudo mkdir -p /run/ts-btrfs-ssh
+sudo chown root:root /run/ts-btrfs-ssh
+sudo chmod 0700 /run/ts-btrfs-ssh
+```
+
+`/run` is normally cleared on reboot, so recreate this directory before scheduled jobs, or create it with a systemd service/timer pre-start step or a `tmpfiles.d` rule.
+
+Then enable:
+
+```toml
+[ssh]
+control_master = true
+control_persist = "10m"
+control_path = "/run/ts-btrfs-ssh/%C"
+```
+
+The app validates this at config load time. With `control_master = true`, `control_path` must be absolute, the parent directory must already exist, the parent must be owned by the user running `ts-btrfs`, the parent must not be readable/writable/searchable by group or other users, and the parent must not be inside shared temporary locations such as `/tmp`, `/var/tmp`, or `/dev/shm`.
+
+Leave `control_master = false` for maximum isolation, on shared machines, or anywhere you cannot guarantee the socket directory is private.
 
 ### `[manual_snapshot]`
 

@@ -7,8 +7,73 @@ chosen SSH cipher.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 from .commands import Completed, CommandError, run_local
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    """Return True when path is root or below root without broad string matching."""
+
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def validate_control_path_safety(control_path: str | None) -> None:
+    """Validate that an SSH ControlPath socket directory is private.
+
+    OpenSSH ControlMaster creates a local Unix-domain control socket. Any local
+    user that can access that socket may be able to reuse the already
+    authenticated SSH connection without unlocking the private key again. The app
+    therefore requires an explicit absolute ControlPath whose parent directory
+    already exists, is owned by the current user, and is not accessible by group
+    or other users. Shared temporary locations are rejected even when a nested
+    directory appears private, because they are easy to configure incorrectly.
+    """
+
+    if not control_path:
+        raise ValueError(
+            "ssh.control_path must be set when ssh.control_master is true; "
+            "use a private directory such as /run/ts-btrfs-ssh/%C"
+        )
+
+    expanded = Path(control_path).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError("ssh.control_path must be an absolute path when ssh.control_master is true")
+
+    parent = expanded.parent
+    unsafe_roots = [Path("/tmp"), Path("/var/tmp"), Path("/dev/shm")]
+    for unsafe_root in unsafe_roots:
+        if _is_relative_to(parent, unsafe_root):
+            raise ValueError(
+                f"ssh.control_path parent must not be inside shared temporary storage: {parent}. "
+                "Use a private directory such as /run/ts-btrfs-ssh owned by the user running ts-btrfs."
+            )
+
+    if not parent.exists():
+        raise ValueError(
+            f"ssh.control_path parent directory does not exist: {parent}. "
+            "Create it first with mkdir -p, chown it to the user running ts-btrfs, and chmod it 0700."
+        )
+    if not parent.is_dir():
+        raise ValueError(f"ssh.control_path parent is not a directory: {parent}")
+
+    stat_result = parent.stat()
+    current_uid = os.geteuid()
+    if stat_result.st_uid != current_uid:
+        raise ValueError(
+            f"ssh.control_path parent must be owned by the user running ts-btrfs: {parent}. "
+            f"owner uid is {stat_result.st_uid}, current uid is {current_uid}."
+        )
+
+    if stat_result.st_mode & 0o077:
+        raise ValueError(
+            f"ssh.control_path parent must be private: {parent}. "
+            "Run chmod 0700 on that directory before enabling ssh.control_master."
+        )
 
 
 @dataclass(slots=True)

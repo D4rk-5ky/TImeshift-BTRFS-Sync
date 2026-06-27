@@ -1,8 +1,14 @@
 # Versioning
 
-This build is version `0.0.99`.
+This build is version `0.1.0`.
 
 ## Changelog
+
+### 0.1.0
+
+- Added safety validation and documentation for SSH ControlMaster/ControlPath connection reuse.
+- `ssh.control_master = true` now requires an explicit absolute `ssh.control_path` whose parent directory already exists, is owned by the user running the app, is private (`chmod 0700` style), and is not inside shared temporary storage such as `/tmp`, `/var/tmp`, or `/dev/shm`.
+- Documented what OpenSSH multiplexing is, how it speeds up passphrase-protected keys, and why the local control socket must be protected.
 
 ### 0.0.99
 
@@ -25,7 +31,7 @@ This build is version `0.0.99`.
 
 ### 0.0.96
 
-- Added `destroy-leftovers`, a destructive retirement cleanup command for deleting configured cleanup leftovers and/or destination target root after the app is no longer used. Superseded by 0.0.99: source.snapshot_root is no longer a destroy target.
+- Added `destroy-leftovers`, a destructive retirement cleanup command for deleting configured cleanup leftovers and/or destination target root after the app is no longer used. Superseded by 0.0.98: source.snapshot_root is no longer a destroy target.
 - Real deletion requires `--run`, `--i-understand-this-destroys-data`, an explicit target flag, and two typed confirmations.
 
 ### 0.0.95
