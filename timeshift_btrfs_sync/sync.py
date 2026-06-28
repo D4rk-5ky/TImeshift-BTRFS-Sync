@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from . import btrfs, timeshift
-from . import remote_index
+from . import preflight, remote_index
 from .commands import stream_pipeline
 from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta, tags_text
@@ -211,6 +211,48 @@ def confirm_source_identity_before_manual_snapshot(
     return confirmed_name, reason
 
 
+
+def _is_app_manual_snapshot(snapshot: SnapshotMeta, marker: str) -> bool:
+    """Return True for source Timeshift O snapshots created by this app.
+
+    The app cannot rely on state.json for interrupted runs, because an on-demand
+    snapshot may have been created before any destination receive completed. The
+    source Timeshift list still contains the comment/tag, so this source-side
+    check lets the next run notice older pending app-created snapshots and keep
+    them in the normal oldest-to-newest send order.
+    """
+
+    marker_text = (marker or "").strip().lower()
+    if not marker_text:
+        return False
+    return "O" in snapshot.tags and marker_text in str(snapshot.comment or "").lower()
+
+
+def _pending_app_manual_snapshots(
+    config: AppConfig,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+) -> list[SnapshotMeta]:
+    """Return app-created on-demand snapshots that still need syncing.
+
+    This protects interrupted retry behavior. If a previous run created an
+    automatic Timeshift on-demand snapshot and then failed before completing the
+    send/receive, the next run should still process that existing source
+    snapshot in normal oldest-to-newest order. It must not suppress creation of
+    a fresh on-demand snapshot, because the previous one may be old.
+    """
+
+    pending: list[SnapshotMeta] = []
+    for snapshot in source_by_name.values():
+        if not _is_app_manual_snapshot(snapshot, config.manual_snapshot.marker):
+            continue
+        expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
+        if not expected:
+            continue
+        if not snapshot_is_synced(state, snapshot.name, expected):
+            pending.append(snapshot)
+    return _snapshots_in_sync_order(pending)
+
 def _maybe_create_manual_snapshot(
     config: AppConfig,
     ssh: SSHRunner,
@@ -248,6 +290,16 @@ def _maybe_create_manual_snapshot(
         print("Manual snapshot creation: skipped because --snapshot was specified.")
         _human_rule("----")
         return False
+
+    pending_manual = _pending_app_manual_snapshots(config, state, source_by_name)
+    if pending_manual:
+        _human_blank()
+        print("PENDING APP ON-DEMAND SNAPSHOT(S)")
+        print(f"  existing pending: {', '.join(snapshot.name for snapshot in pending_manual)}")
+        print("  recovery:         they remain in the normal oldest-to-newest sync order")
+        print("  create policy:    still create a fresh on-demand snapshot for this run")
+        print("  reason:           the previous app-created on-demand snapshot may be old after an interrupted run")
+        _human_rule("----")
 
     _human_blank()
     confirm_source_identity_before_manual_snapshot(
@@ -365,6 +417,12 @@ def _destination_has_existing_snapshots(config: AppConfig) -> bool:
     return False
 
 
+
+def _snapshot_destination_paths_exist(config: AppConfig, snapshot_name: str, subvolume_names: list[str]) -> bool:
+    """Return True only when every expected destination subvolume path exists."""
+
+    return all(_dest_subvolume_path(config, snapshot_name, name).exists() for name in subvolume_names)
+
 def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: SubvolumeMeta) -> str:
     """Return the send path that would be used, without creating cache snapshots.
 
@@ -415,7 +473,12 @@ def _ensure_source_send_path(
     )
 
 
-def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, subvolume_name: str) -> None:
+def _cleanup_incomplete_destination_receive(
+    config: AppConfig,
+    dest_path: Path,
+    subvolume_name: str,
+    destination_index: remote_index.BtrfsIndex | None = None,
+) -> None:
     """Delete an incomplete destination receive before retrying.
 
     If the user presses Ctrl+C or SSH drops while `btrfs receive` is running,
@@ -434,6 +497,8 @@ def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, 
 
     _human_blank()
     print(f"  {subvolume_name}: found incomplete destination receive not recorded in state.json")
+    print("  retry policy: delete only this incomplete destination path now")
+    print("  order policy: keep the existing snapshot queue order; resend when this snapshot/subvolume is reached")
     print()
     print(f"LOCAL INCOMPLETE DELETE: {dest_path}")
     print()
@@ -468,7 +533,11 @@ def _cleanup_incomplete_destination_receive(config: AppConfig, dest_path: Path, 
     except Exception:
         pass
 
-    print("  incomplete destination receive removed; retrying transfer")
+    if destination_index is not None:
+        destination_index.remove_tree(dest_path)
+
+    print("  incomplete destination receive removed")
+    print("  retrying this snapshot/subvolume at its current oldest-to-newest queue position")
     _human_rule("---")
 
 
@@ -926,6 +995,13 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     ssh = SSHRunner(config.ssh)
     ssh.test()
 
+    # Before Timeshift creates a fresh on-demand snapshot, before source cache
+    # snapshots are created, and before any send/receive pipeline starts, verify
+    # that the configured source/destination roots are reachable. This prevents
+    # avoidable leftover on-demand snapshots when snapshot_root, cache_root, or
+    # target_root is missing/mis-mounted after a restore or setup change.
+    preflight.check_required_sync_paths(config, ssh, dry_run=dry_run)
+
     source_cache_index = (
         remote_index.build_remote_btrfs_index(
             ssh,
@@ -1044,8 +1120,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
-            already_synced += len(expected)
-            continue
+            if _snapshot_destination_paths_exist(config, snapshot.name, expected):
+                already_synced += len(expected)
+                continue
+            print(f"Snapshot {snapshot.name}: state says synced, but at least one destination path is missing; retrying missing path(s).")
+            _human_blank()
         if limit is not None and transferred >= limit:
             break
 
@@ -1057,6 +1136,12 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             _human_blank()
 
         for subvol_name in config.source.subvolumes:
+            # Incomplete destination cleanup is intentionally performed here,
+            # inside the already sorted snapshot loop. This matters for failed
+            # on-demand snapshots too: the app does not jump them ahead or
+            # handle them specially. It deletes only the partial destination
+            # path for the current snapshot/subvolume, then sends it when the
+            # normal oldest-to-newest order reaches that exact item.
             subvolume = snapshot.subvolumes.get(subvol_name)
             if not subvolume:
                 continue
@@ -1068,7 +1153,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 _human_blank()
                 continue
             if dest_path.exists() and not dry_run:
-                _cleanup_incomplete_destination_receive(config, dest_path, subvol_name)
+                _cleanup_incomplete_destination_receive(config, dest_path, subvol_name, destination_index)
 
             parent_name, parent_send_path = _select_parent(
                 config,

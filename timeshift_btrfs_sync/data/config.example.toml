@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.2 config
+# timeshift-btrfs-sync v0.1.9 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -186,6 +186,12 @@ extra_args = ["-o", "BatchMode=yes"]
 # After creation, the app re-reads timeshift --list. The new snapshot is not
 # sent directly or prioritized; it is sent only when the normal oldest-to-newest
 # sync loop reaches its timestamp.
+#
+# Interrupted-run safety: if a previous run created an app on-demand snapshot and
+# failed before it was fully synced, the next normal sync detects that pending
+# app snapshot by tag O plus marker and keeps it in normal oldest-to-newest
+# order. It still creates a fresh on-demand snapshot for the current run because
+# the older pending snapshot may no longer represent the current system state.
 # Dry-run only prints what would happen. If --snapshot is used, automatic
 # creation is skipped because that command is a targeted sync.
 enabled = true
@@ -207,6 +213,13 @@ marker = "ts-btrfs-sync"
 # snapshots/newest common parent. Set cleanup_enabled = false to keep them all.
 retention_count = 10
 
+# Sync path preflight:
+# Before automatic/manual on-demand snapshot creation and before any send/receive
+# work, the app verifies source.snapshot_root, configured source.cache_root, and
+# destination.target_root. The source checks use sudo btrfs subvolume list -o
+# instead of generic passwordless mkdir/test/rm access. If one of these roots is
+# missing or not mounted, sync fails before creating a fresh on-demand snapshot.
+#
 [source]
 # Source-side command prefix. sudo -n means sudo must not prompt for a password.
 sudo = "sudo -n"

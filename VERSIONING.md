@@ -1,6 +1,44 @@
 # Versioning
 
-This build is version `0.1.2`.
+This build is version `0.1.9`.
+
+### 0.1.9
+
+- Removed source-side `sudo find`, `sudo test`, and `sudo rm` usage from `destroy-leftovers`.
+- Source-side destroy cleanup now uses passwordless `sudo btrfs` for Btrfs subvolume deletion/listing only.
+- Empty stale ordinary directories left after source subvolume deletion are removed with normal non-sudo `rmdir` as a best-effort cleanup. If permissions prevent that, the app reports the remaining directory instead of requesting broader sudo.
+- This preserves the intended least-privilege source sudoers model where the source user only needs passwordless `timeshift` and `btrfs`.
+
+### 0.1.7
+
+- Added a sync path preflight before automatic/manual on-demand creation and before send/receive work.
+- The preflight checks `source.snapshot_root`, configured `source.cache_root`, and `destination.target_root` up front, so a missing/mis-mounted path fails before a fresh on-demand Timeshift snapshot is created.
+- The source checks are batched into one SSH call and use the configured `sudo btrfs subvolume list -o <path>` access instead of generic sudo filesystem permissions.
+- `create-manual` now runs the same path preflight before creating a standalone Timeshift on-demand snapshot.
+
+### 0.1.6
+
+- On-demand retry-order guarantee: if an app-created on-demand snapshot itself failed or was only partially received on the destination, sync deletes only that incomplete destination path and retries it when the existing oldest-to-newest queue reaches that snapshot/subvolume.
+- Added explicit output for incomplete destination cleanup showing the retry policy and order policy, so failed on-demand snapshots are visibly not jumped ahead or handled out of order.
+- Added code comments around the sorted snapshot/subvolume loop documenting that incomplete destination cleanup is intentionally done inside the normal order loop.
+
+### 0.1.5
+
+- Fresh on-demand creation after interrupted runs: if an older app-created on-demand snapshot is still pending, the next normal `sync` keeps that pending snapshot in the oldest-to-newest queue but still creates a new on-demand snapshot for the current run.
+- The pending snapshot notice now explains that older failed-run snapshots remain queued and that a fresh snapshot is still created because the old one may no longer represent the current system state.
+- Interrupted/partial destination receives are still deleted and retried when their snapshot/subvolume is reached in the normal send order.
+
+### 0.1.4
+
+- Interrupted-run retry safety: if an earlier sync already created an app on-demand Timeshift snapshot but did not finish syncing it, the next normal `sync` skips creating a duplicate manual snapshot and processes the existing pending app-created snapshot in normal oldest-to-newest order.
+- Incomplete destination receives are still cleaned before retry, and the destination per-run index is invalidated for the deleted path so later parent checks do not use stale metadata.
+- If `state.json` says a snapshot is fully synced but one of the expected destination paths is missing, sync no longer skips the whole snapshot; it retries the missing path(s).
+
+### 0.1.3
+
+- Added normalized payload match statistics to `destroy-leftovers --delete-both`.
+- The summary now compares real source-side send payload against destination received payload by snapshot/subvolume name, so raw Btrfs helper/container subvolume counts no longer look like retention mismatches.
+- The comparison understands v0.1.2 direct read-only Timeshift sends: protected Timeshift original send paths from state.json are counted as source-side payload, but are still never deleted by `destroy-leftovers` or prune.
 
 ### 0.1.2
 

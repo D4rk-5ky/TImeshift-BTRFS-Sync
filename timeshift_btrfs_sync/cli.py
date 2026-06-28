@@ -20,6 +20,7 @@ from .destroy import destroy_leftovers
 from .ssh import SSHRunner
 from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
+from .preflight import check_required_sync_paths
 from .timeshift import create_remote_manual_snapshot
 
 
@@ -286,6 +287,7 @@ def cmd_create_manual(args) -> int:
     def _run() -> int:
         ssh = SSHRunner(config.ssh)
         ssh.test()
+        check_required_sync_paths(config, ssh, dry_run=False)
         confirm_source_identity_before_manual_snapshot(
             config,
             ssh,
@@ -443,8 +445,10 @@ def build_parser() -> argparse.ArgumentParser:
         "create source Timeshift tag O snapshot",
         (
             "Ask source Timeshift to create an on-demand/manual snapshot with tag O.\n"
-            "If the destination already contains snapshots, the source must match state.json by UUID first. "
-            "If the destination is empty, first full seed creation is allowed."
+            "Before creating it, verify source.snapshot_root, configured source.cache_root, "
+            "and destination.target_root. If the destination already contains snapshots, the "
+            "source must also match state.json by UUID first. If the destination is empty, "
+            "first full seed creation is allowed."
         ),
         cmd_create_manual,
     )

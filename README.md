@@ -1,4 +1,16 @@
-# timeshift-btrfs-sync v0.1.2
+# timeshift-btrfs-sync v0.1.9
+
+## v0.1.9 preflight import fix
+
+This release fixes a sync startup regression where the new path preflight call could fail with `name 'preflight' is not defined`. The preflight behavior is unchanged; the module is now imported correctly before sync starts.
+
+
+## Source sudoers and destroy-leftovers
+
+`destroy-leftovers --delete-source` keeps the source sudoers model narrow. On the source host it uses passwordless `sudo btrfs` only for Btrfs metadata and subvolume deletion. It does not require passwordless `find`, `test`, `rm`, `mkdir`, or `cat`.
+
+When Btrfs leaves an empty ordinary directory behind after deleting a source cache subvolume, the app tries to remove that stale directory with normal non-sudo `rmdir`. If the source user does not have filesystem permission to remove that ordinary directory, the cleanup is reported as incomplete instead of asking for broad sudo access.
+
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -66,18 +78,37 @@ A full reset means deleting both `snapshots/` and `.ts-btrfs-sync/`. Received `@
 Normal sync flow:
 
 ```text
-1. Run sudo -n timeshift --list on the source.
-2. Parse Timeshift snapshot names and tags.
-3. Build expected paths from source.snapshot_root and source.subvolumes.
-4. Skip snapshots already received or older than the confirmed sync floor.
-5. Use full send only when the destination has no snapshots yet.
-6. Use incremental send when a UUID-confirmed parent is available.
-7. Error out if the destination already has snapshots but no matching parent can be proven.
-7. Receive into <target_root>/snapshots/<snapshot>/<subvolume>.
-8. Save metadata to state.json after each successful receive.
+1. Prepare destination.target_root when real sync is allowed to create it.
+2. Run sync path preflight for source.snapshot_root, configured source.cache_root, and destination.target_root.
+3. Run sudo -n timeshift --list on the source.
+4. Parse Timeshift snapshot names and tags.
+5. Build expected paths from source.snapshot_root and source.subvolumes.
+6. Skip snapshots already received or older than the confirmed sync floor.
+7. Use full send only when the destination has no snapshots yet.
+8. Use incremental send when a UUID-confirmed parent is available.
+9. Error out if the destination already has snapshots but no matching parent can be proven.
+10. Receive into <target_root>/snapshots/<snapshot>/<subvolume>.
+11. Save metadata to state.json after each successful receive.
 ```
 
 Fast discovery is used by default. It avoids Btrfs metadata checks for every old snapshot and delays those checks until a subvolume is actually going to be sent. Use `list-source --verify-btrfs` or `source.verify_subvolumes_at_discovery = true` when you want slower up-front checks.
+
+
+## Sync path preflight
+
+Before automatic on-demand snapshot creation and before any send/receive work, `sync` verifies that the required configured roots are actually reachable:
+
+```text
+source.snapshot_root
+source.cache_root, when configured
+destination.target_root
+```
+
+The source-side checks are batched into one SSH call and use the configured `sudo btrfs subvolume list -o <path>` command. This keeps the existing narrow sudo model; the app does not need passwordless generic `test`, `mkdir`, `cat`, or `rm` access on the source. The destination check is local and runs after destination preparation in a real sync, so `destination.create_target_root = true` can still create the target before the preflight.
+
+If any required path is missing, not mounted, or not accessible through the configured Btrfs command, the app fails before creating a fresh Timeshift on-demand snapshot and before trying to send data. This is intended to prevent avoidable leftover on-demand snapshots after a restored VM, changed mount point, or missing send-cache directory.
+
+`create-manual` also runs the same preflight before asking Timeshift to create a standalone on-demand snapshot.
 
 ## Incremental parent guard
 
@@ -140,11 +171,17 @@ The create command intentionally omits `--tags O` because Timeshift creates on-d
 
 After creating the snapshot, the app re-reads `timeshift --list`. The new snapshot is not sent directly or prioritized. It is sent only when the normal oldest-to-newest snapshot loop reaches its timestamp, using the same full/incremental parent logic as every other snapshot.
 
+Interrupted-run behavior: if a previous run created an app on-demand snapshot and then failed before that snapshot was fully synced, the next normal `sync` detects the existing app-created pending snapshot by tag `O` plus `manual_snapshot.marker`. It keeps that older pending snapshot in the normal oldest-to-newest order, but it still creates a fresh on-demand snapshot for the current run because the older pending snapshot may no longer represent the current system state. Both the older pending snapshot and the new snapshot are sent only when the normal oldest-to-newest loop reaches their timestamps.
+
 Automatic creation is skipped when `--snapshot <name>` is used, because that command targets one existing snapshot.
 
 ## Run summaries
 
 Every `sync` now ends with a terminal-friendly `SYNC SUMMARY`. It shows how many full syncs and incremental syncs were planned or completed, how many entries were already synced, and which source/destination paths were used. Each transfer is labeled clearly as `FULL SYNC` or `INCREMENTAL`. When `log_dir` is enabled, this readable statistics block is written to `.succes`, not mixed into `.log`.
+
+If a transfer is interrupted while `btrfs receive` has already created the destination path, that path is not marked as complete in `state.json`. With `destination.cleanup_incomplete_receive = true`, the next real sync deletes only that incomplete Btrfs subvolume or empty directory, invalidates the per-run destination index entry, and retries the same source snapshot/subvolume in the normal oldest-to-newest order.
+
+This also applies when the failed snapshot is an app-created on-demand snapshot. The app does not move the on-demand snapshot to the front of the queue. It keeps the already sorted source snapshot list, deletes the partial destination path only when that on-demand snapshot/subvolume is reached, and then sends it at that exact point in the existing oldest-to-newest order. If automatic on-demand creation is enabled, a fresh on-demand snapshot for the current run is still created and then added to the same sorted queue.
 
 Every `prune` now prints a `RETENTION SUMMARY`, a `RETENTION DELETE PLAN`, and a `RETENTION DELETE SUMMARY` after real deletion. Delete candidates are labeled as `WOULD DELETE` in dry-run mode or `DELETE` in real mode, and each entry includes the destination subvolumes, source send-cache subvolumes, Timeshift tags, and the reason it falls outside the active retention rules. The final summary reports attempted, completed, retry, and remaining state counts. When `log_dir` is enabled, these readable summaries are written to `.succes` and the normal run log.
 
@@ -227,6 +264,39 @@ Target meanings:
 ```
 
 The command refuses broad dangerous roots such as `/`, `/media`, `/mnt`, `/home`, `/var`, and `/run`. It deletes Btrfs subvolumes deepest-first, then removes ordinary leftover directories/files. Source and destination are attempted independently, so if one side fails the other side can still complete.
+
+The `--delete-both` output also includes a normalized payload comparison. Raw Btrfs totals can differ because the source cache may contain helper/container subvolumes such as `send-cache/<date>`, while the destination contains the received `@`/`@home` payload subvolumes. Since v0.1.2, already read-only Timeshift originals may also be sent directly and are protected source data; when state.json is available, those protected direct-send entries are counted as source-side payload for the comparison but are never deleted.
+
+Example:
+
+```text
+SOURCE / DESTINATION SNAPSHOT MATCH
+===================================
+Source send payload:
+  @ snapshots:      29
+  @home snapshots:  29
+  total payload:    58
+  cache payload:    20
+  direct Timeshift payload: 38
+
+Destination received payload:
+  @ snapshots:      29
+  @home snapshots:  29
+  total payload:    58
+
+Container/helper subvolumes:
+  source send-cache root:          yes
+  source timestamp parent subvols: 10
+  source protected direct sends:   38
+  destination target root:         yes
+
+Raw subvolume totals:
+  source send-cache raw total:     31
+  destination target raw total:    59
+
+Result:
+  OK - source send payload matches destination received payload
+```
 
 ## Logging and notifications
 
@@ -400,6 +470,8 @@ Destroys configured source/destination leftover trees when this app setup is bei
 | `--dry-run` | Shows the destructive cleanup plan. | Default mode; does not delete anything. |
 | `--run` | Allows real deletion. | Still requires the long danger flag and typed confirmations. |
 | `--i-understand-this-destroys-data` | Required with `--run`. | Prevents accidental execution of this destructive command. |
+
+When `--delete-both` is used, the command prints `SOURCE / DESTINATION SNAPSHOT MATCH`. This is a reporting aid only; deletion still ignores state.json and only targets the explicitly configured source cache and destination target.
 
 ## Config reference
 

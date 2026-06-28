@@ -12,7 +12,8 @@ retention-based cache handling, state metadata refresh, and pipeline logging.
 
 `cli.py` parses a command and loads `config.toml`. Most commands run through the
 logging wrapper, which creates split log files and sends optional notifications.
-`sync.py` reads source Timeshift snapshots, optionally creates a manual snapshot,
+`sync.py` verifies required source/destination roots with `preflight.py`, reads source Timeshift snapshots, optionally creates a manual snapshot,
+keeps already pending app-created manual snapshots in oldest-to-newest order after interrupted runs,
 re-reads the source list, refreshes mutable state metadata, proves the source and
 destination share a valid Btrfs parent, runs `btrfs send | mbuffer | btrfs
 receive`, writes `state.json`, and optionally runs retention pruning.
@@ -26,7 +27,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `list-source` | Lists source Timeshift snapshots. | Fast by default; `--verify-btrfs` performs slower UUID/read-only checks. |
 | `sync` | Pulls missing Timeshift Btrfs subvolumes. | Defaults can dry-run; real transfer requires run mode; incremental parents must match UUIDs. |
 | `prune` | Applies destination retention rules. | Real deletion requires `--run --yes-delete`. |
-| `create-manual` | Creates a source Timeshift on-demand snapshot. | Existing destination requires UUID-confirmed source identity first. |
+| `create-manual` | Creates a source Timeshift on-demand snapshot. | Runs path preflight first; existing destination also requires UUID-confirmed source identity. |
 | `show-state` | Prints local `state.json`. | Read-only; can show raw JSON with `--json`. |
 | `destroy-leftovers` | Destroys configured source send-cache/destination leftovers when retiring the app setup. | Dry-run by default; real deletion requires explicit target flag, `--run`, long danger flag, and two typed confirmations. It never deletes `source.snapshot_root`. |
 
@@ -38,9 +39,11 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 | `cli.py` | Command-line parser, command handlers, logging wrapper, notifications. |
 | `config.py` | TOML dataclasses and validation. |
 | `sync.py` | Main send/receive transaction and Btrfs safety decisions. |
+| `preflight.py` | Required path availability checks before on-demand creation or send/receive work. |
 | `btrfs.py` | Btrfs command builders, metadata parser, source send-cache helpers. |
 | `destroy.py` | Destructive retirement cleanup for configured source send-cache root and destination target root. |
 | `remote_index.py` | Per-run Btrfs subvolume indexes used to reduce repeated SSH metadata probes. |
+| `payload_stats.py` | Normalized source/destination payload statistics used to explain raw subvolume count differences. |
 | `timeshift.py` | Remote Timeshift list/create command helpers and parser. |
 | `commands.py` | Local subprocess runner and send/receive stream pipeline. |
 | `state.py` | `state.json` loading, saving, relative paths, metadata refresh, sync markers. |
@@ -122,6 +125,16 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `SSHRunner.environment()`: exposes SSH password environment variables.
 - `SSHRunner.test()`: runs a simple remote command to confirm SSH works.
 
+### `preflight.py`
+
+- `PathPreflightError`: raised before on-demand creation or send/receive when a required configured root is unavailable.
+- `PathCheck`: one path availability result for terminal reporting.
+- `_btrfs_path_check_script()`: builds a small POSIX shell script that checks paths with `btrfs subvolume list -o` instead of generic sudo filesystem commands.
+- `_parse_path_check_output()`: parses structured path-check sentinel lines.
+- `_remote_source_path_checks()`: checks `source.snapshot_root` and configured `source.cache_root` in one SSH call.
+- `_local_target_path_check()`: checks `destination.target_root` locally without creating anything.
+- `check_required_sync_paths()`: prints the sync path preflight and refuses to continue before manual snapshot creation or send/receive when a required root is missing or inaccessible.
+
 ### `commands.py`
 
 - `CommandError`: exception containing command text, return code, stdout, stderr.
@@ -165,6 +178,28 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `build_remote_btrfs_index()`: builds a source cache index with one SSH command, while still using only restricted sudo+btrfs operations remotely.
 - `refresh_remote_path()`: refreshes one source cache path after creation/deletion-sensitive work.
 - `refresh_local_path()`: refreshes one destination path after receive/delete-sensitive work.
+
+### `payload_stats.py`
+
+- `PayloadTreeStats`: normalized count object for a source cache, direct-send state view, or destination tree. It separates raw subvolume totals from real `@`/`@home` payload entries.
+- `PayloadTreeStats.total_payload`: number of normalized payload entries.
+- `PayloadTreeStats.total_cache_payload`: number of source payload entries coming from app-owned source cache.
+- `PayloadTreeStats.total_direct_payload`: number of source payload entries coming from protected direct Timeshift sends.
+- `normalize_path()`: normalizes path strings before relative matching.
+- `_relative_parts()`: returns path parts below a configured root, or `None` for outside paths.
+- `_recount_payload()`: rebuilds per-subvolume counters from the normalized payload set.
+- `_add_payload()`: recognizes paths ending in configured subvolume names such as `@` and `@home`.
+- `source_send_cache_stats()`: classifies source cache paths into real payload subvolumes and helper/container subvolumes.
+- `destination_payload_stats()`: classifies destination paths into received payload subvolumes.
+- `direct_send_payload_stats()`: reads state only for reporting and counts protected Timeshift original direct-send entries as source-side payload; it does not make deletion decisions.
+- `merge_source_payload_stats()`: combines app-owned source-cache payload with protected direct-send payload before comparison.
+- `PayloadMatchStats`: comparison object for normalized source and destination payload sets.
+- `PayloadMatchStats.source_only`: source payload entries not present on the destination.
+- `PayloadMatchStats.destination_only`: destination payload entries not present on the source side.
+- `PayloadMatchStats.ok`: true when normalized source and destination payload sets match.
+- `compare_payloads()`: builds a `PayloadMatchStats` object.
+- `_format_count_line()`: creates aligned text output lines.
+- `render_payload_match()`: renders the `SOURCE / DESTINATION SNAPSHOT MATCH` block.
 
 ### `btrfs.py`
 
@@ -254,9 +289,16 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   for automatic and standalone manual snapshot creation. Empty destinations may
   create a first full seed; non-empty destinations require a UUID-confirmed
   source/destination anchor.
+- `_is_app_manual_snapshot()`: identifies source Timeshift tag `O` snapshots whose
+  comment contains `manual_snapshot.marker`, without relying on state that may
+  not have been written before an interrupted run.
+- `_pending_app_manual_snapshots()`: finds existing app-created on-demand
+  snapshots that are not fully synced yet, so retry runs can keep them in the
+  normal oldest-to-newest send order.
 - `_maybe_create_manual_snapshot()`: optionally creates a Timeshift manual
-  snapshot, then forces a fresh `timeshift --list` so the new snapshot is handled
-  by the normal send loop.
+  snapshot. If older pending app-created on-demand snapshots exist, it reports
+  them but still creates a fresh on-demand snapshot for the current run; the
+  normal send loop then handles both old and new snapshots oldest-to-newest.
 - `_snapshots_in_sync_order()`: sorts source snapshots oldest-to-newest for safe send order.
 - `_select_initial_sync_snapshots()`: on a fresh/empty destination, applies the retention planner to the source Timeshift list and selects only snapshots that would be kept, avoiding first-sync transfers that prune would immediately delete.
 - `print_snapshot_table()`: displays source snapshots and tags.
@@ -264,11 +306,17 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_target_snapshot_dir()`: destination path for one snapshot folder.
 - `_destination_has_existing_snapshots()`: detects non-empty destination; used to
   decide whether a full seed is allowed.
+- `_snapshot_destination_paths_exist()`: verifies that all expected destination
+  paths still exist before skipping a state-complete snapshot.
 - `_preview_send_path()`: predicts whether a read-only Timeshift original can be sent directly or whether a writable snapshot would use cache, without creating anything during dry-run previews.
 - `_send_path_kind_text()`: explains in sync output whether the selected send path is a protected Timeshift original or an app-owned source cache snapshot.
 - `_ensure_source_send_path()`: verifies/creates the current read-only send path. If the original Timeshift snapshot is already read-only, it returns that original path directly without creating a cache duplicate.
-- `_cleanup_incomplete_destination_receive()`: removes partial destination
-  receives after failed attempts before retrying.
+- `_cleanup_incomplete_destination_receive()`: removes only the current partial
+  destination receive after a failed attempt, prints the retry/order policy, and
+  invalidates the deleted destination index entry so parent decisions do not use
+  stale metadata. Because this is called inside the sorted snapshot loop, failed
+  on-demand snapshots are retried at their existing oldest-to-newest position
+  rather than jumped ahead.
 - `_read_local_destination_parent_metadata()`: reads metadata for a candidate
   destination parent.
 - `_match_source_path_to_destination_received_uuid()`: compares a source path UUID
@@ -450,6 +498,9 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_mode_text()`: returns the exact typed phrase for the chosen destructive mode.
 - `_print_target()`: prints one configured cleanup root before any deletion.
 - `_print_result()`: prints one target result with subvolume count and errors.
+- `_result_by_label()`: finds the source or destination destroy result used for normalized payload reporting.
+- `_load_payload_state()`: loads state.json only for reporting protected direct-send payloads; destroy-leftovers still ignores state for delete decisions.
+- `_print_payload_match_if_available()`: prints the normalized source/destination payload match block when both source cache and destination target were selected.
 - `destroy_leftovers()`: main retirement cleanup entry point. It ignores retention/state by design and attempts source/destination targets independently so one failing side does not prevent the other side from being cleaned.
 
 ### `lock.py`
@@ -492,3 +543,15 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   snapshots with tag `O` by default, and some versions reject explicit `--tags O`.
 - **Password pair validation stays explicit.** It protects secret handling and
   avoids accidentally accepting conflicting inline/file password settings.
+
+
+## v0.1.8 source-side destroy sudo boundary
+
+- Source-side destroy cleanup uses passwordless `sudo btrfs` only for Btrfs listing/show/delete operations.
+- It deliberately avoids `sudo find`, `sudo test`, and `sudo rm` so the source user does not need broad filesystem sudo privileges.
+- Stale ordinary directories left after source subvolume deletion are removed with non-sudo `rmdir` only when normal filesystem permissions allow it; otherwise the cleanup reports the remaining path as incomplete.
+
+
+## v0.1.9 sync preflight import fix
+
+`timeshift_btrfs_sync/sync.py` imports the preflight module before running sync path checks. This keeps the v0.1.7 preflight safety behavior intact while fixing the runtime `name 'preflight' is not defined` regression.
