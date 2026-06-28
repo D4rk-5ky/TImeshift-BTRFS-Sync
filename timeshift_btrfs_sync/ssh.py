@@ -23,15 +23,19 @@ def _is_relative_to(path: Path, root: Path) -> bool:
 
 
 def validate_control_path_safety(control_path: str | None) -> None:
-    """Validate that an SSH ControlPath socket directory is private.
+    """Create and validate a private SSH ControlPath socket directory.
 
     OpenSSH ControlMaster creates a local Unix-domain control socket. Any local
     user that can access that socket may be able to reuse the already
     authenticated SSH connection without unlocking the private key again. The app
-    therefore requires an explicit absolute ControlPath whose parent directory
-    already exists, is owned by the current user, and is not accessible by group
-    or other users. Shared temporary locations are rejected even when a nested
-    directory appears private, because they are easy to configure incorrectly.
+    therefore requires an explicit absolute ControlPath whose parent directory is
+    owned by the current user and is not accessible by group or other users.
+
+    If the parent directory does not exist, create it with mode 0700 for the user
+    running ts-btrfs. Existing directories are never relaxed or ownership-fixed
+    automatically; they must already be owned by the current user and private.
+    Shared temporary locations are rejected even when a nested directory appears
+    private, because they are easy to configure incorrectly.
     """
 
     if not control_path:
@@ -54,10 +58,21 @@ def validate_control_path_safety(control_path: str | None) -> None:
             )
 
     if not parent.exists():
-        raise ValueError(
-            f"ssh.control_path parent directory does not exist: {parent}. "
-            "Create it first with mkdir -p, chown it to the user running ts-btrfs, and chmod it 0700."
-        )
+        missing_dirs: list[Path] = []
+        cursor = parent
+        while not cursor.exists():
+            missing_dirs.append(cursor)
+            cursor = cursor.parent
+        try:
+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            for created_dir in missing_dirs:
+                created_dir.chmod(0o700)
+        except OSError as exc:
+            raise ValueError(
+                f"failed creating ssh.control_path parent directory {parent}: {exc}. "
+                "Create it as the user running ts-btrfs and set chmod 0700."
+            ) from exc
+
     if not parent.is_dir():
         raise ValueError(f"ssh.control_path parent is not a directory: {parent}")
 

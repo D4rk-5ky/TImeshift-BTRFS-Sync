@@ -9,6 +9,9 @@ import os
 import tempfile
 from .models import SnapshotMeta, SubvolumeMeta
 
+SEND_PATH_KIND_SOURCE_CACHE = "source-cache"
+SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY = "timeshift-original-readonly"
+
 STATE_VERSION = 1
 
 
@@ -238,15 +241,25 @@ def mark_subvolume_synced(
     # The actual streamed source identity is the UUID of the send path. If the
     # source Timeshift snapshot was writable, send_path points at a read-only
     # cache snapshot and that cache UUID is what the destination records as
-    # Received UUID.
+    # Received UUID. If the original Timeshift snapshot was already read-only,
+    # send_path remains the original Timeshift path and must be treated as
+    # Timeshift-owned/protected by prune and destroy-leftovers.
     send_source_uuid = (send_meta.uuid if send_meta else None) or (received_meta.received_uuid if received_meta else None) or subvolume.uuid
     original_source_uuid = (original_meta.uuid if original_meta else None) or subvolume.uuid
+    send_path_kind = (
+        SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY
+        if Path(send_path) == Path(subvolume.path)
+        else SEND_PATH_KIND_SOURCE_CACHE
+    )
 
     snap_state.setdefault("subvolumes", {})[subvolume.name] = {
         "status": "ok",
         "name": subvolume.name,
         "source_path": subvolume.path,
         "send_path": send_path,
+        "send_path_kind": send_path_kind,
+        "send_path_owned_by_app": send_path_kind == SEND_PATH_KIND_SOURCE_CACHE,
+        "send_path_prune_protected": send_path_kind == SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY,
         # Backward-compatible name. New code treats this as the exact source
         # UUID that was streamed, not necessarily the writable Timeshift source
         # subvolume UUID.
@@ -265,6 +278,40 @@ def mark_subvolume_synced(
         "parent_source_path": parent_source_path,
         "source_uuid_inferred_from_destination_received_uuid": bool(send_meta is None and subvolume.uuid is None and received_meta and received_meta.received_uuid),
     }
+
+
+def send_path_kind_for_state_subvolume(subvol_state: dict[str, Any], *, cache_root: str | None = None) -> str:
+    """Return the safe ownership kind for a stored send_path.
+
+    New state stores send_path_kind explicitly. Older state did not, so the
+    compatibility fallback treats only paths below source.cache_root as
+    app-owned source-cache. Every other send_path is considered protected
+    source data and must not be deleted by prune.
+    """
+
+    kind = subvol_state.get("send_path_kind")
+    if kind in {SEND_PATH_KIND_SOURCE_CACHE, SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY}:
+        return str(kind)
+
+    send_path = subvol_state.get("send_path")
+    if isinstance(send_path, str) and cache_root:
+        from . import btrfs
+
+        if btrfs.path_is_under_cache(send_path, cache_root):
+            return SEND_PATH_KIND_SOURCE_CACHE
+    return SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY
+
+
+def state_send_path_is_app_cache(subvol_state: dict[str, Any], *, cache_root: str | None = None) -> bool:
+    """Return True only when prune may delete the stored send_path."""
+
+    return send_path_kind_for_state_subvolume(subvol_state, cache_root=cache_root) == SEND_PATH_KIND_SOURCE_CACHE
+
+
+def state_send_path_is_protected_timeshift_original(subvol_state: dict[str, Any], *, cache_root: str | None = None) -> bool:
+    """Return True when the stored send_path belongs to Timeshift, not the app."""
+
+    return send_path_kind_for_state_subvolume(subvol_state, cache_root=cache_root) == SEND_PATH_KIND_TIMESHIFT_ORIGINAL_READONLY
 
 
 def remove_snapshot_from_state(state: dict[str, Any], snapshot: str) -> None:

@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.0 config
+# timeshift-btrfs-sync v0.1.2 config
 # Run this config on the BACKUP/DESTINATION machine.
 # The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
 
@@ -149,15 +149,14 @@ compression = false
 #   destination machine, and only with a private ControlPath directory.
 #
 # Safe setup when ts-btrfs runs as root:
-#   sudo mkdir -p /run/ts-btrfs-ssh
-#   sudo chown root:root /run/ts-btrfs-ssh
-#   sudo chmod 0700 /run/ts-btrfs-ssh
-# /run is usually cleared on reboot, so recreate this directory before scheduled
-# jobs, or use a systemd pre-start step / tmpfiles.d rule.
+#   control_path = "/run/ts-btrfs-ssh/%C"
+# The app creates the missing ControlPath parent directory automatically with
+# owner-only permissions (0700), including missing intermediate directories, if
+# the user running ts-btrfs is allowed to create it. Existing directories are validated but not ownership-fixed.
 #
 # The app refuses control_master=true unless control_path is absolute and its
-# parent directory already exists, is owned by the user running ts-btrfs, is not
-# group/other accessible, and is not inside /tmp, /var/tmp, or /dev/shm.
+# parent directory is owned by the user running ts-btrfs, is not group/other
+# accessible, and is not inside /tmp, /var/tmp, or /dev/shm.
 control_master = false
 control_persist = "10m"
 # control_path = "/run/ts-btrfs-ssh/%C"

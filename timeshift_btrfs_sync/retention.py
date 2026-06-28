@@ -9,7 +9,13 @@ from . import btrfs
 from . import remote_index
 from .config import AppConfig
 from .models import SnapshotMeta, tags_text
-from .state import remove_snapshot_from_state, resolve_destination_path, save_state
+from .state import (
+    remove_snapshot_from_state,
+    resolve_destination_path,
+    save_state,
+    state_send_path_is_app_cache,
+    state_send_path_is_protected_timeshift_original,
+)
 from .log import emit_success_summary, get_logger
 from .ssh import SSHRunner
 
@@ -95,14 +101,40 @@ def _delete_reasons(plan: PrunePlan, name: str) -> list[str]:
     return reasons or ["outside retention"]
 
 def _source_cache_delete_paths(config: AppConfig, snapshot_state: dict) -> list[tuple[str, str]]:
-    """Return source send-cache paths that follow a destination prune decision."""
+    """Return app-owned source send-cache paths for a prune decision.
+
+    Original Timeshift snapshot paths are deliberately excluded even when they
+    were used as direct read-only send sources. Timeshift owns
+    source.snapshot_root; this app only prunes app-created source-cache paths.
+    Older state did not store send_path_kind, so the compatibility fallback
+    still treats only paths below source.cache_root as app-owned.
+    """
 
     if not config.source.cleanup_superseded_cache or not config.source.cache_root:
         return []
     paths: dict[str, str] = {}
     for subvol_name, subvol in snapshot_state.get("subvolumes", {}).items():
+        if not isinstance(subvol, dict):
+            continue
         send_path = subvol.get("send_path")
-        if isinstance(send_path, str) and btrfs.path_is_under_cache(send_path, config.source.cache_root):
+        if (
+            isinstance(send_path, str)
+            and state_send_path_is_app_cache(subvol, cache_root=config.source.cache_root)
+            and btrfs.path_is_under_cache(send_path, config.source.cache_root)
+        ):
+            paths[subvol_name] = send_path
+    return sorted(paths.items())
+
+
+def _protected_timeshift_send_paths(config: AppConfig, snapshot_state: dict) -> list[tuple[str, str]]:
+    """Return direct Timeshift send paths that prune must never delete."""
+
+    paths: dict[str, str] = {}
+    for subvol_name, subvol in snapshot_state.get("subvolumes", {}).items():
+        if not isinstance(subvol, dict):
+            continue
+        send_path = subvol.get("send_path")
+        if isinstance(send_path, str) and state_send_path_is_protected_timeshift_original(subvol, cache_root=config.source.cache_root):
             paths[subvol_name] = send_path
     return sorted(paths.items())
 
@@ -164,11 +196,16 @@ def _cleanup_source_cache_for_pruned_snapshot(
     """Return True when source send-cache for one pruned snapshot is gone or absent."""
 
     cache_paths = _source_cache_delete_paths(config, snapshot_state)
+    protected_paths = _protected_timeshift_send_paths(config, snapshot_state)
+    if protected_paths:
+        print("  source Timeshift originals: protected; not deleted by this app")
+        for subvol_name, send_path in protected_paths:
+            print(f"  protected {subvol_name}: {send_path}")
     if not cache_paths:
-        print("  source send-cache: no tracked cache paths; confirmed gone")
+        print("  source send-cache: no tracked app-created cache paths; confirmed gone")
         return True
 
-    print("  source send-cache: deleting/checking app-created cache paths")
+    print("  source send-cache: deleting/checking app-created cache paths only")
     if source_cache_index is not None and source_cache_index.root_missing:
         print("  warning: source send-cache root could not be indexed; keeping state entry for retry")
         return False
@@ -467,8 +504,13 @@ def print_prune_plan(config: AppConfig, plan: PrunePlan, state: dict, *, dry_run
                 lines.append(f"        {subvol_name}: {destination_path}")
         cache_paths = _source_cache_delete_paths(config, snapshot_state)
         if cache_paths:
-            lines.append("      source send-cache subvolumes:")
+            lines.append("      app-owned source send-cache subvolumes:")
             for subvol_name, send_path in cache_paths:
+                lines.append(f"        {subvol_name}: {send_path}")
+        protected_paths = _protected_timeshift_send_paths(config, snapshot_state)
+        if protected_paths:
+            lines.append("      protected Timeshift original send paths, not deleted by prune:")
+            for subvol_name, send_path in protected_paths:
                 lines.append(f"        {subvol_name}: {send_path}")
         for reason in _delete_reasons(plan, name):
             lines.append(f"      why: {reason}")

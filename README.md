@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.0
+# timeshift-btrfs-sync v0.1.2
 
 > ⚠️ AI-assisted / vibe-coded experimental software. Use at your own risk.
 
@@ -101,6 +101,8 @@ This protects the backup from mixing snapshots from another OS, another source h
 
 `btrfs send` requires read-only source snapshots. If Timeshift snapshots are writable, the app can create read-only source send-cache snapshots under `source.cache_root`.
 
+If an original Timeshift snapshot child is already read-only, the app now sends directly from that original Timeshift path instead of creating a duplicate source-cache snapshot. The state records this with `send_path_kind = "timeshift-original-readonly"`, and prune treats that path as protected Timeshift-owned data. The app may read and send from `source.snapshot_root`, but it must not delete, rename, move, or change original Timeshift snapshots; cleanup of `source.snapshot_root` remains Timeshift's job only.
+
 Only the top-level `cache_root` should be created manually. Per-snapshot cache parents and read-only send snapshots are created with Btrfs commands:
 
 ```bash
@@ -111,6 +113,8 @@ sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolum
 The app checks cache paths with Btrfs subvolume listings under `source.cache_root` and, for deletion, under each timestamp cache parent. This prevents normal Timeshift snapshot paths with the same date/name from being mistaken for app-created send-cache snapshots.
 
 Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. For each pruned snapshot, `prune` attempts both destination deletion and matching source send-cache deletion in one coordinated item. It removes the `state.json` entry only after destination subvolumes and source send-cache are both confirmed gone or already absent. If either side is unavailable, it still attempts the available side and keeps state so the next prune can retry.
+
+Prune only deletes send paths that are explicitly app-owned source-cache paths below `source.cache_root`. If a snapshot was sent directly from a read-only Timeshift original, prune prints it as a protected original send path and never deletes it.
 
 ## Remote index/cache optimization
 
@@ -464,7 +468,7 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 | `cipher` | Adds `ssh -c <cipher>`. | Lets you choose a fast cipher for your hardware/network. Omit for OpenSSH defaults. |
 | `control_master` | Adds OpenSSH `ControlMaster=auto`. | Reuses an existing SSH connection so password-protected keys are unlocked fewer times. Disabled by default because the local control socket must be protected. |
 | `control_persist` | Adds OpenSSH `ControlPersist=<value>`. | Keeps the master connection alive between metadata probes and send commands. Default example is `10m`. |
-| `control_path` | Adds OpenSSH `ControlPath=<path>`. | Required when `control_master = true`. The parent directory must already exist, be owned by the user running the app, and be chmod `0700`. |
+| `control_path` | Adds OpenSSH `ControlPath=<path>`. | Required when `control_master = true`. If the parent directory is missing, the app creates it with owner-only access (`0700`). Existing parents must already be owned by the app user and private. |
 | `password` | SSH password passed through `sshpass -e`. | Less safe than key auth; use only if needed. Do not use with `BatchMode=yes`. |
 | `password_file` | File containing the SSH password for `sshpass -e`. | Safer than storing the SSH password directly in config. |
 | `extra_args` | Extra OpenSSH arguments as a string list. | Commonly used for `BatchMode=yes` with key auth or host-key behavior. |
@@ -475,17 +479,7 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 
 The security tradeoff is important: anyone who can access the local control socket may be able to reuse the already-authenticated SSH connection without knowing the private key passphrase. In this app that connection reaches the source SSH user, which often has restricted passwordless `sudo btrfs`/`timeshift` permissions, so the socket must be private.
 
-Safe setup when the app runs as root on the destination:
-
-```bash
-sudo mkdir -p /run/ts-btrfs-ssh
-sudo chown root:root /run/ts-btrfs-ssh
-sudo chmod 0700 /run/ts-btrfs-ssh
-```
-
-`/run` is normally cleared on reboot, so recreate this directory before scheduled jobs, or create it with a systemd service/timer pre-start step or a `tmpfiles.d` rule.
-
-Then enable:
+Safe setup when the app runs as root on the destination is now just enabling a private path under `/run`:
 
 ```toml
 [ssh]
@@ -494,7 +488,7 @@ control_persist = "10m"
 control_path = "/run/ts-btrfs-ssh/%C"
 ```
 
-The app validates this at config load time. With `control_master = true`, `control_path` must be absolute, the parent directory must already exist, the parent must be owned by the user running `ts-btrfs`, the parent must not be readable/writable/searchable by group or other users, and the parent must not be inside shared temporary locations such as `/tmp`, `/var/tmp`, or `/dev/shm`.
+The app validates this at config load time. With `control_master = true`, `control_path` must be absolute. If the ControlPath parent directory is missing, the app creates it with owner-only permissions (`0700`) as the user running `ts-btrfs`; missing intermediate directories it creates are also set to `0700`. Existing directories are not ownership-fixed automatically: they must already be owned by the user running `ts-btrfs`, must not be readable/writable/searchable by group or other users, and must not be inside shared temporary locations such as `/tmp`, `/var/tmp`, or `/dev/shm`.
 
 Leave `control_master = false` for maximum isolation, on shared machines, or anywhere you cannot guarantee the socket directory is private.
 

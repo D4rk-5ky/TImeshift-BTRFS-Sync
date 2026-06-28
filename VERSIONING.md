@@ -1,13 +1,26 @@
 # Versioning
 
-This build is version `0.1.0`.
+This build is version `0.1.2`.
+
+### 0.1.2
+
+- Added explicit read-only Timeshift direct-send support and state labeling.
+- If an original Timeshift snapshot child is already read-only, sync sends directly from the original Timeshift path instead of creating an app cache copy.
+- State now records `send_path_kind`, `send_path_owned_by_app`, and `send_path_prune_protected` for each subvolume.
+- Prune safety was tightened so only app-owned source-cache paths below `source.cache_root` are deleted. Direct Timeshift original send paths are listed as protected and are never removed by prune.
 
 ## Changelog
+
+### 0.1.1
+
+- `ssh.control_master = true` now creates a missing `ssh.control_path` parent directory automatically with owner-only permissions (`0700`), including missing intermediate directories when the user running the app is allowed to create it.
+- Existing ControlPath parent directories are still validated and refused if they are not owned by the app user, are group/other accessible, or are inside shared temporary storage such as `/tmp`, `/var/tmp`, or `/dev/shm`.
+- Updated README and config comments to explain automatic private directory creation and the remaining socket-reuse risk.
 
 ### 0.1.0
 
 - Added safety validation and documentation for SSH ControlMaster/ControlPath connection reuse.
-- `ssh.control_master = true` now requires an explicit absolute `ssh.control_path` whose parent directory already exists, is owned by the user running the app, is private (`chmod 0700` style), and is not inside shared temporary storage such as `/tmp`, `/var/tmp`, or `/dev/shm`.
+- `ssh.control_master = true` requires an explicit absolute `ssh.control_path` whose parent directory is owned by the user running the app, is private (`chmod 0700` style), and is not inside shared temporary storage such as `/tmp`, `/var/tmp`, or `/dev/shm`.
 - Documented what OpenSSH multiplexing is, how it speeds up passphrase-protected keys, and why the local control socket must be protected.
 
 ### 0.0.99

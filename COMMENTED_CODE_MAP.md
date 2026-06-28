@@ -95,16 +95,18 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `load_config()`: reads TOML, builds all config dataclasses, and performs
   safety validation. Password/password_file pair checks remain explicit because
   that validation protects secrets and should not be hidden in a broad helper.
-  When `ssh.control_master` is enabled, it validates that `ssh.control_path` uses
-  a private local socket directory before any SSH command can run.
+  When `ssh.control_master` is enabled, it creates a missing private
+  `ssh.control_path` parent directory when allowed, then validates that the local
+  socket directory is private before any SSH command can run.
 
 ### `ssh.py`
 
 - `_is_relative_to()`: path containment helper used to reject shared temporary
   ControlPath locations without broad string matching.
 - `validate_control_path_safety()`: verifies that SSH ControlMaster has an
-  explicit absolute ControlPath whose parent directory exists, is owned by the
-  user running the app, is private, and is not under shared temporary storage.
+  explicit absolute ControlPath. If the parent directory is missing, it creates
+  it with owner-only permissions. Existing parents must be owned by the user
+  running the app, private, and not under shared temporary storage.
 - `SSHConfig`: immutable SSH connection/auth settings.
 - `SSHConfig.target()`: returns the `user@host` or `host` target string.
 - `SSHConfig.uses_password_auth()`: reports whether password/sshpass mode is
@@ -188,10 +190,7 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `remote_cache_is_empty()`: checks whether a cache parent has any children left.
 - `cache_child_display_path()`: formats cache child paths for logs.
 - `remote_ensure_cache_parent()`: creates the timestamp cache parent if missing and updates the source cache index when one is supplied.
-- `remote_ensure_readonly_send_path()`: returns an existing read-only source path
-  or creates a read-only cache snapshot for the current send. It can use the per-run source cache index instead of repeatedly listing the cache root. It may create the
-  current send snapshot, but parent selection elsewhere must not recreate missing
-  parent cache snapshots because the UUID would change.
+- `remote_ensure_readonly_send_path()`: returns the original Timeshift path when it is already read-only, otherwise creates/reuses an app-owned read-only cache snapshot for the current send. It can use the per-run source cache index instead of repeatedly listing the cache root. It may create the current send snapshot, but parent selection elsewhere must not recreate missing parent cache snapshots because the UUID would change.
 - `path_is_under_cache()`: tells cleanup whether a path belongs to cache root.
 - `remote_delete_subvolume()`: deletes a remote Btrfs subvolume.
 - `remote_send_cmd()`: builds `btrfs send` argv, including `-p` for incremental.
@@ -226,7 +225,10 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   metadata: `tags`, `comment`, `created`, and `path`. It must not touch UUID,
   send path, destination path, parent, or status fields.
 - `snapshot_is_synced()`: returns whether all expected subvolumes are marked ok.
-- `mark_subvolume_synced()`: records successful receive metadata after a transfer.
+- `mark_subvolume_synced()`: records successful receive metadata after a transfer, including whether the exact `send_path` is an app-owned source cache path or a protected read-only Timeshift original.
+- `send_path_kind_for_state_subvolume()`: returns the stored/fallback ownership kind for a state subvolume. Older state is treated as app-owned only when the send path is below `source.cache_root`; other source paths are protected.
+- `state_send_path_is_app_cache()`: true only for app-owned send-cache paths that prune may delete.
+- `state_send_path_is_protected_timeshift_original()`: true for direct read-only Timeshift original send paths that prune must never delete.
 - `remove_snapshot_from_state()`: removes a snapshot after successful pruning.
 - `refresh_state_metadata_and_report()`: shared sync/prune helper that refreshes
   mutable metadata, reports changed snapshot names, and saves only when allowed.
@@ -262,9 +264,9 @@ receive`, writes `state.json`, and optionally runs retention pruning.
 - `_target_snapshot_dir()`: destination path for one snapshot folder.
 - `_destination_has_existing_snapshots()`: detects non-empty destination; used to
   decide whether a full seed is allowed.
-- `_preview_send_path()`: predicts whether a writable snapshot would use cache,
-  without creating anything during dry-run previews.
-- `_ensure_source_send_path()`: verifies/creates the current read-only send path.
+- `_preview_send_path()`: predicts whether a read-only Timeshift original can be sent directly or whether a writable snapshot would use cache, without creating anything during dry-run previews.
+- `_send_path_kind_text()`: explains in sync output whether the selected send path is a protected Timeshift original or an app-owned source cache snapshot.
+- `_ensure_source_send_path()`: verifies/creates the current read-only send path. If the original Timeshift snapshot is already read-only, it returns that original path directly without creating a cache duplicate.
 - `_cleanup_incomplete_destination_receive()`: removes partial destination
   receives after failed attempts before retrying.
 - `_read_local_destination_parent_metadata()`: reads metadata for a candidate
@@ -300,8 +302,8 @@ receive`, writes `state.json`, and optionally runs retention pruning.
   that distinction.
 - `_delete_reason_for_snapshot()`: explains the first applicable delete reason.
 - `_delete_reasons()`: returns all human-readable delete reasons.
-- `_source_cache_delete_paths()`: returns cached `send_path` entries for a snapshot
-  selected by retention. It only returns app-created paths under `source.cache_root`.
+- `_source_cache_delete_paths()`: returns cached `send_path` entries for a snapshot selected by retention. It only returns app-owned paths under `source.cache_root`, never direct read-only Timeshift original paths.
+- `_protected_timeshift_send_paths()`: returns direct Timeshift original send paths so prune plans/execution can show that they are protected and intentionally not deleted.
 - `_destination_delete_paths()`: returns tracked destination subvolume paths for
   the same prune item so the delete plan shows both sides before execution.
 - `source_snapshot_state()`: builds temporary state-like data from the source Timeshift list so fresh/full sync can reuse the exact same retention planner without writing transfer identity fields.

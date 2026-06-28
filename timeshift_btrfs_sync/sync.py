@@ -379,6 +379,16 @@ def _preview_send_path(config: AppConfig, snapshot_name: str, subvolume: Subvolu
     return "<no-cache-root-configured>"
 
 
+def _send_path_kind_text(config: AppConfig, send_path: str, original_path: str) -> str:
+    """Return human text explaining who owns the selected send path."""
+
+    if Path(send_path) == Path(original_path):
+        return "Timeshift original read-only snapshot; protected from app prune"
+    if btrfs.path_is_under_cache(send_path, config.source.cache_root):
+        return "app-created source send-cache snapshot; prune may delete with destination retention"
+    return "external read-only send path; protected from app prune"
+
+
 def _ensure_source_send_path(
     config: AppConfig,
     ssh: SSHRunner,
@@ -1096,6 +1106,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 print(f"  {subvol_name}: would {mode} send{parent_text}")
                 print()
                 print(f"    source: {current_send_path}")
+                print(f"    source-kind: {_send_path_kind_text(config, current_send_path, subvolume.path)}")
                 print()
                 print(f"    dest:   {dest_path}")
                 if parent_name:
@@ -1122,6 +1133,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             target_dir.mkdir(parents=True, exist_ok=True)
             _human_blank()
             print(f"  {subvol_name}: {mode} send/receive")
+            print(f"    source-kind: {_send_path_kind_text(config, current_send_path, subvolume.path)}")
             # Build remote send command. If parent_send_path is set, btrfs send
             # receives `-p <parent>` and sends an incremental stream.
             send_cmd = btrfs.remote_send_cmd(
