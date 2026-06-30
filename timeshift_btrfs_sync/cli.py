@@ -20,7 +20,7 @@ from .destroy import destroy_leftovers
 from .source import SourceRunner
 from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
-from .preflight import check_required_sync_paths
+from .preflight import check_required_sync_paths, prepare_destination_helper_paths, prepare_lock_path
 from .timeshift import create_source_manual_snapshot
 
 
@@ -240,48 +240,61 @@ def cmd_list_source(args) -> int:
 
 def cmd_sync(args) -> int:
     config = load_config(args.config)
+    dry_run = _resolve_dry_run(args, config)
 
-    def _run() -> int:
-        dry_run = _resolve_dry_run(args, config)
-        print(f"Run mode: {'dry-run' if dry_run else 'real run'}")
-        if dry_run:
-            print("Strict dry-run: no destination preparation, no lock file, no receive, and no prune deletion will be performed.")
-            state = load_state(config.state_file, config.destination.target_root)
-            sync_once(config, state, dry_run=True, limit=args.limit, only_snapshot=args.snapshot, only_missing=not args.resend)
-            if args.prune or config.prune_after_sync:
-                prune(config, state, dry_run=True, yes_delete=False)
-        else:
-            print(f"Acquiring lock: {config.lock_file}")
-            with FileLock(config.lock_file):
-                state = load_state(config.state_file, config.destination.target_root)
-                sync_once(config, state, dry_run=False, limit=args.limit, only_snapshot=args.snapshot, only_missing=not args.resend)
-                if args.prune or config.prune_after_sync:
-                    prune(config, state, dry_run=False, yes_delete=args.yes_delete)
+    def _run_dry() -> int:
+        print("Run mode: dry-run")
+        print("Strict dry-run: no destination preparation, no lock file, no receive, and no prune deletion will be performed.")
+        state = load_state(config.state_file, config.destination.target_root)
+        sync_once(config, state, dry_run=True, limit=args.limit, only_snapshot=args.snapshot, only_missing=not args.resend)
+        if args.prune or config.prune_after_sync:
+            prune(config, state, dry_run=True, yes_delete=False)
         return 0
 
-    return _with_logging(config, "sync", _run)
+    def _run_locked() -> int:
+        state = load_state(config.state_file, config.destination.target_root)
+        sync_once(config, state, dry_run=False, limit=args.limit, only_snapshot=args.snapshot, only_missing=not args.resend)
+        if args.prune or config.prune_after_sync:
+            prune(config, state, dry_run=False, yes_delete=args.yes_delete)
+        return 0
+
+    if dry_run:
+        return _with_logging(config, "sync", _run_dry)
+
+    print("Run mode: real run")
+    prepare_lock_path(config, dry_run=False)
+    print(f"Acquiring lock: {config.lock_file}")
+    with FileLock(config.lock_file):
+        return _with_logging(config, "sync", _run_locked)
 
 
 def cmd_prune(args) -> int:
     config = load_config(args.config)
+    dry_run = _resolve_dry_run(args, config)
 
-    def _run() -> int:
-        dry_run = _resolve_dry_run(args, config)
-        print(f"Run mode: {'dry-run' if dry_run else 'real run'}")
-        if dry_run:
-            print("Strict dry-run: no lock file and no destination deletion will be performed.")
-            state = load_state(config.state_file, config.destination.target_root)
-            _refresh_state_metadata_from_timeshift(config, state, dry_run=True)
-            prune(config, state, dry_run=True, yes_delete=False)
-        else:
-            print(f"Acquiring lock: {config.lock_file}")
-            with FileLock(config.lock_file):
-                state = load_state(config.state_file, config.destination.target_root)
-                _refresh_state_metadata_from_timeshift(config, state, dry_run=False)
-                prune(config, state, dry_run=False, yes_delete=args.yes_delete)
+    def _run_dry() -> int:
+        print("Run mode: dry-run")
+        print("Strict dry-run: no lock file and no destination deletion will be performed.")
+        state = load_state(config.state_file, config.destination.target_root)
+        _refresh_state_metadata_from_timeshift(config, state, dry_run=True)
+        prune(config, state, dry_run=True, yes_delete=False)
         return 0
 
-    return _with_logging(config, "prune", _run)
+    def _run_locked() -> int:
+        prepare_destination_helper_paths(config, dry_run=False)
+        state = load_state(config.state_file, config.destination.target_root)
+        _refresh_state_metadata_from_timeshift(config, state, dry_run=False)
+        prune(config, state, dry_run=False, yes_delete=args.yes_delete)
+        return 0
+
+    if dry_run:
+        return _with_logging(config, "prune", _run_dry)
+
+    print("Run mode: real run")
+    prepare_lock_path(config, dry_run=False)
+    print(f"Acquiring lock: {config.lock_file}")
+    with FileLock(config.lock_file):
+        return _with_logging(config, "prune", _run_locked)
 
 
 def cmd_create_manual(args) -> int:

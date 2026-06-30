@@ -76,6 +76,8 @@ The destination `target_root` is the backup job folder. The app creates and owns
 <target_root>/.ts-btrfs-sync/  state.json, lock file, logs
 ```
 
+The destination `target_root` must be a Btrfs subvolume. If it is missing and `destination.create_target_root = true`, the app creates it with `btrfs subvolume create`. The lock-file parent is prepared before the rest of the sync/prune checks so a real job can acquire the lock early. Helper folders such as `snapshots/`, `.ts-btrfs-sync/`, the lock-file parent, and optional `log_dir` may be ordinary directories or Btrfs subvolumes. When a helper folder is missing during a real run, the app tries `btrfs subvolume create` first because the app works on Btrfs storage, then falls back to normal `mkdir` if Btrfs creation is not possible at that location. After creation, the helper path must still be writable by the app user because lock, state, logs, and per-snapshot receive folders are created before or around sudo Btrfs operations.
+
 `state.json` records successfully received snapshots and the metadata needed for incremental sends. Do not delete only `state.json` while keeping `snapshots/`, and do not delete only `snapshots/` while keeping old state.
 
 State destination paths are stored relative to `destination.target_root`, for example `snapshots/2026-06-23_07-10-24/@`. This means you can move the whole target root to another mount point, update `destination.target_root`, and the app will resolve existing state paths under the new target root. Absolute state paths are normalized when the state is loaded.
@@ -89,17 +91,19 @@ A full reset means deleting both `snapshots/` and `.ts-btrfs-sync/`. Received `@
 Normal sync flow:
 
 ```text
-1. Run sync path preflight for source.snapshot_root, source.cache_root, and destination.target_root. In real-run mode, missing configured roots are created here before Timeshift on-demand creation or send/receive work. Missing destination.target_root is created as a Btrfs subvolume.
-2. Prepare ordinary destination helper directories inside the already verified destination target root.
-3. Run `sudo -n timeshift --list` on the source endpoint: over SSH in `source.mode = "ssh"`, locally in `source.mode = "local"`.
-4. Parse Timeshift snapshot names and tags.
-5. Build expected paths from source.snapshot_root and source.subvolumes.
-6. Skip snapshots already received or older than the confirmed sync floor.
-7. Use full send only when the destination has no snapshots yet.
-8. Use incremental send when a UUID-confirmed parent is available.
-9. Error out if the destination already has snapshots but no matching parent can be proven.
-10. Receive into <target_root>/snapshots/<snapshot>/<subvolume>.
-11. Save metadata to state.json after each successful receive.
+1. In real-run mode, run lock path preflight before checking other sync paths. This prepares the lock-file parent first so the app can acquire the lock early. If the lock path chain includes destination.target_root, that component is created by the strict Btrfs subvolume rule.
+2. Acquire the lock file.
+3. Run sync path preflight for source.snapshot_root, source.cache_root, and destination.target_root. In real-run mode, missing configured roots are created here before Timeshift on-demand creation or send/receive work. Missing destination.target_root is created as a Btrfs subvolume.
+4. Prepare destination helper folders such as snapshots/, state_file.parent, lock_file.parent, and log_dir. Existing directories and Btrfs subvolumes are both accepted. Missing helpers are created with Btrfs subvolume creation first, then mkdir fallback if Btrfs creation is not possible.
+5. Run `sudo -n timeshift --list` on the source endpoint: over SSH in `source.mode = "ssh"`, locally in `source.mode = "local"`.
+6. Parse Timeshift snapshot names and tags.
+7. Build expected paths from source.snapshot_root and source.subvolumes.
+8. Skip snapshots already received or older than the confirmed sync floor.
+9. Use full send only when the destination has no snapshots yet.
+10. Use incremental send when a UUID-confirmed parent is available.
+11. Error out if the destination already has snapshots but no matching parent can be proven.
+12. Receive into <target_root>/snapshots/<snapshot>/<subvolume>.
+13. Save metadata to state.json after each successful receive.
 ```
 
 Fast discovery is used by default. It avoids Btrfs metadata checks for every old snapshot and delays those checks until a subvolume is actually going to be sent. Use `list-source --verify-btrfs` or `source.verify_subvolumes_at_discovery = true` when you want slower up-front checks.
@@ -405,9 +409,9 @@ Every option below is present in the packaged `timeshift_btrfs_sync/data/config.
 | `name` | Human-readable job name used in output, notifications, and log filenames. | Helps recognize which backup job sent a mail/MQTT message or produced a log. |
 | `default_dry_run` | Makes commands preview by default unless `--run` is passed. Dry-run skips destination preparation, lock creation, receives, state writes, manual snapshot creation, and prune deletion. | Safe default to avoid accidental writes or deletes while checking the plan. |
 | `prune_after_sync` | Automatically runs the prune step after successful sync. | Useful for scheduled jobs, but real deletion still requires `--run --yes-delete`. |
-| `log_dir` | Directory for split per-run log files; blank/omitted disables file logging. The log directory is created before command work begins. | Needed for persistent debug logs and email log attachments. This is the one intentional dry-run write when file logging is enabled. |
+| `log_dir` | Directory for split per-run log files; blank/omitted disables file logging. The logger creates only the exact log directory when its parent already exists; destination helper preflight prepares missing log directories during real sync/prune. | Needed for persistent debug logs and email log attachments without letting logging accidentally create destination roots as ordinary directories. |
 | `state_file` | Optional custom path for `state.json`; default is under `<target_root>/.ts-btrfs-sync/`. | Use only when you need app metadata outside `target_root`. |
-| `lock_file` | Optional custom path for the lock file; default is under `<target_root>/.ts-btrfs-sync/`. | Prevents two jobs from writing the same target at the same time. |
+| `lock_file` | Optional custom path for the lock file; default is under `<target_root>/.ts-btrfs-sync/`. In real sync/prune, the lock-file parent is prepared before other path checks and may be either a directory or Btrfs subvolume. | Prevents two jobs from writing the same target at the same time; if the lock path includes `target_root`, that component is created by the strict Btrfs subvolume rule. |
 
 ### `[mqtt]`
 

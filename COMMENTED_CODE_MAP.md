@@ -32,7 +32,8 @@ This file describes the current command handlers, shell command families, functi
 | `sudo -n btrfs receive <destination folder>` | Receives the Btrfs stream into the destination snapshot folder. | Recreates the source snapshot subvolume on the backup filesystem. |
 | `sudo -n btrfs subvolume delete <path>` | Deletes destination snapshots or app-owned source cache subvolumes during cleanup. | Btrfs subvolumes must be deleted with Btrfs, not ordinary `rm`. |
 | `mbuffer` | Optional middle stage between `btrfs send` and `btrfs receive`. | Gives buffering, rate limiting, and transfer statistics when enabled. |
-| `mkdir` / `rmdir` / `rm -rf` | Creates local metadata folders and removes safe ordinary leftover directories when needed. | Some paths are normal directories, while Btrfs subvolume payloads are handled by Btrfs commands. |
+| `sudo -n btrfs subvolume create <helper path>` | First attempt for missing destination helper folders such as the lock/state/log or snapshots folder. | Prefer Btrfs subvolumes because the app manages Btrfs backup storage. |
+| `mkdir` / `rmdir` / `rm -rf` | `mkdir` is the fallback for helper-folder creation when Btrfs creation is not possible; `rmdir` / `rm -rf` remove safe ordinary leftover directories when needed. | Helper paths can still be ordinary directories on non-Btrfs or user-writable locations, while Btrfs payload subvolumes are handled by Btrfs commands. |
 
 | `timeshift_btrfs_sync/data/config.example.toml` | Packaged package-data config template used by `init-config`. | Keeps the example config available after normal install and PyInstaller packaging. The `data` path must remain a directory so import/package-data lookup works correctly. |
 
@@ -513,9 +514,18 @@ This file describes the current command handlers, shell command families, functi
 - `_print_payload_match_if_available()`: prints the normalized source/destination payload match block when both source cache and destination target were selected.
 - `destroy_leftovers()`: main retirement cleanup entry point. It ignores retention/state by design and attempts source/destination targets independently so one failing side does not prevent the other side from being cleaned.
 
+### `preflight.py`
+
+- `PathPreflightError`: hard error raised before snapshot creation, transfer, lock creation, or helper-folder writes when a required path cannot be verified or created.
+- `PathCheck`: one path preflight result containing label, path, location, status, and explanation.
+- `ensure_local_helper_dir()`: accepts an existing writable helper directory or Btrfs subvolume; when missing, it tries exact-path `btrfs subvolume create` first and falls back to exact-path mkdir if Btrfs creation is not possible, then verifies the app user can write inside the helper path.
+- `prepare_lock_path()`: prepares the lock-file parent before any other real sync/prune path checks, then `FileLock` opens the lock file. If the lock path chain includes destination.target_root, that component is created with the strict target-root Btrfs subvolume rule; other missing lock-path components try Btrfs subvolume creation first and then mkdir fallback.
+- `prepare_destination_helper_paths()`: verifies/creates `snapshots/`, `state_file.parent`, `lock_file.parent`, and optional `log_dir` before state writes or receives.
+- `check_required_sync_paths()`: verifies/creates source snapshot/cache roots and destination.target_root before on-demand snapshot creation or send/receive work.
+
 ### `lock.py`
 
 - `FileLock`: context manager for one lock file.
 - `FileLock.__init__()`: stores the lock path.
-- `FileLock.__enter__()`: creates/acquires the lock non-blocking.
+- `FileLock.__enter__()`: opens/acquires the already-prepared lock file non-blocking. It no longer creates parent directories itself, because lock path preflight must create the parent safely as either a directory or Btrfs subvolume before locking.
 - `FileLock.__exit__()`: unlocks and closes the lock file.

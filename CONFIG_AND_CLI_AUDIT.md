@@ -1,6 +1,6 @@
-# Config and CLI audit for v0.1.17
+# Config and CLI audit for current release
 
-This file records the current config/CLI audit for v0.1.17.
+This file records the current config/CLI audit for the packaged release.
 
 ## Audit result
 

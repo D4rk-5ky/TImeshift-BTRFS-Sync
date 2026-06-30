@@ -38,7 +38,10 @@ class RunLogger:
     def __post_init__(self) -> None:
         """Create the log directory and open the run log files."""
 
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        # Only create the exact log directory. Do not create missing parents here:
+        # for the default layout those parents may include destination.target_root,
+        # which must be created by preflight as a Btrfs subvolume, not by logger mkdir.
+        self.log_dir.mkdir(mode=0o755, exist_ok=True)
         timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         pid = os.getpid()
         safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in self.name) or "timeshift-btrfs-sync"
@@ -357,11 +360,25 @@ def active_logger(logger: RunLogger | None) -> Iterator[None]:
 
 
 def create_run_logger(log_dir: Path | None, name: str) -> RunLogger | None:
-    """Create a logger when log_dir is configured; otherwise return None."""
+    """Create a logger when log_dir is configured; otherwise return None.
+
+    The logger intentionally does not create missing parent directories. Sync and
+    prune preflight own destination path creation because some of those paths
+    must be Btrfs subvolumes rather than ordinary mkdir-created directories. If
+    the log directory is not ready yet, the command continues with terminal-only
+    logging and the helper path preflight will prepare it for later runs.
+    """
 
     if log_dir is None:
         return None
-    return RunLogger(log_dir=log_dir, name=name)
+    try:
+        return RunLogger(log_dir=log_dir, name=name)
+    except OSError as exc:
+        print(
+            f"WARNING: file logging disabled because log_dir could not be opened: {log_dir}: {exc}",
+            file=terminal_stderr(),
+        )
+        return None
 
 
 def tee_pipe_to_log(

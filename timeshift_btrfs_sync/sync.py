@@ -128,11 +128,13 @@ def _print_sync_summary(
     emit_success_summary("\n".join(lines))
 
 def prepare_destination(config: AppConfig) -> None:
-    """Create/validate ordinary destination helper directories.
+    """Create/validate destination helper folders before writes.
 
-    The destination target root itself is handled by preflight. When missing,
-    preflight creates it as a Btrfs subvolume; this helper only creates the
-    ordinary folders that live inside or beside that already verified root.
+    The destination target root itself is handled by sync path preflight. Helper
+    folders such as ``snapshots/``, the state/lock directory, and optional
+    ``log_dir`` are accepted as either ordinary directories or Btrfs subvolumes.
+    When missing, the app tries ``btrfs subvolume create`` first and falls back
+    to mkdir if Btrfs creation is not possible at that location.
     """
 
     root = config.destination.target_root
@@ -140,30 +142,10 @@ def prepare_destination(config: AppConfig) -> None:
         raise SyncError(f"Destination target_root was not created by preflight: {root}")
     if not root.is_dir():
         raise SyncError(f"Destination target_root exists but is not a directory: {root}")
-    snapshots_root = root / "snapshots"
     try:
-        snapshots_root.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SyncError(
-            f"Could not create destination snapshots helper directory: {snapshots_root}: {exc}. "
-            "If preflight created destination.target_root with sudo btrfs, the target root may be root-owned; "
-            "chown it to the app user or place state/log paths somewhere writable."
-        ) from exc
-    try:
-        config.state_file.parent.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise SyncError(
-            f"Could not create state directory: {config.state_file.parent}: {exc}. "
-            "The app user must be able to write state.json, or state_file must be configured to a writable path."
-        ) from exc
-    if config.log_dir is not None:
-        try:
-            config.log_dir.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise SyncError(
-                f"Could not create log directory: {config.log_dir}: {exc}. "
-                "The app user must be able to write logs, or log_dir must be configured to a writable path."
-            ) from exc
+        preflight.prepare_destination_helper_paths(config, dry_run=False)
+    except preflight.PathPreflightError as exc:
+        raise SyncError(str(exc)) from exc
 
 
 def list_source_snapshots(config: AppConfig, source: SourceRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:

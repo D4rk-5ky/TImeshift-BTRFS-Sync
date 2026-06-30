@@ -1,5 +1,25 @@
 # Versioning
 
+## 0.1.22 - early lock path and Btrfs-first helper creation
+
+- Changed real-run ordering so the lock file parent is prepared before source roots, destination helper folders, state paths, logs, or sync/prune work are checked.
+- If the lock path chain includes `destination.target_root`, that component is created by the strict target-root rule and must become a Btrfs subvolume.
+- Missing lock/helper folders now try `btrfs subvolume create` first, because the app works on Btrfs storage, then fall back to normal `mkdir` when Btrfs creation is not possible.
+- Updated README.md and COMMENTED_CODE_MAP.md to describe the current lock-path and helper-folder order without old-version explanations.
+
+This build is version `0.1.22`.
+
+## 0.1.21 - lock/helper folder creation safety
+
+- Added real-run lock path preflight before opening the lock file.
+- The lock-file parent is created if missing and may be either an ordinary directory or a Btrfs subvolume.
+- Destination helper folders accept existing directories or Btrfs subvolumes.
+- `FileLock` no longer creates parent directories itself, preventing accidental normal-directory creation of `destination.target_root`.
+- File logging no longer creates missing parent directories before preflight; if the log directory is not ready, the command continues with terminal-only logging.
+- Updated README.md and COMMENTED_CODE_MAP.md to describe the current helper-folder behavior.
+
+This build is version `0.1.21`.
+
 ## 0.1.20 - require destination target root subvolume
 
 - Fixed destination preflight so an existing `destination.target_root` must pass `btrfs subvolume show`.

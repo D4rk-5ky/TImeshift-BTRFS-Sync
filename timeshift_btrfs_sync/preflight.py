@@ -4,10 +4,11 @@ The sync command must not create a fresh Timeshift on-demand snapshot, create
 source cache snapshots, or start a send/receive pipeline until the configured
 source and destination roots are reachable.
 
-Real-run preflight is also the path-creation gate. If a configured path is
-missing, preflight attempts to create exactly that configured path using the
-safest command that matches the path type, then verifies Btrfs accessibility
-before sync continues:
+Real-run preflight is also the path-creation gate. The lock file parent is
+prepared first, before source and destination checks, so only one real job can
+run against a destination. If a configured path is missing, preflight attempts
+to create exactly that configured path using the safest command that matches
+the path type, then verifies Btrfs accessibility before sync continues:
 
 * source.snapshot_root is created as a normal directory below an existing
   Btrfs-accessible parent.
@@ -17,13 +18,17 @@ before sync continues:
   destination.create_target_root is true. Existing target roots must already be
   Btrfs subvolumes and are verified with `btrfs subvolume show`.
 
-If any creation attempt fails, preflight raises a hard error that names the
-exact configured path that could not be created.
+Destination helper folders, including the lock folder, are created as Btrfs
+subvolumes first and fall back to mkdir when Btrfs creation is not possible. If
+any creation attempt fails, preflight raises a hard error that names the exact
+configured path that could not be created.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
+import os
 import shlex
 import subprocess
 
@@ -353,6 +358,234 @@ def _compact_process_error(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join(detail.split())
 
 
+def _compact_os_error(exc: OSError) -> str:
+    """Return compact text for local filesystem creation errors."""
+
+    return " ".join(str(exc).split())
+
+
+def _print_check_block(title: str, results: list[PathCheck], *, purpose: str) -> None:
+    """Print one human-readable preflight result block."""
+
+    print(title)
+    for item in results:
+        status = "OK" if item.ok else "FAIL"
+        print(f"  {item.label:<24} {status}")
+        print(f"    location: {item.location}")
+        print(f"    path:     {item.path}")
+        if item.detail:
+            print(f"    detail:   {item.detail}")
+    print(f"  purpose: {purpose}")
+    print("----")
+
+
+def _raise_for_failed_checks(results: list[PathCheck], *, heading: str, fix_text: str) -> None:
+    """Raise a hard preflight error when any check failed."""
+
+    failures = [item for item in results if not item.ok]
+    if not failures:
+        return
+    details = "\n".join(f"- {item.label}: {item.path}: {item.detail or 'not available'}" for item in failures)
+    raise PathPreflightError(f"{heading}\n{fix_text}\n" + details)
+
+
+def ensure_local_helper_dir(config: AppConfig, label: str, path: str | Path, *, dry_run: bool) -> PathCheck:
+    """Ensure one local helper directory exists.
+
+    Existing normal directories and existing Btrfs subvolumes are both accepted.
+    When the path is missing in a real run, the app tries to create the exact
+    path as a Btrfs subvolume first because the project primarily manages Btrfs
+    backup storage. If Btrfs creation fails, it falls back to ordinary mkdir so
+    helper paths can still live on non-Btrfs locations when configured that way.
+    Parent directories are not invented; the immediate parent must already
+    exist. This prevents a missing target root from being silently created as
+    ordinary directories.
+    """
+
+    helper_path = Path(path).expanduser()
+    path_text = str(helper_path)
+
+    if helper_path.exists():
+        if not helper_path.is_dir():
+            return PathCheck(label=label, path=path_text, location="local", ok=False, detail="path exists but is not a directory")
+        show_result = _local_btrfs_result(config, ["subvolume", "show", path_text])
+        detail = "exists as Btrfs subvolume" if show_result.returncode == 0 else "exists as directory"
+        if not os.access(path_text, os.W_OK | os.X_OK):
+            return PathCheck(
+                label=label,
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=(
+                    detail + "; app user cannot write inside this helper path. "
+                    "Use a writable path, fix ownership/permissions, or create the helper subvolume with ownership suitable for the app user."
+                ),
+            )
+        return PathCheck(label=label, path=path_text, location="local", ok=True, detail=detail)
+
+    parent = _parent_of_path(helper_path)
+    parent_text = str(parent)
+    if dry_run:
+        return PathCheck(
+            label=label,
+            path=path_text,
+            location="local",
+            ok=True,
+            detail=f"missing now; real run would try Btrfs subvolume create first, then mkdir fallback, after verifying parent {parent_text}",
+        )
+
+    if not parent.exists():
+        return PathCheck(label=label, path=path_text, location="local", ok=False, detail=f"could not create helper path because parent does not exist: {parent_text}")
+    if not parent.is_dir():
+        return PathCheck(label=label, path=path_text, location="local", ok=False, detail=f"could not create helper path because parent is not a directory: {parent_text}")
+
+    create_result = _local_btrfs_result(config, ["subvolume", "create", path_text])
+    if create_result.returncode == 0:
+        verify_result = _local_btrfs_result(config, ["subvolume", "show", path_text])
+        if verify_result.returncode != 0:
+            return PathCheck(
+                label=label,
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"created helper path as Btrfs subvolume but verification failed: {_compact_process_error(verify_result)}",
+            )
+        if not os.access(path_text, os.W_OK | os.X_OK):
+            return PathCheck(
+                label=label,
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=(
+                    "created helper path as Btrfs subvolume, but the app user cannot write inside it. "
+                    "This commonly happens when sudo btrfs creates a root-owned subvolume; fix ownership/permissions or configure the path elsewhere."
+                ),
+            )
+        return PathCheck(label=label, path=path_text, location="local", ok=True, detail="created Btrfs subvolume")
+
+    try:
+        helper_path.mkdir(mode=0o755, exist_ok=True)
+    except OSError as mkdir_exc:
+        return PathCheck(
+            label=label,
+            path=path_text,
+            location="local",
+            ok=False,
+            detail=(
+                "could not create helper path with Btrfs subvolume create or mkdir: "
+                f"btrfs error: {_compact_process_error(create_result)}; mkdir error: {_compact_os_error(mkdir_exc)}"
+            ),
+        )
+
+    if helper_path.is_dir():
+        if not os.access(path_text, os.W_OK | os.X_OK):
+            return PathCheck(
+                label=label,
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=(
+                    "created directory after Btrfs subvolume create failed, but the app user cannot write inside it; "
+                    "fix ownership/permissions or configure the path elsewhere. "
+                    f"Btrfs error was: {_compact_process_error(create_result)}"
+                ),
+            )
+        return PathCheck(
+            label=label,
+            path=path_text,
+            location="local",
+            ok=True,
+            detail="created directory after Btrfs subvolume create failed: " + _compact_process_error(create_result),
+        )
+    return PathCheck(
+        label=label,
+        path=path_text,
+        location="local",
+        ok=False,
+        detail="mkdir returned successfully but path is not a directory after Btrfs subvolume create failed: " + _compact_process_error(create_result),
+    )
+
+def _path_is_within(child: Path, parent: Path) -> bool:
+    """Return True when child is parent or below parent after path normalization."""
+
+    try:
+        child.expanduser().resolve(strict=False).relative_to(parent.expanduser().resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def prepare_lock_path(config: AppConfig, *, dry_run: bool = False) -> list[PathCheck]:
+    """Create/verify the lock directory before other sync/prune directories.
+
+    The lock is the first concurrency gate for real sync/prune runs. The app
+    prepares the lock file parent before checking snapshots, state, log, source,
+    or other destination helper folders, then the CLI acquires the lock. If the
+    lock path lives below destination.target_root and that target root is
+    missing, the target root is created first as the minimum prerequisite because
+    a child lock folder cannot exist before its parent Btrfs subvolume exists.
+    """
+
+    results: list[PathCheck] = []
+    lock_parent = config.lock_file.parent
+    target_root = config.destination.target_root
+
+    if _path_is_within(lock_parent, target_root) and not target_root.exists():
+        results.extend(_local_target_path_check(config, dry_run=dry_run))
+
+    results.append(ensure_local_helper_dir(config, "lock_file.parent", lock_parent, dry_run=dry_run))
+
+    _print_check_block(
+        "LOCK PATH PREFLIGHT",
+        results,
+        purpose="verify/create the lock file parent before checking other sync/prune paths; create destination.target_root first only when the lock path lives below it",
+    )
+    _raise_for_failed_checks(
+        results,
+        heading="Lock path preflight failed before acquiring the lock.",
+        fix_text="The path below could not be verified or created. Fix the exact configured path before retrying.",
+    )
+    return results
+
+def prepare_destination_helper_paths(config: AppConfig, *, dry_run: bool = False) -> list[PathCheck]:
+    """Create/verify local destination helper folders used by sync/prune.
+
+    Helper folders may be ordinary directories or Btrfs subvolumes. The app
+    accepts either when they already exist. When missing, it attempts Btrfs
+    subvolume creation first and falls back to mkdir when Btrfs creation is not
+    possible at that location.
+    """
+
+    raw_paths: list[tuple[str, Path]] = [
+        ("destination.snapshots", config.destination.target_root / "snapshots"),
+        ("state_file.parent", config.state_file.parent),
+        ("lock_file.parent", config.lock_file.parent),
+    ]
+    if config.log_dir is not None:
+        raw_paths.append(("log_dir", config.log_dir))
+
+    results: list[PathCheck] = []
+    seen: set[str] = set()
+    for label, path in raw_paths:
+        key = str(path.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(ensure_local_helper_dir(config, label, path, dry_run=dry_run))
+
+    _print_check_block(
+        "DESTINATION HELPER PATH PREFLIGHT",
+        results,
+        purpose="verify/create snapshots, state, lock, and optional log helper folders before writing state or receiving data",
+    )
+    _raise_for_failed_checks(
+        results,
+        heading="Destination helper path preflight failed.",
+        fix_text="The path below could not be verified or created. Fix the exact configured path before retrying.",
+    )
+    return results
+
+
 def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCheck]:
     """Check/create destination.target_root locally.
 
@@ -513,23 +746,14 @@ def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_ru
     results = _source_path_checks(config, source, dry_run=dry_run)
     results.extend(_local_target_path_check(config, dry_run=dry_run))
 
-    print("SYNC PATH PREFLIGHT")
-    for item in results:
-        status = "OK" if item.ok else "FAIL"
-        print(f"  {item.label:<24} {status}")
-        print(f"    location: {item.location}")
-        print(f"    path:     {item.path}")
-        if item.detail:
-            print(f"    detail:   {item.detail}")
-    print("  purpose: verify/create snapshot_root, cache_root, and target_root before on-demand creation or send")
-    print("----")
-
-    failures = [item for item in results if not item.ok]
-    if failures:
-        details = "\n".join(f"- {item.label}: {item.path}: {item.detail or 'not available'}" for item in failures)
-        raise PathPreflightError(
-            "Required sync path preflight failed before creating an on-demand snapshot or starting send/receive.\n"
-            "The path below could not be verified or created. Fix the exact configured path before retrying.\n"
-            + details
-        )
+    _print_check_block(
+        "SYNC PATH PREFLIGHT",
+        results,
+        purpose="verify/create snapshot_root, cache_root, and target_root before on-demand creation or send",
+    )
+    _raise_for_failed_checks(
+        results,
+        heading="Required sync path preflight failed before creating an on-demand snapshot or starting send/receive.",
+        fix_text="The path below could not be verified or created. Fix the exact configured path before retrying.",
+    )
     return results

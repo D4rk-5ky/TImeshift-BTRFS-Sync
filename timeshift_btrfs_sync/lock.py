@@ -14,7 +14,11 @@ class FileLock:
         self._fh = None
 
     def __enter__(self):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.parent.is_dir():
+            raise FileNotFoundError(
+                f"Lock directory does not exist or is not a directory: {self.path.parent}. "
+                "Real sync/prune should create it during lock path preflight before FileLock opens the lock file."
+            )
         self._fh = self.path.open("w")
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         self._fh.write("locked\n")
