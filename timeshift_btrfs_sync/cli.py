@@ -17,6 +17,7 @@ from .mqtt import publish_status
 from .notify import build_notification_payload
 from .retention import prune
 from .destroy import destroy_leftovers
+from .maintenance import clear_state_file, delete_lock_file
 from .source import SourceRunner
 from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
@@ -325,6 +326,45 @@ def cmd_create_manual(args) -> int:
 
 
 
+
+def cmd_clear_state(args) -> int:
+    """Guardedly remove the configured state_file."""
+
+    config = load_config(args.config)
+    dry_run = not args.run
+
+    if dry_run:
+        clear_state_file(config, dry_run=True, danger_confirmed=False)
+        return 0
+
+    # Acquire the existing app lock for real state clearing so sync/prune cannot
+    # update state.json at the same time. This maintenance command deliberately
+    # does not create destination/helper paths; it only touches configured
+    # metadata files. If the lock directory is missing, FileLock raises a clear
+    # error instead of creating backup folders as a side effect.
+    print(f"Acquiring lock: {config.lock_file}")
+    with FileLock(config.lock_file):
+        clear_state_file(
+            config,
+            dry_run=False,
+            danger_confirmed=args.i_understand_this_clears_state,
+        )
+    return 0
+
+
+def cmd_delete_lock(args) -> int:
+    """Guardedly remove the configured lock_file if it is stale."""
+
+    config = load_config(args.config)
+    dry_run = not args.run
+    delete_lock_file(
+        config,
+        dry_run=dry_run,
+        danger_confirmed=args.i_understand_this_deletes_lock,
+    )
+    return 0
+
+
 def cmd_destroy_leftovers(args) -> int:
     """Destroy configured leftovers when this app setup is being retired."""
 
@@ -370,6 +410,8 @@ Available commands:
   prune          Apply destination retention rules only.
   create-manual      Create a source Timeshift on-demand snapshot.
   show-state         Show local state.json.
+  clear-state        Remove configured state.json after guarded confirmation.
+  delete-lock        Remove stale configured lock file after guarded confirmation.
   destroy-leftovers  Permanently delete app-created source send-cache and/or destination leftovers.
 
 Command-specific flags are shown by asking the command for help, for example:
@@ -503,6 +545,53 @@ def build_parser() -> argparse.ArgumentParser:
         "--i-understand-this-destroys-data",
         action="store_true",
         help="required with --run; confirms you understand this recursively destroys configured paths",
+    )
+
+    p = new_subparser(
+        sub,
+        "clear-state",
+        "remove configured state.json with guardrails",
+        (
+            "Remove the configured state_file after guarded confirmation.\n"
+            "Dry-run is the default. Real removal acquires the app lock first and requires "
+            "--run, --i-understand-this-clears-state, and two typed confirmations.\n"
+            "This does not delete snapshots. On the next sync, state can be rebuilt only from exact Btrfs UUID matches."
+        ),
+        cmd_clear_state,
+    )
+    add_config_arg(p)
+    add_run_mode_args(
+        p,
+        dry_run_help="show which configured state_file would be removed; do not remove anything",
+        run_help="remove the configured state_file after danger flag, lock acquisition, and typed confirmations",
+    )
+    p.add_argument(
+        "--i-understand-this-clears-state",
+        action="store_true",
+        help="required with --run; confirms you understand state removal can break incremental continuity unless state recovery can prove UUID matches",
+    )
+
+    p = new_subparser(
+        sub,
+        "delete-lock",
+        "remove stale configured lock file with guardrails",
+        (
+            "Remove the configured lock_file only when no running ts-btrfs process holds it.\n"
+            "Dry-run is the default. Real removal requires --run, --i-understand-this-deletes-lock, "
+            "and two typed confirmations. This is for stale lock files, not for stopping a running job."
+        ),
+        cmd_delete_lock,
+    )
+    add_config_arg(p)
+    add_run_mode_args(
+        p,
+        dry_run_help="show which configured lock_file would be removed; do not remove anything",
+        run_help="remove the configured lock_file if it is stale and not currently held",
+    )
+    p.add_argument(
+        "--i-understand-this-deletes-lock",
+        action="store_true",
+        help="required with --run; confirms you understand deleting a stale lock must not be used to stop a running job",
     )
 
     p = new_subparser(sub, "show-state", "show local sync state", "Show state.json, which records completed transfers and incremental parent metadata.", cmd_show_state)

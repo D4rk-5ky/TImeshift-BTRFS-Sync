@@ -14,6 +14,8 @@ This file describes the current command handlers, shell command families, functi
 | `prune` | Applies destination retention rules. | Real deletion requires `--run --yes-delete`. |
 | `create-manual` | Creates a source Timeshift on-demand snapshot. | Runs path preflight first; existing destination also requires UUID-confirmed source identity. |
 | `show-state` | Prints local `state.json`. | Read-only; can show raw JSON with `--json`. |
+| `clear-state` | Removes the configured state file after guarded confirmation. | Dry-run by default; real removal requires `--run`, `--i-understand-this-clears-state`, app lock acquisition, and two typed confirmations. It never deletes snapshots. |
+| `delete-lock` | Removes the configured lock file only when it is stale. | Dry-run by default; real removal requires `--run`, `--i-understand-this-deletes-lock`, and two typed confirmations; it refuses an actively held lock. |
 | `destroy-leftovers` | Destroys configured source send-cache/destination leftovers when retiring the app setup. | Dry-run by default; real deletion requires explicit target flag, `--run`, long danger flag, and two typed confirmations. It never deletes `source.snapshot_root`. |
 
 ## Source, destination, and helper commands
@@ -34,10 +36,24 @@ This file describes the current command handlers, shell command families, functi
 | `mbuffer` | Optional middle stage between `btrfs send` and `btrfs receive`. | Gives buffering, rate limiting, and transfer statistics when enabled. |
 | `sudo -n btrfs subvolume create <helper path>` | First attempt for missing destination helper folders such as the lock/state/log or snapshots folder. | Prefer Btrfs subvolumes because the app manages Btrfs backup storage. |
 | `mkdir` / `rmdir` / `rm -rf` | `mkdir` is the fallback for helper-folder creation when Btrfs creation is not possible; `rmdir` / `rm -rf` remove safe ordinary leftover directories when needed. | Helper paths can still be ordinary directories on non-Btrfs or user-writable locations, while Btrfs payload subvolumes are handled by Btrfs commands. |
+| `unlink state_file` | Removes only the configured state metadata file during `clear-state`. | Lets a controlled recovery run rebuild state from exact Btrfs UUID matches without deleting snapshots. |
+| `flock lock_file` + `unlink lock_file` | Checks that the configured lock file is not currently held, then removes it during `delete-lock`. | Allows stale lock cleanup without bypassing an active running job. |
 
 | `timeshift_btrfs_sync/data/config.example.toml` | Packaged package-data config template used by `init-config`. | Keeps the example config available after normal install and PyInstaller packaging. The `data` path must remain a directory so import/package-data lookup works correctly. |
 
 ## Functions and classes
+
+### `maintenance.py`
+
+- `MaintenanceResult`: records the target file, existence, action, and whether a guarded maintenance command changed anything.
+- `_confirm_or_raise()`: requires exact typed confirmation before real state or lock removal.
+- `_safe_configured_file()`: validates that the configured target is a single file and not a broad cleanup path.
+- `_looks_like_state_file()`: refuses to clear a custom state path unless it looks like a ts-btrfs state document.
+- `_looks_like_lock_file()`: refuses to delete a lock target that does not look like the app's simple lock file.
+- `_print_header()`: prints the shared warning block for guarded metadata maintenance.
+- `_require_real_confirmation()`: enforces real-mode danger flags and typed confirmations.
+- `clear_state_file()`: removes only the configured `state_file` after confirmation; the CLI acquires the app lock before calling it in real mode.
+- `delete_lock_file()`: removes only the configured `lock_file` when `flock` proves no running process currently holds it.
 
 ### `models.py`
 
@@ -376,6 +392,11 @@ This file describes the current command handlers, shell command families, functi
 - `_state_uuid_values_for_path()`: returns trusted UUID values remembered for a state path.
 - `_find_confirmed_sync_floor()`: finds a safe high-watermark after pruning by confirming source/destination UUID history.
 - `_filesystem_parent_candidates()`: finds older candidates present in both source and state.
+- `_destination_snapshot_names()`: lists destination snapshot folders oldest-to-newest for state recovery.
+- `_expected_original_source_path()`: builds the expected Timeshift-owned source path for a snapshot/subvolume without creating it.
+- `_source_cache_meta_by_uuid()`: finds an existing source-cache subvolume by exact UUID and refreshes its metadata so recovery can prove read-only cache identity.
+- `_match_existing_destination_to_source()`: compares one existing destination subvolume's `Received UUID` with the matching source Timeshift subvolume and source-cache index. It returns a send path only for exact UUID matches.
+- `_recover_state_from_existing_destination()`: rebuilds missing or empty state from already-existing destination snapshots. It adopts only exact UUID matches and refuses to treat unadopted existing destination paths as incomplete receives.
 - `_select_parent()`: chooses full seed or verified incremental parent. Full sends
   are allowed only for empty-destination seeding rules.
 - `sync_once()`: complete sync transaction for one config/run. It creates the

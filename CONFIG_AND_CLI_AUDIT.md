@@ -401,3 +401,8 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 
 - `.gitignore` now ignores `*.toml` to reduce the chance of committing local TOML configuration/secrets.
 - The `!config.example.toml` exception remains after the ignore rule, so example configuration can still be tracked.
+
+
+## State recovery safety
+
+When `state.json` is missing or empty and destination snapshots already exist, `sync` may rebuild state from exact Btrfs UUID matches. Destination names alone are not trusted, and existing unadopted destination subvolumes are not deleted automatically.

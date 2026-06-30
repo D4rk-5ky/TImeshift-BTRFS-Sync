@@ -1,3 +1,17 @@
+## 0.1.29
+
+- Added guarded `clear-state` command to remove only the configured `state_file`. It defaults to dry-run and real removal requires `--run`, `--i-understand-this-clears-state`, app lock acquisition, and two typed confirmations.
+- Added guarded `delete-lock` command to remove only the configured `lock_file` when `flock` proves no running process currently holds it. It defaults to dry-run and real removal requires `--run`, `--i-understand-this-deletes-lock`, and two typed confirmations.
+- Added `maintenance.py` so state/lock file removal has explicit path validation and does not delete source snapshots, source cache snapshots, destination snapshots, or Timeshift-owned paths.
+- Updated README.md, COMMENTED_CODE_MAP.md, and the config example comments to document the guarded maintenance commands.
+
+## 0.1.28
+
+- Added conservative state recovery when `state.json` is missing or empty but destination snapshots already exist.
+- Existing destination subvolumes are adopted into rebuilt state only when their `Received UUID` exactly matches the UUID of the matching source Timeshift subvolume or an existing read-only source-cache subvolume.
+- The recovered state lets sync continue from the newest fully adopted matching snapshot instead of forcing a new full chain.
+- Added a safety guard so, when state was missing/empty at run start, an existing destination subvolume that cannot be adopted is not deleted as an incomplete receive.
+
 ## 0.1.27
 
 - Added source-cache UUID adoption for incremental parent selection.

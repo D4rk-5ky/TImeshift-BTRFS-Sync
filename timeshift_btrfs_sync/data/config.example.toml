@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.22 config
+# timeshift-btrfs-sync v0.1.29 config
 # Run this config on the BACKUP/DESTINATION machine.
 # source.mode = "ssh" pulls from another machine over SSH.
 # source.mode = "local" copies from Timeshift snapshots on this same machine and skips SSH.
@@ -30,7 +30,14 @@ log_dir = "/Backups/Kubuntu/timeshift-btrfs/.ts-btrfs-sync/logs"
 #   <target_root>/.ts-btrfs-sync/state.json
 #   <target_root>/.ts-btrfs-sync/lock
 # state_file records successfully received snapshots and incremental parent data.
+# Do not manually delete state_file while a job is running. Use:
+#   ts-btrfs clear-state --config ./config.toml --dry-run
+#   ts-btrfs clear-state --config ./config.toml --run --i-understand-this-clears-state
+# The next sync can rebuild state only from exact Btrfs UUID matches.
 # lock_file prevents two sync/prune jobs from running against the same target.
+# Do not manually remove a lock for a running job. Use delete-lock only for stale locks:
+#   ts-btrfs delete-lock --config ./config.toml --dry-run
+#   ts-btrfs delete-lock --config ./config.toml --run --i-understand-this-deletes-lock
 # In real sync/prune, the lock-file parent is prepared before other sync/prune
 # paths are checked. Missing lock/helper folders try Btrfs subvolume creation
 # first, then mkdir fallback if Btrfs creation is not possible.

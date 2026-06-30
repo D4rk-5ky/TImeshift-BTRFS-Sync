@@ -853,6 +853,244 @@ def _find_confirmed_sync_floor(
         return None, f"no state snapshot still exists on source; checked {checked_missing} missing entr{'y' if checked_missing == 1 else 'ies'}"
     return None, "no usable fully synced state snapshot found"
 
+
+def _destination_snapshot_names(config: AppConfig) -> list[str]:
+    """Return destination snapshot folder names sorted oldest-to-newest."""
+
+    snapshots_root = config.destination.target_root / "snapshots"
+    if not snapshots_root.exists():
+        return []
+    return sorted(child.name for child in snapshots_root.iterdir() if child.is_dir())
+
+
+def _expected_original_source_path(config: AppConfig, snapshot_name: str, subvolume_name: str) -> str:
+    """Return the Timeshift-owned original source path for one snapshot/subvolume."""
+
+    return str(Path(config.source.snapshot_root) / snapshot_name / subvolume_name)
+
+
+def _source_cache_meta_by_uuid(
+    config: AppConfig,
+    source: SourceRunner,
+    source_cache_index: remote_index.BtrfsIndex | None,
+    uuid: str | None,
+    subvolume_name: str,
+) -> SubvolumeMeta | None:
+    """Return indexed source-cache metadata for an exact UUID match.
+
+    The cache snapshot is re-read with ``btrfs subvolume show`` when possible so
+    the app can confirm read-only state. The UUID match is still the hard safety
+    rule; a missing read-only flag is tolerated only when Btrfs does not report
+    the flag.
+    """
+
+    if not uuid or source_cache_index is None:
+        return None
+    indexed = source_cache_index.by_uuid.get(uuid)
+    if not indexed or not indexed.path:
+        return None
+    try:
+        refreshed = remote_index.refresh_source_path(
+            source_cache_index,
+            source,
+            indexed.path,
+            name=subvolume_name,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+        )
+    except Exception:
+        refreshed = indexed
+    if refreshed and refreshed.uuid == uuid and refreshed.readonly is not False:
+        return refreshed
+    return None
+
+
+def _match_existing_destination_to_source(
+    config: AppConfig,
+    source: SourceRunner,
+    source_by_name: dict[str, SnapshotMeta],
+    *,
+    snapshot_name: str,
+    subvolume_name: str,
+    destination_meta: SubvolumeMeta,
+    source_cache_index: remote_index.BtrfsIndex | None,
+) -> tuple[SnapshotMeta | None, SubvolumeMeta | None, str | None, SubvolumeMeta | None, SubvolumeMeta | None, str]:
+    """Match one existing destination subvolume to an exact source/cache UUID.
+
+    Returns ``(snapshot, original_subvol, send_path, original_meta, send_meta,
+    reason)``. ``send_path`` is non-empty only when the destination can be
+    adopted into state safely. Adoption requires the destination Received UUID
+    to equal the UUID of either the original Timeshift source subvolume or an
+    existing read-only source-cache subvolume.
+    """
+
+    if not destination_meta.received_uuid:
+        return None, None, None, None, None, "destination has no Received UUID"
+
+    source_snapshot = source_by_name.get(snapshot_name)
+    source_subvol = source_snapshot.subvolumes.get(subvolume_name) if source_snapshot else None
+    original_path = source_subvol.path if source_subvol else _expected_original_source_path(config, snapshot_name, subvolume_name)
+    original_subvol = source_subvol or SubvolumeMeta(name=subvolume_name, path=original_path)
+
+    original_meta = None
+    if source_subvol:
+        try:
+            original_meta = _source_meta(config, source, original_path, subvolume_name, required=False)
+        except Exception:
+            original_meta = None
+        if original_meta and original_meta.uuid == destination_meta.received_uuid:
+            return source_snapshot, original_subvol, original_path, original_meta, original_meta, "matched original Timeshift source UUID"
+
+    cache_meta = _source_cache_meta_by_uuid(
+        config,
+        source,
+        source_cache_index,
+        destination_meta.received_uuid,
+        subvolume_name,
+    )
+    if cache_meta and cache_meta.path:
+        if source_snapshot is None:
+            source_snapshot = SnapshotMeta(
+                name=snapshot_name,
+                path=str(Path(config.source.snapshot_root) / snapshot_name),
+                tags=[],
+                comment=None,
+                created=None,
+                subvolumes={subvolume_name: original_subvol},
+            )
+        return source_snapshot, original_subvol, cache_meta.path, original_meta, cache_meta, "matched existing source-cache UUID"
+
+    return (
+        source_snapshot,
+        original_subvol,
+        None,
+        original_meta,
+        None,
+        f"no source/cache UUID matched destination Received UUID {destination_meta.received_uuid}",
+    )
+
+
+def _recover_state_from_existing_destination(
+    config: AppConfig,
+    source: SourceRunner,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+    *,
+    dry_run: bool,
+    source_cache_index: remote_index.BtrfsIndex | None,
+    destination_index: remote_index.BtrfsIndex | None,
+) -> tuple[str | None, str]:
+    """Rebuild missing/empty state.json from proven source/destination matches.
+
+    This recovery is intentionally conservative. It never trusts names alone and
+    never invents a parent chain. A destination subvolume is adopted only when
+    Btrfs proves that its Received UUID equals a currently available source
+    UUID, either the original Timeshift snapshot subvolume or an existing
+    read-only source-cache subvolume. Once adopted, the normal sync-floor logic
+    can continue from the newest fully adopted snapshot.
+    """
+
+    if state.get("snapshots"):
+        return None, "state already has snapshot records"
+    if not _destination_has_existing_snapshots(config):
+        return None, "destination has no snapshots to adopt"
+
+    adopted_subvolumes = 0
+    adopted_full_snapshots: list[str] = []
+    skipped: list[str] = []
+    parent_by_subvolume: dict[str, tuple[str, str]] = {}
+
+    for snapshot_name in _destination_snapshot_names(config):
+        snapshot_any_adopted = False
+        snapshot_all_required = True
+        synthetic_snapshot: SnapshotMeta | None = None
+
+        for subvolume_name in config.source.subvolumes:
+            dest_path = _dest_subvolume_path(config, snapshot_name, subvolume_name)
+            dest_meta = destination_index.meta(dest_path) if destination_index is not None else None
+            if dest_meta is None and dest_path.exists():
+                try:
+                    dest_meta = _local_meta(config, dest_path, subvolume_name, required=False)
+                except Exception:
+                    dest_meta = None
+            if dest_meta is None:
+                snapshot_all_required = False
+                skipped.append(f"{snapshot_name}/{subvolume_name}: destination subvolume missing or unreadable")
+                continue
+
+            (
+                source_snapshot,
+                original_subvol,
+                send_path,
+                original_meta,
+                send_meta,
+                reason,
+            ) = _match_existing_destination_to_source(
+                config,
+                source,
+                source_by_name,
+                snapshot_name=snapshot_name,
+                subvolume_name=subvolume_name,
+                destination_meta=dest_meta,
+                source_cache_index=source_cache_index,
+            )
+            if not send_path or source_snapshot is None or original_subvol is None:
+                snapshot_all_required = False
+                skipped.append(f"{snapshot_name}/{subvolume_name}: {reason}")
+                continue
+
+            synthetic_snapshot = source_snapshot
+            parent_snapshot, parent_source_path = parent_by_subvolume.get(subvolume_name, (None, None))
+            # Always adopt into the in-memory state. In dry-run this lets the
+            # remaining plan use the recovered high-watermark without writing
+            # state.json to disk.
+            mark_subvolume_synced(
+                state,
+                snapshot=source_snapshot,
+                subvolume=original_subvol,
+                destination_path=dest_path,
+                destination_root=config.destination.target_root,
+                parent_snapshot=parent_snapshot,
+                parent_source_path=parent_source_path,
+                send_path=send_path,
+                received_meta=dest_meta,
+                original_meta=original_meta,
+                send_meta=send_meta,
+            )
+            parent_by_subvolume[subvolume_name] = (snapshot_name, send_path)
+            adopted_subvolumes += 1
+            snapshot_any_adopted = True
+
+        if snapshot_any_adopted and snapshot_all_required:
+            adopted_full_snapshots.append(snapshot_name)
+
+    _human_blank()
+    print("STATE RECOVERY")
+    print("  trigger: state.json is missing or empty, but destination snapshots exist")
+    print("  rule:    adopt only exact Btrfs UUID matches; names alone are never trusted")
+    print(f"  adopted subvolume(s): {adopted_subvolumes}")
+    if adopted_full_snapshots:
+        print(f"  fully adopted snapshot(s): {', '.join(adopted_full_snapshots)}")
+    if skipped:
+        print(f"  skipped candidate(s): {len(skipped)}")
+        for line in skipped[:10]:
+            print(f"    - {line}")
+        if len(skipped) > 10:
+            print(f"    ... {len(skipped) - 10} more")
+    if dry_run:
+        print("  dry-run: recovered state.json would be written, but was not changed")
+    elif adopted_subvolumes:
+        save_state(config.state_file, state)
+        print("  state.json rebuilt from existing destination/source UUID matches")
+    else:
+        print("  state.json was not rebuilt because no safe UUID matches were found")
+    _human_rule("----")
+
+    if not adopted_full_snapshots:
+        return None, "no complete configured snapshot could be adopted"
+    newest = adopted_full_snapshots[-1]
+    return newest, f"rebuilt state from existing destination/source UUID matches through {newest}"
+
 def _filesystem_parent_candidates(config: AppConfig, snapshot_name: str, subvolume_name: str, source_names: set[str]) -> list[str]:
     """Find local destination parent candidates by matching snapshot names.
 
@@ -1089,6 +1327,18 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     source_by_name = discover_source_index("before manual snapshot safety check")
     before_manual_snapshot_names = set(source_by_name)
 
+    state_empty_at_start = not state.get("snapshots")
+    if state_empty_at_start and not destination_empty_at_start:
+        _recover_state_from_existing_destination(
+            config,
+            source,
+            state,
+            source_by_name,
+            dry_run=dry_run,
+            source_cache_index=source_cache_index,
+            destination_index=destination_index,
+        )
+
     created_manual_snapshot = _maybe_create_manual_snapshot(
         config,
         source,
@@ -1194,6 +1444,14 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 _human_blank()
                 continue
             if dest_path.exists() and not dry_run:
+                if state_empty_at_start:
+                    raise SyncError(
+                        "Destination subvolume exists but state.json was missing/empty and this "
+                        "subvolume could not be adopted by exact UUID match. Refusing to delete it "
+                        "as an incomplete receive because it may be a valid backup. Inspect or move "
+                        "the existing path, or restore the matching state/source cache before retrying:\n"
+                        f"  {dest_path}"
+                    )
                 _cleanup_incomplete_destination_receive(config, dest_path, subvol_name, destination_index)
 
             parent_name, parent_send_path = _select_parent(

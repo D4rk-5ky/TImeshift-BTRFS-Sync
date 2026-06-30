@@ -78,11 +78,13 @@ The destination `target_root` is the backup job folder. The app creates and owns
 
 The destination `target_root` must be a Btrfs subvolume. If it is missing and `destination.create_target_root = true`, the app creates it with `btrfs subvolume create`. The lock-file parent is prepared before the rest of the sync/prune checks so a real job can acquire the lock early. Helper folders such as `snapshots/`, `.ts-btrfs-sync/`, the lock-file parent, and optional `log_dir` may be ordinary directories or Btrfs subvolumes. When a helper folder is missing during a real run, the app tries `btrfs subvolume create` first because the app works on Btrfs storage, then falls back to normal `mkdir` if Btrfs creation is not possible at that location. After creation, the helper path must still be writable by the app user because lock, state, logs, and per-snapshot receive folders are created before or around sudo Btrfs operations.
 
-`state.json` records successfully received snapshots and the metadata needed for incremental sends. Do not delete only `state.json` while keeping `snapshots/`, and do not delete only `snapshots/` while keeping old state.
+`state.json` records successfully received snapshots and the metadata needed for incremental sends. Do not manually delete `state.json` while a job is running. Use the guarded `clear-state` command when you intentionally want to remove the configured state file after a failed transfer or before a controlled state-recovery run. Do not delete only `snapshots/` while keeping old state.
 
 State destination paths are stored relative to `destination.target_root`, for example `snapshots/2026-06-23_07-10-24/@`. This means you can move the whole target root to another mount point, update `destination.target_root`, and the app will resolve existing state paths under the new target root. Absolute state paths are normalized when the state is loaded.
 
 During `sync` and before standalone `prune`, mutable Timeshift metadata for already-synced snapshots is refreshed from the latest `timeshift --list`. This updates snapshot-level `tags`, `comment`, `created`, and `path` in `state.json` without re-sending data and without changing Btrfs UUID, parent-chain, send-path, destination-path, or status fields. This lets retention follow Timeshift when it later promotes or changes flags such as `O`, `H`, `D`, `W`, or `M`. The metadata refresh uses the fast Timeshift list path and does not run `btrfs subvolume show` for every already-synced snapshot.
+
+If `state.json` is missing or empty while destination snapshots already exist, `sync` tries a conservative state recovery before creating a manual snapshot or sending data. It scans destination snapshots and compares each destination subvolume's `Received UUID` with the UUID of the matching source Timeshift subvolume or an existing read-only source-cache subvolume. Only exact UUID matches are adopted into in-memory state and, during a real run, written back to `state.json`. Names alone are never trusted. If an existing destination subvolume cannot be adopted, the app refuses to delete it as an incomplete receive because it may be a valid backup from a missing state file.
 
 A full reset means deleting both `snapshots/` and `.ts-btrfs-sync/`. Received `@` and `@home` entries are Btrfs subvolumes, so delete them with `btrfs subvolume delete` before removing ordinary folders.
 
@@ -372,6 +374,30 @@ Creates one source Timeshift on-demand snapshot using the configured source. Tim
 |---|---|---|
 | `--config`, `-c` | Loads the chosen TOML config. | Needed for source mode, Timeshift command, and manual snapshot safety settings. |
 | `--comment COMMENT` | Passes a custom comment to `timeshift --create --comments`. | Useful to identify why the snapshot was created and to include the configured marker text. |
+
+### `clear-state`
+
+Removes the configured `state_file` after guarded confirmation. This command does not delete source snapshots, source cache snapshots, destination snapshots, or Timeshift-owned paths. It is useful after a failed transfer when you want the next sync to rebuild state from exact Btrfs UUID matches.
+
+Real removal acquires the existing app lock first, so it refuses to run while another sync/prune job is active. It does not create destination/helper folders as a side effect.
+
+| Flag | What it does | Why it may be needed |
+|---|---|---|
+| `--config`, `-c` | Loads the chosen TOML config. | Required so the app knows the exact configured `state_file`, `lock_file`, and job name. |
+| `--dry-run` | Shows the configured state file that would be removed. | Default mode; does not remove anything. |
+| `--run` | Allows real state-file removal. | Still requires the long danger flag and typed confirmations. |
+| `--i-understand-this-clears-state` | Required with `--run`. | Confirms you understand removing state can break incremental continuity unless state recovery can prove UUID matches. |
+
+### `delete-lock`
+
+Removes the configured `lock_file` only when it is stale and no running `ts-btrfs` process currently holds it. This command is not for stopping a running sync/prune job. Stop the process first; then use `delete-lock` only if the file remains.
+
+| Flag | What it does | Why it may be needed |
+|---|---|---|
+| `--config`, `-c` | Loads the chosen TOML config. | Required so the app knows the exact configured `lock_file` and job name. |
+| `--dry-run` | Shows the configured lock file that would be removed. | Default mode; does not remove anything. |
+| `--run` | Allows real stale-lock removal. | Still requires the long danger flag and typed confirmations. |
+| `--i-understand-this-deletes-lock` | Required with `--run`. | Confirms you understand deleting a lock must not be used to bypass an active running job. |
 
 ### `show-state`
 
