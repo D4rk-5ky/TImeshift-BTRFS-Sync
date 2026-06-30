@@ -1,5 +1,14 @@
 # Versioning
 
+## 0.1.23 - Timeshift-owned snapshot root preflight
+
+- Changed source snapshot-root preflight so `source.snapshot_root` is never created by the app.
+- `source.snapshot_root` may be an ordinary directory on a Btrfs filesystem, because Timeshift creates snapshot subvolumes inside that directory.
+- Missing, non-directory, or non-Btrfs-accessible `source.snapshot_root` is now a hard preflight error in both dry-run and real-run mode.
+- Updated README.md, COMMENTED_CODE_MAP.md, and the example config to describe the current snapshot-root rule without adding old-version notes there.
+
+This build is version `0.1.23`.
+
 ## 0.1.22 - early lock path and Btrfs-first helper creation
 
 - Changed real-run ordering so the lock file parent is prepared before source roots, destination helper folders, state paths, logs, or sync/prune work are checked.

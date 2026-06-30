@@ -222,10 +222,11 @@ retention_count = 10
 # Sync path preflight:
 # Before automatic/manual on-demand snapshot creation and before any send/receive
 # work, the app verifies source.snapshot_root, source.cache_root policy, and
-# destination.target_root. source.snapshot_root must exist or be creatable below
-# a Btrfs-accessible parent. source.cache_root may already exist as a Btrfs
-# subvolume, or if create_readonly_cache = true it may be missing as long as its
-# parent is Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
+# destination.target_root. source.snapshot_root is Timeshift-owned: it must
+# already exist, may be an ordinary directory on Btrfs, and is never created by
+# this app. source.cache_root may already exist as a Btrfs subvolume, or if
+# create_readonly_cache = true it may be missing as long as its parent is
+# Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
 # If destination.target_root is missing and create_target_root = true, real
 # preflight creates it as a Btrfs subvolume too. If it already exists, it must
 # pass `btrfs subvolume show`; a plain directory inside Btrfs is refused.
@@ -247,7 +248,10 @@ timeshift_command = "timeshift"
 
 # Snapshot discovery command:
 #   sudo -n timeshift --list
-# The app parses snapshot names from that output, then constructs paths as:
+# This directory belongs to Timeshift and must already exist. It may be a
+# normal directory on a Btrfs filesystem because Timeshift creates snapshot
+# subvolumes inside it. The app never creates source.snapshot_root.
+# The app parses snapshot names from Timeshift output, then constructs paths as:
 #   snapshot_root/<snapshot-name>/<subvolume>
 snapshot_root = "/timeshift-btrfs/snapshots"
 

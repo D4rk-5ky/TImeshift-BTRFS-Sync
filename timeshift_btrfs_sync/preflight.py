@@ -10,8 +10,9 @@ run against a destination. If a configured path is missing, preflight attempts
 to create exactly that configured path using the safest command that matches
 the path type, then verifies Btrfs accessibility before sync continues:
 
-* source.snapshot_root is created as a normal directory below an existing
-  Btrfs-accessible parent.
+* source.snapshot_root is Timeshift-owned. It must already exist as a
+  directory on a Btrfs filesystem; it may be a normal directory and is never
+  created by this app.
 * source.cache_root is created as a Btrfs subvolume below an existing
   Btrfs-accessible parent.
 * destination.target_root is created as a local Btrfs subvolume when
@@ -136,15 +137,21 @@ def _source_snapshot_root_script(
     btrfs_command: str,
     dry_run: bool,
 ) -> str:
-    """Build a source script that validates or creates source.snapshot_root."""
+    """Build a source script that validates Timeshift-owned source.snapshot_root.
+
+    Timeshift creates its Btrfs snapshot subvolumes below snapshot_root. The
+    root path itself may be an ordinary directory on a Btrfs filesystem. The app
+    must not create this path, because creating it can hide a missing Timeshift
+    mount or a wrong OS/root selection. Missing snapshot_root is therefore a
+    hard preflight error in both dry-run and real-run mode.
+    """
 
     sudo_words = _shell_words(sudo_prefix(sudo))
-    may_create = "0" if dry_run else "1"
+    _ = dry_run  # snapshot_root is never created; dry-run and real-run validate identically.
     return f"""
 sudo_words={shlex.quote(sudo_words)}
 btrfs_cmd={shlex.quote(btrfs_command)}
 snapshot_root={shlex.quote(snapshot_root)}
-may_create={may_create}
 
 run_sudo_prefix() {{
     if [ -n "$sudo_words" ]; then
@@ -163,48 +170,20 @@ compact_error() {{
     tr '\n' ' ' < "$1" | sed 's/[[:space:]][[:space:]]*/ /g'
 }}
 
-parent_of() {{
-    value=$1
-    parent=${{value%/*}}
-    [ -n "$parent" ] || parent=/
-    [ "$parent" = "$value" ] && parent=/
-    printf '%s\n' "$parent"
-}}
-
 err_file=$(mktemp) || exit 2
-if run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
-    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'exists and is Btrfs-accessible'
+if [ ! -e "$snapshot_root" ]; then
+    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 1 'missing; this is Timeshift-owned and must already exist. Mount/fix the Timeshift Btrfs snapshot root instead of letting the app create it.'
+elif [ ! -d "$snapshot_root" ]; then
+    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 1 'path exists but is not a directory'
+elif run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
+    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'exists as Timeshift-owned directory and is Btrfs-accessible; ordinary directory is allowed'
 else
-    check_status=$?
-    if [ -e "$snapshot_root" ]; then
-        detail=$(compact_error "$err_file")
-        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$check_status" "path exists but is not Btrfs-accessible: $detail"
-    else
-    parent=$(parent_of "$snapshot_root")
-    if [ "$may_create" != "1" ]; then
-        printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "missing now; real preflight would create this directory after verifying Btrfs parent $parent"
-    elif ! run_btrfs subvolume list -o "$parent" >/dev/null 2>"$err_file"; then
-        status=$?
-        detail=$(compact_error "$err_file")
-        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "could not create source.snapshot_root because parent is not Btrfs-accessible: $parent: $detail"
-    elif run_sudo_prefix mkdir "$snapshot_root" >/dev/null 2>"$err_file"; then
-        if run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
-            printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'created directory and verified Btrfs accessibility'
-        else
-            status=$?
-            detail=$(compact_error "$err_file")
-            printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "created directory but Btrfs verification failed: $detail"
-        fi
-    else
-        status=$?
-        detail=$(compact_error "$err_file")
-        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "could not create directory: $detail"
-    fi
-    fi
+    status=$?
+    detail=$(compact_error "$err_file")
+    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "path exists but is not Btrfs-accessible: $detail"
 fi
 rm -f "$err_file"
 """.strip()
-
 
 def _cache_root_check_script(
     cache_root: str,

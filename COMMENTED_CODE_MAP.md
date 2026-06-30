@@ -136,9 +136,11 @@ This file describes the current command handlers, shell command families, functi
   filesystem commands.
 - `_parse_path_check_output()`: parses structured path-check sentinel lines,
   including OK/FAIL details from creation attempts.
-- `_source_snapshot_root_script()`: verifies `source.snapshot_root`; in real-run
-  mode, if it is missing, it verifies the parent with Btrfs and creates the exact
-  configured path as a normal directory with `mkdir <snapshot_root>`.
+- `_source_snapshot_root_script()`: verifies the Timeshift-owned
+  `source.snapshot_root`. The path must already exist, may be an ordinary
+  directory on a Btrfs filesystem, and is never created by the app. This avoids
+  hiding a missing Timeshift mount or wrong OS root behind an empty replacement
+  directory.
 - `_cache_root_check_script()`: verifies `source.cache_root` is already a Btrfs
   subvolume; in real-run mode, if it is missing and `create_readonly_cache =
   true`, it verifies the parent and creates the exact configured path with
