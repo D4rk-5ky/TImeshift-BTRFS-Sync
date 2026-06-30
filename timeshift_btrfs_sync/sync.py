@@ -985,10 +985,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     if dry_run:
         print("Strict dry-run: destination preparation is skipped; no target directories or internal metadata directories are created/changed.")
         _human_rule("----")
-    else:
-        prepare_destination(config)
-
-    destination_empty_at_start = not _destination_has_existing_snapshots(config)
 
     # Create one source runner. In ssh mode it wraps SSH; in local mode it runs
     # the same source-side sudo+btrfs/timeshift commands locally and skips SSH.
@@ -1000,11 +996,16 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         _human_rule("----")
 
     # Before Timeshift creates a fresh on-demand snapshot, before source cache
-    # snapshots are created, and before any send/receive pipeline starts, verify
-    # that the configured source/destination roots are reachable. This prevents
-    # avoidable leftover on-demand snapshots when snapshot_root, cache_root, or
-    # target_root is missing/mis-mounted after a restore or setup change.
+    # snapshots are created, and before any send/receive pipeline starts,
+    # preflight verifies required roots. In real-run mode, missing configured
+    # roots are created here first; if creation or Btrfs verification fails, the
+    # exact configured path is reported as a hard error.
     preflight.check_required_sync_paths(config, source, dry_run=dry_run)
+
+    if not dry_run:
+        prepare_destination(config)
+
+    destination_empty_at_start = not _destination_has_existing_snapshots(config)
 
     source_cache_index = (
         remote_index.build_source_btrfs_index(

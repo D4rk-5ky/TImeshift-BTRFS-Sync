@@ -1,6 +1,25 @@
 # Versioning
 
-This build is version `0.1.13`.
+This build is version `0.1.15`.
+
+### 0.1.15
+
+- Real-run sync path preflight now attempts to create missing configured roots before Timeshift on-demand creation or send/receive work starts.
+- `source.snapshot_root` is created as a normal source-side directory only after its parent is proven Btrfs-accessible.
+- `source.cache_root` is created during preflight as a Btrfs subvolume when missing and `source.create_readonly_cache = true`; existing ordinary directories are still refused.
+- `destination.target_root` is created locally during preflight when missing and `destination.create_target_root = true`, then verified with Btrfs before sync continues.
+- Preflight hard errors now name the exact configured path that could not be verified or created.
+- Included the requested `.gitignore` exactly as supplied and kept release packaging free of `__pycache__`, `.pyc`, and `.pyo` files.
+- Updated README, commented code map, versioning, and config example comments.
+
+### 0.1.14
+
+- Added lazy source cache-root creation for writable Timeshift snapshots that need a read-only send copy.
+- `source.cache_root` is now created as a Btrfs subvolume with `btrfs subvolume create <cache_root>` when it is missing and cache is actually needed.
+- Existing `source.cache_root` paths must already be Btrfs subvolumes; ordinary directories are refused so app-owned send-cache cleanup remains safe.
+- Preflight now accepts a missing `source.cache_root` only when `create_readonly_cache = true` and the cache-root parent is Btrfs-accessible.
+- The same logic works in both `source.mode = "ssh"` and `source.mode = "local"` through `SourceRunner`.
+- Updated README, commented code map, and the example config comments for lazy cache-root subvolume creation.
 
 ### 0.1.13
 

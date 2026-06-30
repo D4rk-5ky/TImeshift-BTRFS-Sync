@@ -1,6 +1,6 @@
 # Commented code map
 
-Compact map of the **current** codebase for v0.1.13. It documents active
+Compact map of the **current** codebase for v0.1.15. It documents active
 commands, classes, functions, and the shell commands they build/run. Historical
 changes belong in `VERSIONING.md`.
 
@@ -20,13 +20,15 @@ routed through `source.py`:
   command settings.
 
 Most commands run through the logging wrapper, which creates split log files and
-sends optional notifications. `sync.py` verifies required source/destination
-roots with `preflight.py`, reads source Timeshift snapshots, optionally creates a
-manual snapshot, keeps already pending app-created manual snapshots in
-oldest-to-newest order after interrupted runs, re-reads the source list,
-refreshes mutable state metadata, proves the source and destination share a
-valid Btrfs parent, runs `<source btrfs send> | optional mbuffer | <local btrfs
-receive>`, writes `state.json`, and optionally runs retention pruning.
+sends optional notifications. `sync.py` runs preflight with `preflight.py` before Timeshift on-demand creation
+or send/receive work. In real-run mode, preflight creates missing configured
+roots when allowed, then verifies Btrfs accessibility. Sync then reads source
+Timeshift snapshots, optionally creates a manual snapshot, keeps already pending
+app-created manual snapshots in oldest-to-newest order after interrupted runs,
+re-reads the source list, refreshes mutable state metadata, proves the source
+and destination share a valid Btrfs parent, creates per-snapshot read-only cache
+subvolumes as needed, runs `<source btrfs send> | optional mbuffer | <local
+btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 
 ## Active CLI commands
 
@@ -51,7 +53,7 @@ receive>`, writes `state.json`, and optionally runs retention pruning.
 | `config.py` | TOML dataclasses and validation, including `source.mode`. |
 | `source.py` | Source command transport abstraction for SSH or local source mode. |
 | `sync.py` | Main send/receive transaction and Btrfs safety decisions. |
-| `preflight.py` | Required path availability checks before on-demand creation or send/receive work. |
+| `preflight.py` | Required path availability/create-or-hard-error checks before on-demand creation or send/receive work. |
 | `btrfs.py` | Btrfs command builders, metadata parser, source send-cache helpers. |
 | `destroy.py` | Destructive retirement cleanup for configured source send-cache root and destination target root. |
 | `remote_index.py` | Per-run Btrfs subvolume indexes for source and destination path/UUID lookups. |
@@ -161,18 +163,30 @@ receive>`, writes `state.json`, and optionally runs retention pruning.
 - `PathPreflightError`: raised before on-demand creation or send/receive when a
   required configured root is unavailable.
 - `PathCheck`: one path availability result for terminal reporting.
+- `_shell_words()`: shell-quotes configured command-prefix words such as
+  `sudo -n` for embedded POSIX shell scripts.
 - `_btrfs_path_check_script()`: builds a small POSIX shell script that checks
-  paths with `btrfs subvolume list -o` instead of generic sudo filesystem
-  commands.
-- `_parse_path_check_output()`: parses structured path-check sentinel lines.
-- `_source_path_checks()`: checks `source.snapshot_root` and configured
-  `source.cache_root` in one source command. SSH mode wraps this in SSH; local
-  mode runs it locally.
-- `_local_target_path_check()`: checks `destination.target_root` locally without
-  creating anything.
+  required paths with `btrfs subvolume list -o` instead of generic sudo
+  filesystem commands.
+- `_parse_path_check_output()`: parses structured path-check sentinel lines,
+  including OK/FAIL details from creation attempts.
+- `_source_snapshot_root_script()`: verifies `source.snapshot_root`; in real-run
+  mode, if it is missing, it verifies the parent with Btrfs and creates the exact
+  configured path as a normal directory with `mkdir <snapshot_root>`.
+- `_cache_root_check_script()`: verifies `source.cache_root` is already a Btrfs
+  subvolume; in real-run mode, if it is missing and `create_readonly_cache =
+  true`, it verifies the parent and creates the exact configured path with
+  `btrfs subvolume create <cache_root>`. It refuses ordinary directories at
+  `cache_root`.
+- `_source_path_checks()`: runs the source snapshot-root and cache-root scripts
+  through SSH or local source mode and turns their sentinel output into
+  `PathCheck` objects.
+- `_local_target_path_check()`: verifies `destination.target_root`; in real-run
+  mode, if it is missing and `destination.create_target_root = true`, it creates
+  the local directory and then verifies Btrfs accessibility.
 - `check_required_sync_paths()`: prints the sync path preflight and refuses to
-  continue before manual snapshot creation or send/receive when a required root
-  is missing or inaccessible.
+  continue before manual snapshot creation or send/receive when a configured
+  path cannot be verified or created.
 
 ### `commands.py`
 
@@ -280,8 +294,15 @@ receive>`, writes `state.json`, and optionally runs retention pruning.
   `remote_cache_existing_child_paths()`, `remote_cache_contains()`, and
   `remote_cache_is_empty()`: SSH compatibility wrappers around the source helpers.
 - `cache_child_display_path()`: formats cache child paths for logs.
-- `source_ensure_cache_parent()`: creates the timestamp cache parent if missing
-  and updates the source cache index when one is supplied.
+- `_source_refresh_cache_path()`: refreshes one source cache path in the optional
+  per-run Btrfs index after cache-root/parent/snapshot creation.
+- `source_ensure_cache_root()`: lazily creates the configured `source.cache_root`
+  as a Btrfs subvolume when cache is actually needed. It creates only the exact
+  configured root, requires the parent to already exist, and refuses an existing
+  ordinary directory at that path.
+- `source_ensure_cache_parent()`: first ensures the top-level cache root exists
+  as a Btrfs subvolume, then creates the timestamp cache parent if missing and
+  updates the source cache index when one is supplied.
 - `source_ensure_readonly_send_path()`: returns the original Timeshift path when
   it is already read-only, otherwise creates/reuses an app-owned read-only cache
   snapshot for the current send.

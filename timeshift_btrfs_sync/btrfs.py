@@ -350,6 +350,81 @@ def cache_child_display_path(cache_parent: str, listed_path: str) -> str:
     return listed_text
 
 
+def _source_refresh_cache_path(
+    cache_index: "BtrfsIndex | None",
+    source: SourceRunner,
+    path: str,
+    *,
+    sudo: str,
+    btrfs_command: str,
+) -> SubvolumeMeta | None:
+    """Refresh one source cache path in the optional per-run Btrfs index."""
+
+    from .remote_index import refresh_source_path
+
+    return refresh_source_path(cache_index, source, path, sudo=sudo, btrfs_command=btrfs_command)
+
+
+def source_ensure_cache_root(
+    source: SourceRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str,
+    cache_index: "BtrfsIndex | None" = None,
+) -> None:
+    """Ensure the configured source cache root exists as a Btrfs subvolume.
+
+    The cache root is created lazily only when a writable Timeshift snapshot
+    needs a read-only send copy. The parent directory of ``cache_root`` must
+    already exist and be inside the intended Btrfs filesystem; this function
+    creates exactly the configured cache root subvolume, not arbitrary parent
+    directories.
+    """
+
+    if cache_index is not None and cache_index.contains(cache_root):
+        return
+
+    existing = source_get_subvolume_meta(
+        source,
+        cache_root,
+        Path(cache_root).name,
+        sudo,
+        btrfs_command,
+        required=False,
+    )
+    if existing:
+        if cache_index is not None:
+            cache_index.add(existing)
+        return
+
+    result = source.run(
+        remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "create", cache_root]),
+        check=False,
+    )
+    if result.returncode == 0:
+        _source_refresh_cache_path(cache_index, source, cache_root, sudo=sudo, btrfs_command=btrfs_command)
+        return
+
+    if "target path already exists" in result.stderr.lower():
+        if _source_refresh_cache_path(cache_index, source, cache_root, sudo=sudo, btrfs_command=btrfs_command):
+            return
+        raise RuntimeError(
+            "Source cache root path already exists but is not detected as a Btrfs subvolume:\n"
+            f"  {cache_root}\n"
+            "The send-cache root must be a Btrfs subvolume. Move or remove the ordinary path, "
+            "or choose another source.cache_root."
+        )
+
+    detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+    raise RuntimeError(
+        "Failed to create source cache root as a Btrfs subvolume:\n"
+        f"  {cache_root}\n"
+        "The parent directory must already exist on the source and be on the intended Btrfs filesystem.\n"
+        + detail
+    )
+
+
 def source_ensure_cache_parent(
     source: SourceRunner,
     *,
@@ -359,7 +434,15 @@ def source_ensure_cache_parent(
     cache_parent: str,
     cache_index: "BtrfsIndex | None" = None,
 ) -> None:
-    """Ensure the per-snapshot source cache parent exists as a Btrfs subvolume."""
+    """Ensure the cache root and per-snapshot source cache parent are Btrfs subvolumes."""
+
+    source_ensure_cache_root(
+        source,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        cache_root=cache_root,
+        cache_index=cache_index,
+    )
 
     if cache_index is not None and cache_index.contains(cache_parent):
         return
@@ -371,18 +454,12 @@ def source_ensure_cache_parent(
         check=False,
     )
     if result.returncode == 0:
-        if cache_index is not None:
-            from .remote_index import refresh_source_path
-
-            refresh_source_path(cache_index, source, cache_parent, sudo=sudo, btrfs_command=btrfs_command)
+        _source_refresh_cache_path(cache_index, source, cache_parent, sudo=sudo, btrfs_command=btrfs_command)
         return
 
     if "target path already exists" in result.stderr.lower():
-        if cache_index is not None:
-            from .remote_index import refresh_source_path
-
-            if refresh_source_path(cache_index, source, cache_parent, sudo=sudo, btrfs_command=btrfs_command):
-                return
+        if _source_refresh_cache_path(cache_index, source, cache_parent, sudo=sudo, btrfs_command=btrfs_command):
+            return
         elif source_cache_contains(source, sudo, btrfs_command, cache_root, cache_parent):
             return
         raise RuntimeError(
@@ -391,7 +468,8 @@ def source_ensure_cache_parent(
             "This may be a stale ordinary directory in the cache root. Inspect it manually."
         )
 
-    raise RuntimeError("Failed to create source cache parent subvolume.\n" + result.stderr.strip())
+    detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+    raise RuntimeError("Failed to create source cache parent subvolume.\n" + detail)
 
 
 def source_ensure_readonly_send_path(

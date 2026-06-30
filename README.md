@@ -1,4 +1,22 @@
-# timeshift-btrfs-sync v0.1.13
+# timeshift-btrfs-sync v0.1.15
+
+## v0.1.15 preflight create-or-hard-error path handling
+
+Real-run preflight now attempts to create missing configured sync roots before any Timeshift on-demand snapshot is created or any send/receive work starts. If creation fails, the run stops with a hard error naming the exact configured path that could not be created.
+
+The creation rules are intentionally path-type specific:
+
+- `source.snapshot_root` is created as a normal source-side directory only when its parent already exists and is Btrfs-accessible.
+- `source.cache_root` is created as a source-side Btrfs subvolume when `create_readonly_cache = true`; an existing ordinary directory is refused.
+- `destination.target_root` is created locally when `destination.create_target_root = true`, then verified as Btrfs-accessible before sync continues.
+
+Dry-run mode still does not create anything; it reports what real preflight would attempt.
+
+## v0.1.14 lazy source cache-root subvolume creation
+
+When a Timeshift snapshot child is writable and `create_readonly_cache = true`, the app now creates the configured `source.cache_root` lazily as a Btrfs subvolume if it is missing. This uses the same source command transport as the rest of the app: SSH mode runs the Btrfs command through SSH, and local mode runs it locally.
+
+The app creates only the configured `cache_root` subvolume and the per-snapshot cache subvolumes below it. It does not create arbitrary parent directories. The parent directory of `source.cache_root` must already exist and be Btrfs-accessible, and an existing `cache_root` path must already be a Btrfs subvolume.
 
 ## v0.1.13 packaging cleanup
 
@@ -91,7 +109,7 @@ Normal sync flow:
 
 ```text
 1. Prepare destination.target_root when real sync is allowed to create it.
-2. Run sync path preflight for source.snapshot_root, configured source.cache_root, and destination.target_root.
+2. Run sync path preflight for source.snapshot_root, source.cache_root, and destination.target_root. In real-run mode, missing configured roots are created here before Timeshift on-demand creation or send/receive work.
 3. Run `sudo -n timeshift --list` on the source endpoint: over SSH in `source.mode = "ssh"`, locally in `source.mode = "local"`.
 4. Parse Timeshift snapshot names and tags.
 5. Build expected paths from source.snapshot_root and source.subvolumes.
@@ -112,13 +130,13 @@ Before automatic on-demand snapshot creation and before any send/receive work, `
 
 ```text
 source.snapshot_root
-source.cache_root, when configured
+source.cache_root, when configured; missing cache roots are created as Btrfs subvolumes in real-run mode when create_readonly_cache = true
 destination.target_root
 ```
 
-The source-side checks are batched into one source command and use the configured `sudo btrfs subvolume list -o <path>` command. In SSH mode that source command is wrapped in SSH; in local mode it runs locally. This keeps the existing narrow sudo model; the app does not need passwordless generic `test`, `mkdir`, `cat`, or `rm` access on the source. The destination check is local and runs after destination preparation in a real sync, so `destination.create_target_root = true` can still create the target before the preflight.
+The source-side checks are batched into source commands and use the configured source Btrfs command. In SSH mode those source commands are wrapped in SSH; in local mode they run locally. In real-run mode, preflight attempts to create missing configured roots before Timeshift on-demand creation or send/receive work. `source.snapshot_root` is created as a normal directory only after its parent is proven Btrfs-accessible. `source.cache_root` is created as a Btrfs subvolume when `create_readonly_cache = true`; an existing ordinary directory is refused. `destination.target_root` is created locally when `destination.create_target_root = true` and then checked with Btrfs before sync continues. Dry-run mode describes these creation attempts without performing them.
 
-If any required path is missing, not mounted, or not accessible through the configured Btrfs command, the app fails before creating a fresh Timeshift on-demand snapshot and before trying to send data. This is intended to prevent avoidable leftover on-demand snapshots after a restored VM, changed mount point, or missing send-cache directory.
+If a required path is not mounted, the cache root exists as an ordinary directory instead of a Btrfs subvolume, or the cache-root parent is not accessible, the app fails before creating a fresh Timeshift on-demand snapshot and before trying to send data. This is intended to prevent avoidable leftover on-demand snapshots after a restored VM, changed mount point, wrong send-cache path, or broken destination.
 
 `create-manual` also runs the same preflight before asking Timeshift to create a standalone on-demand snapshot.
 
@@ -146,9 +164,10 @@ This protects the backup from mixing snapshots from another OS, another source h
 
 If an original Timeshift snapshot child is already read-only, the app now sends directly from that original Timeshift path instead of creating a duplicate source-cache snapshot. The state records this with `send_path_kind = "timeshift-original-readonly"`, and prune treats that path as protected Timeshift-owned data. The app may read and send from `source.snapshot_root`, but it must not delete, rename, move, or change original Timeshift snapshots; cleanup of `source.snapshot_root` remains Timeshift's job only.
 
-Only the top-level `cache_root` should be created manually. Per-snapshot cache parents and read-only send snapshots are created with Btrfs commands:
+The top-level `cache_root` no longer has to be created manually. If `cache_root` is missing, real preflight creates it as a Btrfs subvolume before snapshot discovery/send work. The parent directory of `cache_root` must already exist and be Btrfs-accessible. Per-snapshot cache parents and read-only send snapshots are also created with Btrfs commands:
 
 ```bash
+sudo -n btrfs subvolume create <cache_root>
 sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
 sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
 ```
@@ -600,7 +619,7 @@ Leave `control_master = false` for maximum isolation, on shared machines, or any
 | `subvolumes` | Subvolume names expected inside each Timeshift snapshot, usually `@` and `@home`. | Controls what gets sent for each Timeshift snapshot. |
 | `verify_subvolumes_at_discovery` | Verifies every listed snapshot/subvolume during discovery. | Slower but useful when validating a new layout. Keep false for fast normal dry-runs. |
 | `verify_incremental_parent_once_per_run` | Verifies only the first parent per subvolume name during a run, then trusts the chain created by that run. | Reduces repeated metadata checks while keeping the initial safety check. |
-| `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. |
+| `cache_root` | Source-side root for read-only send-cache snapshots. | Needed when Timeshift snapshots are writable and cannot be sent directly. If missing, real preflight creates it as a Btrfs subvolume when `create_readonly_cache = true`; its parent must already exist and be Btrfs-accessible. |
 | `create_readonly_cache` | Creates read-only cache snapshots for writable source snapshots. | Required for writable Timeshift snapshots because `btrfs send` needs read-only sources. |
 | `cleanup_superseded_cache` | Backward-compatible name for source send-cache cleanup during prune. | `sync` keeps all created cache snapshots; `prune` deletes cache snapshots only when the same destination snapshot is deleted by retention. |
 | `send_compressed_data` | Adds `btrfs send --compressed-data`. | Attempts to preserve already-compressed source extents when supported. It does not configure destination compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want destination compression. |

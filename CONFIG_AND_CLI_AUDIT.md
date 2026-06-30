@@ -1,6 +1,6 @@
-# Config and CLI audit for v0.6.4
+# Config and CLI audit for v0.1.15
 
-This file records the audit requested after v0.2.3.
+This file records the current config/CLI audit for v0.1.15.
 
 ## Audit result
 
@@ -21,6 +21,10 @@ This file records the audit requested after v0.2.3.
 
 - `--path PATH`
 - `--force`
+
+### `test-source`
+
+- `--config CONFIG`, `-c CONFIG`
 
 ### `test-ssh`
 
@@ -59,6 +63,16 @@ This file records the audit requested after v0.2.3.
 - `--config CONFIG`, `-c CONFIG`
 - `--json`
 
+### `destroy-leftovers`
+
+- `--config CONFIG`, `-c CONFIG`
+- `--delete-source`
+- `--delete-destination`
+- `--delete-both`
+- `--dry-run`
+- `--run`
+- `--i-understand-this-destroys-data`
+
 ## Config options checked
 
 ### Top-level
@@ -86,6 +100,27 @@ This file records the audit requested after v0.2.3.
 - `notify_on_success`
 - `notify_on_failure`
 
+
+### `[mail]`
+
+- `enabled`
+- `smtp_host`
+- `smtp_port`
+- `smtp_ssl`
+- `starttls`
+- `username`
+- `password`
+- `password_file`
+- `from_addr`
+- `to_addrs`
+- `subject_prefix`
+- `timeout`
+- `notify_on_success`
+- `notify_on_failure`
+- `include_json`
+- `attach_logs`
+- `max_attachment_bytes`
+
 ### `[manual_snapshot]`
 
 - `enabled`
@@ -104,10 +139,14 @@ This file records the audit requested after v0.2.3.
 - `password_file`
 - `compression`
 - `cipher`
+- `control_master`
+- `control_persist`
+- `control_path`
 - `extra_args`
 
 ### `[source]`
 
+- `mode`
 - `sudo`
 - `btrfs_command`
 - `timeshift_command`
@@ -156,12 +195,14 @@ This file records the audit requested after v0.2.3.
 ```bash
 python3 -m timeshift_btrfs_sync --help
 python3 -m timeshift_btrfs_sync init-config --help
+python3 -m timeshift_btrfs_sync test-source --help
 python3 -m timeshift_btrfs_sync test-ssh --help
 python3 -m timeshift_btrfs_sync list-source --help
 python3 -m timeshift_btrfs_sync sync --help
 python3 -m timeshift_btrfs_sync prune --help
 python3 -m timeshift_btrfs_sync create-manual --help
 python3 -m timeshift_btrfs_sync show-state --help
+python3 -m timeshift_btrfs_sync destroy-leftovers --help
 ```
 
 
@@ -342,3 +383,9 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - `source.allow_incremental_without_parent_match` was removed in 0.5.4. Incremental parent mismatches are now hard errors.
 - `source.verify_incremental_parent` was removed in 0.5.5. Incremental parent verification is mandatory and no longer configurable.
 - Full send is allowed only when the destination has no snapshots. If destination snapshots exist and no matching parent can be proven, sync errors instead of starting a separate full-send chain in the same target.
+
+## 0.1.15 audit addition
+
+- Confirmed `source.mode`, SSH/local source support, and the preflight create-or-hard-error behavior are documented.
+- Confirmed the canonical config template remains `timeshift_btrfs_sync/data/config.example.toml`.
+- Confirmed the requested `.gitignore` is included in the release archive.

@@ -455,7 +455,7 @@ def build_parser() -> argparse.ArgumentParser:
         "create source Timeshift tag O snapshot",
         (
             "Ask source Timeshift to create an on-demand/manual snapshot with tag O.\n"
-            "Before creating it, verify source.snapshot_root, configured source.cache_root, "
+            "Before creating it, verify source.snapshot_root, source.cache_root policy, "
             "and destination.target_root. If the destination already contains snapshots, the "
             "source must also match state.json by UUID first. If the destination is empty, "
             "first full seed creation is allowed."

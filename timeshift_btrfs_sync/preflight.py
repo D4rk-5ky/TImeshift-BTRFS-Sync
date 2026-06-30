@@ -2,9 +2,22 @@
 
 The sync command must not create a fresh Timeshift on-demand snapshot, create
 source cache snapshots, or start a send/receive pipeline until the configured
-source and destination roots are reachable. These checks intentionally use the
-configured Btrfs commands instead of generic sudo mkdir/test/rm permissions, so
-they preserve the app's narrow sudo model.
+source and destination roots are reachable.
+
+Real-run preflight is also the path-creation gate. If a configured path is
+missing, preflight attempts to create exactly that configured path using the
+safest command that matches the path type, then verifies Btrfs accessibility
+before sync continues:
+
+* source.snapshot_root is created as a normal directory below an existing
+  Btrfs-accessible parent.
+* source.cache_root is created as a Btrfs subvolume below an existing
+  Btrfs-accessible parent.
+* destination.target_root is created as a local directory when
+  destination.create_target_root is true.
+
+If any creation attempt fails, preflight raises a hard error that names the
+exact configured path that could not be created.
 """
 
 from __future__ import annotations
@@ -33,6 +46,12 @@ class PathCheck:
     detail: str = ""
 
 
+def _shell_words(parts: list[str]) -> str:
+    """Return a shell-safe string for configured command-prefix words."""
+
+    return " ".join(shlex.quote(part) for part in parts)
+
+
 def _btrfs_path_check_script(checks: list[tuple[str, str]], *, sudo: str, btrfs_command: str) -> str:
     """Build a POSIX shell script that checks several paths in one process.
 
@@ -42,7 +61,7 @@ def _btrfs_path_check_script(checks: list[tuple[str, str]], *, sudo: str, btrfs_
     it suitable for Timeshift's snapshot_root, which may be a normal directory.
     """
 
-    sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
+    sudo_words = _shell_words(sudo_prefix(sudo))
     lines = [
         f"sudo_words={shlex.quote(sudo_words)}",
         f"btrfs_cmd={shlex.quote(btrfs_command)}",
@@ -82,8 +101,11 @@ def _parse_path_check_output(output: str, *, location: str) -> list[PathCheck]:
     results: list[PathCheck] = []
     for line in output.splitlines():
         if line.startswith("TSBTRFS_PATH_OK\t"):
-            _marker, label, path = line.split("\t", 2)
-            results.append(PathCheck(label=label, path=path, location=location, ok=True))
+            parts = line.split("\t", 3)
+            if len(parts) >= 3:
+                _marker, label, path = parts[:3]
+                detail = parts[3].strip() if len(parts) > 3 else ""
+                results.append(PathCheck(label=label, path=path, location=location, ok=True, detail=detail))
             continue
         if line.startswith("TSBTRFS_PATH_FAIL\t"):
             parts = line.split("\t", 4)
@@ -101,47 +123,248 @@ def _parse_path_check_output(output: str, *, location: str) -> list[PathCheck]:
     return results
 
 
-def _source_path_checks(config: AppConfig, source: SourceRunner) -> list[PathCheck]:
-    """Check source.snapshot_root and source.cache_root in one source command."""
+def _source_snapshot_root_script(
+    snapshot_root: str,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    dry_run: bool,
+) -> str:
+    """Build a source script that validates or creates source.snapshot_root."""
 
-    checks: list[tuple[str, str]] = [("source.snapshot_root", config.source.snapshot_root)]
+    sudo_words = _shell_words(sudo_prefix(sudo))
+    may_create = "0" if dry_run else "1"
+    return f"""
+sudo_words={shlex.quote(sudo_words)}
+btrfs_cmd={shlex.quote(btrfs_command)}
+snapshot_root={shlex.quote(snapshot_root)}
+may_create={may_create}
+
+run_sudo_prefix() {{
+    if [ -n "$sudo_words" ]; then
+        # shellcheck disable=SC2086
+        $sudo_words "$@"
+    else
+        "$@"
+    fi
+}}
+
+run_btrfs() {{
+    run_sudo_prefix "$btrfs_cmd" "$@"
+}}
+
+compact_error() {{
+    tr '\n' ' ' < "$1" | sed 's/[[:space:]][[:space:]]*/ /g'
+}}
+
+parent_of() {{
+    value=$1
+    parent=${{value%/*}}
+    [ -n "$parent" ] || parent=/
+    [ "$parent" = "$value" ] && parent=/
+    printf '%s\n' "$parent"
+}}
+
+err_file=$(mktemp) || exit 2
+if run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
+    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'exists and is Btrfs-accessible'
+else
+    check_status=$?
+    if [ -e "$snapshot_root" ]; then
+        detail=$(compact_error "$err_file")
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$check_status" "path exists but is not Btrfs-accessible: $detail"
+    else
+    parent=$(parent_of "$snapshot_root")
+    if [ "$may_create" != "1" ]; then
+        printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "missing now; real preflight would create this directory after verifying Btrfs parent $parent"
+    elif ! run_btrfs subvolume list -o "$parent" >/dev/null 2>"$err_file"; then
+        status=$?
+        detail=$(compact_error "$err_file")
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "could not create source.snapshot_root because parent is not Btrfs-accessible: $parent: $detail"
+    elif run_sudo_prefix mkdir "$snapshot_root" >/dev/null 2>"$err_file"; then
+        if run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
+            printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'created directory and verified Btrfs accessibility'
+        else
+            status=$?
+            detail=$(compact_error "$err_file")
+            printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "created directory but Btrfs verification failed: $detail"
+        fi
+    else
+        status=$?
+        detail=$(compact_error "$err_file")
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "could not create directory: $detail"
+    fi
+    fi
+fi
+rm -f "$err_file"
+""".strip()
+
+
+def _cache_root_check_script(
+    cache_root: str,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    create_readonly_cache: bool,
+    dry_run: bool,
+) -> str:
+    """Build a source script that validates or creates source.cache_root."""
+
+    sudo_words = _shell_words(sudo_prefix(sudo))
+    can_create = "1" if create_readonly_cache else "0"
+    may_create = "0" if dry_run else "1"
+    return f"""
+sudo_words={shlex.quote(sudo_words)}
+btrfs_cmd={shlex.quote(btrfs_command)}
+cache_root={shlex.quote(cache_root)}
+can_create={can_create}
+may_create={may_create}
+
+run_btrfs() {{
+    if [ -n "$sudo_words" ]; then
+        # shellcheck disable=SC2086
+        $sudo_words "$btrfs_cmd" "$@"
+    else
+        "$btrfs_cmd" "$@"
+    fi
+}}
+
+compact_error() {{
+    tr '\n' ' ' < "$1" | sed 's/[[:space:]][[:space:]]*/ /g'
+}}
+
+parent_of() {{
+    value=$1
+    parent=${{value%/*}}
+    [ -n "$parent" ] || parent=/
+    [ "$parent" = "$value" ] && parent=/
+    printf '%s\n' "$parent"
+}}
+
+err_file=$(mktemp) || exit 2
+if run_btrfs subvolume show "$cache_root" >/dev/null 2>"$err_file"; then
+    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" 'exists as Btrfs subvolume'
+elif [ -e "$cache_root" ]; then
+    detail=$(compact_error "$err_file")
+    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" 1 "path exists but is not a Btrfs subvolume: $detail"
+elif [ "$can_create" != "1" ]; then
+    detail=$(compact_error "$err_file")
+    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" 1 "missing and source.create_readonly_cache is false: $detail"
+else
+    parent=$(parent_of "$cache_root")
+    if [ "$may_create" != "1" ]; then
+        printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" "missing now; real preflight would create this Btrfs subvolume after verifying Btrfs parent $parent"
+    elif ! run_btrfs subvolume list -o "$parent" >/dev/null 2>"$err_file"; then
+        status=$?
+        detail=$(compact_error "$err_file")
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" "$status" "could not create source.cache_root because parent is not Btrfs-accessible: $parent: $detail"
+    elif run_btrfs subvolume create "$cache_root" >/dev/null 2>"$err_file"; then
+        if run_btrfs subvolume show "$cache_root" >/dev/null 2>"$err_file"; then
+            printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" 'created Btrfs subvolume and verified it'
+        else
+            status=$?
+            detail=$(compact_error "$err_file")
+            printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" "$status" "created Btrfs subvolume but verification failed: $detail"
+        fi
+    else
+        status=$?
+        detail=$(compact_error "$err_file")
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.cache_root' "$cache_root" "$status" "could not create Btrfs subvolume: $detail"
+    fi
+fi
+rm -f "$err_file"
+""".strip()
+
+
+def _source_path_checks(config: AppConfig, source: SourceRunner, *, dry_run: bool) -> list[PathCheck]:
+    """Check/create source.snapshot_root and source.cache_root policy."""
+
+    parsed: list[PathCheck] = []
+    snapshot_script = _source_snapshot_root_script(
+        config.source.snapshot_root,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        dry_run=dry_run,
+    )
+    snapshot_result = source.run("sh -c " + shlex.quote(snapshot_script), check=False, log_stderr=False, mirror_stderr=False)
+    snapshot_parsed = _parse_path_check_output(snapshot_result.stdout, location=source.location)
+    if snapshot_result.returncode != 0 or not any(item.label == "source.snapshot_root" for item in snapshot_parsed):
+        detail = (snapshot_result.stderr.strip() or snapshot_result.stdout.strip() or f"return code {snapshot_result.returncode}").strip()
+        snapshot_parsed.append(
+            PathCheck(
+                label="source.snapshot_root",
+                path=config.source.snapshot_root,
+                location=source.location,
+                ok=False,
+                detail=detail,
+            )
+        )
+    parsed.extend(snapshot_parsed)
+
     if config.source.cache_root:
-        checks.append(("source.cache_root", config.source.cache_root))
-
-    script = _btrfs_path_check_script(checks, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command)
-    result = source.run("sh -c " + shlex.quote(script), check=False, log_stderr=False, mirror_stderr=False)
-    parsed = _parse_path_check_output(result.stdout, location=source.location)
-    seen = {item.label for item in parsed}
-
-    # If SSH or the script failed before printing structured lines, fail every
-    # missing result explicitly. This avoids silently continuing before a manual
-    # snapshot just because the preflight command itself broke.
-    if result.returncode != 0 or len(seen) != len(checks):
-        detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
-        for label, path in checks:
-            if label not in seen:
-                parsed.append(PathCheck(label=label, path=path, location=source.location, ok=False, detail=detail))
+        cache_script = _cache_root_check_script(
+            config.source.cache_root,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            create_readonly_cache=config.source.create_readonly_cache,
+            dry_run=dry_run,
+        )
+        cache_result = source.run("sh -c " + shlex.quote(cache_script), check=False, log_stderr=False, mirror_stderr=False)
+        cache_parsed = _parse_path_check_output(cache_result.stdout, location=source.location)
+        if cache_result.returncode != 0 or not any(item.label == "source.cache_root" for item in cache_parsed):
+            detail = (cache_result.stderr.strip() or cache_result.stdout.strip() or f"return code {cache_result.returncode}").strip()
+            cache_parsed.append(
+                PathCheck(
+                    label="source.cache_root",
+                    path=config.source.cache_root,
+                    location=source.location,
+                    ok=False,
+                    detail=detail,
+                )
+            )
+        parsed.extend(cache_parsed)
     return parsed
 
 
 def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCheck]:
-    """Check destination.target_root locally without creating anything."""
+    """Check/create destination.target_root locally."""
 
     path = config.destination.target_root
 
-    if dry_run and config.destination.create_target_root and not path.exists():
-        return [
-            PathCheck(
-                label="destination.target_root",
-                path=str(path),
-                location="local",
-                ok=True,
-                detail="missing now; real sync would create it before this preflight",
-            )
-        ]
-
     if not path.exists():
-        return [PathCheck(label="destination.target_root", path=str(path), location="local", ok=False, detail="path does not exist")]
+        if not config.destination.create_target_root:
+            return [
+                PathCheck(
+                    label="destination.target_root",
+                    path=str(path),
+                    location="local",
+                    ok=False,
+                    detail="path does not exist and destination.create_target_root is false",
+                )
+            ]
+        if dry_run:
+            return [
+                PathCheck(
+                    label="destination.target_root",
+                    path=str(path),
+                    location="local",
+                    ok=True,
+                    detail="missing now; real preflight would create this directory before verifying Btrfs accessibility",
+                )
+            ]
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return [
+                PathCheck(
+                    label="destination.target_root",
+                    path=str(path),
+                    location="local",
+                    ok=False,
+                    detail=f"could not create directory: {exc}",
+                )
+            ]
+
     if not path.is_dir():
         return [PathCheck(label="destination.target_root", path=str(path), location="local", ok=False, detail="path exists but is not a directory")]
 
@@ -161,11 +384,14 @@ def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCh
     if result.returncode != 0 or not parsed:
         detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
         return [PathCheck(label="destination.target_root", path=str(path), location="local", ok=False, detail=detail)]
+    for item in parsed:
+        if item.ok and not item.detail and not dry_run:
+            item.detail = "exists/created and is Btrfs-accessible"
     return parsed
 
 
 def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_run: bool) -> list[PathCheck]:
-    """Verify required configured roots before manual snapshot creation or send.
+    """Verify/create required configured roots before manual snapshot creation or send.
 
     The check runs before automatic/manual on-demand creation and before
     send/receive work. It requires:
@@ -174,12 +400,12 @@ def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_ru
     * source.cache_root on the source endpoint when configured
     * destination.target_root locally
 
-    Failing early avoids creating a new on-demand Timeshift snapshot when the app
-    could not have used the configured cache or destination paths anyway.
-    Source checks run through SSH in ssh mode and as local commands in local mode.
+    In real-run mode, missing configured roots are created before preflight
+    succeeds. In dry-run mode, creation is only described. Source checks run
+    through SSH in ssh mode and as local commands in local mode.
     """
 
-    results = _source_path_checks(config, source)
+    results = _source_path_checks(config, source, dry_run=dry_run)
     results.extend(_local_target_path_check(config, dry_run=dry_run))
 
     print("SYNC PATH PREFLIGHT")
@@ -190,7 +416,7 @@ def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_ru
         print(f"    path:     {item.path}")
         if item.detail:
             print(f"    detail:   {item.detail}")
-    print("  purpose: verify snapshot_root, cache_root, and target_root before on-demand creation or send")
+    print("  purpose: verify/create snapshot_root, cache_root, and target_root before on-demand creation or send")
     print("----")
 
     failures = [item for item in results if not item.ok]
@@ -198,6 +424,7 @@ def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_ru
         details = "\n".join(f"- {item.label}: {item.path}: {item.detail or 'not available'}" for item in failures)
         raise PathPreflightError(
             "Required sync path preflight failed before creating an on-demand snapshot or starting send/receive.\n"
+            "The path below could not be verified or created. Fix the exact configured path before retrying.\n"
             + details
         )
     return results
