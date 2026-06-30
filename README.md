@@ -140,7 +140,7 @@ The parent must represent the same Btrfs snapshot on both source and destination
 source parent UUID == destination parent Received UUID
 ```
 
-This protects the backup from mixing snapshots from another OS, another source host, or a reset backup chain. Parent paths from previous runs are always checked before use. The app first tries the saved `send_path` from state.json; if that does not exist or does not match, it tries the original Timeshift source snapshot. It never creates a replacement cache snapshot while choosing an existing parent, because a recreated cache snapshot gets a new UUID and cannot match the destination parent.
+This protects the backup from mixing snapshots from another OS, another source host, or a reset backup chain. Parent paths from previous runs are always checked before use. The app first checks whether the indexed source send-cache already contains a read-only snapshot whose UUID exactly matches the destination parent's `Received UUID`. This lets a local run reuse read-only cache snapshots that were created earlier by an SSH pull. If no indexed cache UUID match exists, the app tries the saved `send_path` from state.json, then any indexed cache path for the UUIDs recorded in state, and finally the original Timeshift source snapshot. It never creates a replacement cache snapshot while choosing an existing parent, because a recreated cache snapshot gets a new UUID and cannot match the destination parent.
 
 ## Source read-only send cache
 

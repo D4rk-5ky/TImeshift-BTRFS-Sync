@@ -626,7 +626,15 @@ def _select_verified_parent_send_path(
     source_cache_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str]:
-    """Select a safe source parent path for incremental send without recreating it."""
+    """Select a safe source parent path for incremental send without recreating it.
+
+    The safest recovery path is an existing source-cache snapshot whose UUID
+    equals the destination parent's Received UUID. This can happen when an
+    earlier SSH pull created read-only cache snapshots on the source and a later
+    local sync wants to reuse those already-created snapshots. The match is
+    accepted only when the indexed source-cache subvolume is read-only and its
+    UUID exactly matches the destination parent identity.
+    """
 
     local_parent = _read_local_destination_parent_metadata(
         config,
@@ -635,13 +643,36 @@ def _select_verified_parent_send_path(
         destination_index=destination_index,
     )
     candidates: list[tuple[str, str]] = []
+
+    def add_candidate(label: str, path: str | None) -> None:
+        if isinstance(path, str) and path and all(existing != path for _, existing in candidates):
+            candidates.append((label, path))
+
+    # If the source-cache index already contains the exact UUID the destination
+    # received from an earlier send, prefer that path. This lets a local run
+    # adopt read-only cache snapshots left behind by an earlier SSH pull without
+    # relying on stale absolute paths in state.json.
+    if source_cache_index is not None and local_parent.received_uuid:
+        indexed_parent = source_cache_index.by_uuid.get(local_parent.received_uuid)
+        if indexed_parent and indexed_parent.path:
+            add_candidate("indexed source-cache UUID match", indexed_parent.path)
+
     saved_send_path = state_parent.get("send_path") if state_parent else None
-    if isinstance(saved_send_path, str) and saved_send_path:
-        candidates.append(("saved state send_path", saved_send_path))
+    add_candidate("saved state send_path", saved_send_path)
+
+    # Newer state also stores the exact UUID that was streamed. If the saved
+    # path is stale but the cache index still contains that UUID at another
+    # path, try it before falling back to the writable Timeshift original.
+    if source_cache_index is not None and state_parent:
+        for key in ("send_source_uuid", "source_uuid", "destination_received_uuid"):
+            value = state_parent.get(key)
+            if isinstance(value, str) and value:
+                indexed_parent = source_cache_index.by_uuid.get(value)
+                if indexed_parent and indexed_parent.path:
+                    add_candidate(f"indexed source-cache state {key}", indexed_parent.path)
 
     original_source_path = parent_subvol.path if parent_subvol else ""
-    if original_source_path and all(path != original_source_path for _, path in candidates):
-        candidates.append(("original Timeshift source path", original_source_path))
+    add_candidate("original Timeshift source path", original_source_path)
 
     failures: list[str] = []
     for label, path in candidates:
@@ -663,9 +694,11 @@ def _select_verified_parent_send_path(
     cache_hint = ""
     if isinstance(saved_send_path, str) and btrfs.path_is_under_cache(saved_send_path, config.source.cache_root):
         cache_hint = (
-            "\n\nThe saved source parent was a read-only cache snapshot. If that cache "
-            "snapshot was deleted, a recreated cache snapshot would get a new Btrfs "
-            "UUID and cannot be used as the parent for this destination snapshot."
+            "\n\nThe saved source parent was a read-only cache snapshot. If that exact "
+            "cache UUID still exists anywhere below source.cache_root, the app can "
+            "use it as an incremental parent. If the cache snapshot was deleted "
+            "and recreated, the recreated cache snapshot gets a new Btrfs UUID and "
+            "cannot be used as the parent for this destination snapshot."
         )
 
     destination_path = _dest_subvolume_path(config, parent_name, subvolume_name)

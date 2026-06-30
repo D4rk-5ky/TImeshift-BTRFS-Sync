@@ -372,7 +372,7 @@ This file describes the current command handlers, shell command families, functi
   destination receive before retry and invalidates the destination index entry.
 - `_read_local_destination_parent_metadata()`: reads metadata for a candidate destination parent.
 - `_match_source_path_to_destination_received_uuid()`: compares source path UUID to destination `received_uuid`; this is the core incremental identity rule.
-- `_select_verified_parent_send_path()`: tries saved `send_path` first, then the original Timeshift path. It never recreates a missing parent cache snapshot.
+- `_select_verified_parent_send_path()`: chooses a safe source parent for incremental send. It first tries an indexed source-cache subvolume whose UUID matches the destination parent's `Received UUID`, then the saved `send_path`, then indexed cache paths for UUIDs stored in state, and finally the original Timeshift path. It never recreates a missing parent cache snapshot because recreated cache snapshots get new UUIDs.
 - `_state_uuid_values_for_path()`: returns trusted UUID values remembered for a state path.
 - `_find_confirmed_sync_floor()`: finds a safe high-watermark after pruning by confirming source/destination UUID history.
 - `_filesystem_parent_candidates()`: finds older candidates present in both source and state.

@@ -1,3 +1,10 @@
+## 0.1.27
+
+- Added source-cache UUID adoption for incremental parent selection.
+- Existing read-only cache snapshots below `source.cache_root` can now be used as parent candidates when their UUID exactly matches the destination parent's `Received UUID`.
+- This supports switching from SSH pull to local sync on the same source when the earlier SSH pull already created valid read-only cache snapshots.
+- Kept the safety rule that missing cache parents are never recreated for parent matching, because recreated Btrfs snapshots get new UUIDs.
+
 ## 0.1.26 - source snapshot-root SSH preflight order and ordinary-directory fallback
 
 - Changed source snapshot-root preflight to run a second Btrfs-only fallback check with `btrfs filesystem df <snapshot_root>` when `btrfs subvolume list -o <snapshot_root>` does not accept an ordinary Timeshift directory. This keeps ordinary Timeshift-owned snapshot roots valid.
