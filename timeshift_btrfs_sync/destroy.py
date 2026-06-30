@@ -14,7 +14,7 @@ from . import payload_stats
 from . import state as state_mod
 from .commands import quote_join, run_local, sudo_prefix
 from .config import AppConfig
-from .ssh import SSHRunner
+from .source import SourceRunner
 
 PROTECTED_PATHS = {
     "/",
@@ -125,10 +125,10 @@ def _run_quiet(cmd: list[str], *, env: dict[str, str] | None = None):
         return subprocess.CompletedProcess(cmd, 127, "", str(exc))
 
 
-def _run_remote_quiet(ssh: SSHRunner, remote_command: str):
-    """Run one SSH command quietly for structured destroy output."""
+def _run_source_quiet(source: SourceRunner, source_command: str):
+    """Run one source command quietly for structured destroy output."""
 
-    return _run_quiet(ssh.command(remote_command), env=ssh.config.environment())
+    return _run_quiet(source.command(source_command), env=source.environment())
 
 
 def _path_exists_status(result) -> tuple[bool | None, str]:
@@ -147,15 +147,15 @@ def _local_exists(path: str, sudo: str) -> tuple[bool | None, str]:
     return _path_exists_status(_run_quiet(sudo_prefix(sudo) + ["test", "-e", path]))
 
 
-def _remote_exists(ssh: SSHRunner, path: str, sudo: str) -> tuple[bool | None, str]:
-    """Return remote path existence status without sudo.
+def _source_exists(source: SourceRunner, path: str, sudo: str) -> tuple[bool | None, str]:
+    """Return source path existence status without sudo.
 
     Source-side sudoers is intentionally narrow and should only need
-    passwordless ``btrfs`` and ``timeshift``. Existence checks use the remote
+    passwordless ``btrfs`` and ``timeshift``. Existence checks use the source
     user's normal shell permissions instead of ``sudo test``.
     """
 
-    result = _run_remote_quiet(ssh, "test -e " + shlex.quote(path))
+    result = _run_source_quiet(source, "test -e " + shlex.quote(path))
     return _path_exists_status(result)
 
 
@@ -166,10 +166,10 @@ def _local_subvolume_meta(path: str, sudo: str, btrfs_command: str):
     return btrfs.parse_subvolume_show(result.stdout, Path(path).name, path) if result.returncode == 0 else None
 
 
-def _remote_subvolume_meta(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str):
-    """Return remote Btrfs subvolume metadata, or None for ordinary/missing paths."""
+def _source_subvolume_meta(source: SourceRunner, path: str, sudo: str, btrfs_command: str):
+    """Return source Btrfs subvolume metadata, or None for ordinary/missing paths."""
 
-    result = _run_remote_quiet(ssh, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]))
+    result = _run_source_quiet(source, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path]))
     return btrfs.parse_subvolume_show(result.stdout, Path(path).name, path) if result.returncode == 0 else None
 
 
@@ -183,10 +183,10 @@ def _local_child_subvolumes(path: str, sudo: str, btrfs_command: str) -> list[st
     return [item for item in converted if item]
 
 
-def _remote_child_subvolumes(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str) -> list[str] | None:
-    """Return absolute remote child subvolume paths below path."""
+def _source_child_subvolumes(source: SourceRunner, path: str, sudo: str, btrfs_command: str) -> list[str] | None:
+    """Return absolute source child subvolume paths below path."""
 
-    result = _run_remote_quiet(ssh, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", path]))
+    result = _run_source_quiet(source, btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", path]))
     if result.returncode != 0:
         return None
     converted = [_listed_path_to_absolute(path, item) for item in btrfs._subvolume_list_paths(result.stdout)]
@@ -279,8 +279,8 @@ def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: boo
 
 
 
-def _remote_delete_subvolumes_batched(ssh: SSHRunner, paths: list[str], sudo: str, btrfs_command: str) -> tuple[int, int, list[str]]:
-    """Delete many remote subvolumes in one SSH session."""
+def _source_delete_subvolumes_batched(source: SourceRunner, paths: list[str], sudo: str, btrfs_command: str) -> tuple[int, int, list[str]]:
+    """Delete many source subvolumes in one source command."""
 
     if not paths:
         return 0, 0, []
@@ -332,7 +332,7 @@ done <<'TSBTRFS_PATHS'
 {path_lines}
 TSBTRFS_PATHS
 """.strip()
-    result = _run_remote_quiet(ssh, "sh -c " + shlex.quote(script))
+    result = _run_source_quiet(source, "sh -c " + shlex.quote(script))
     deleted = 0
     stale_removed = 0
     errors: list[str] = []
@@ -352,24 +352,24 @@ TSBTRFS_PATHS
         elif line.startswith("TSBTRFS_STALE_LEFT\t"):
             _tag, subvol = line.split("\t", 1)
             errors.append(
-                f"ordinary directory remained after remote subvolume delete {subvol}; "
+                f"ordinary directory remained after source subvolume delete {subvol}; "
                 "source user could not remove it without sudo"
             )
         elif line.startswith("TSBTRFS_DELETE_ERROR\t"):
             _tag, subvol, detail = line.split("\t", 2)
-            errors.append(f"failed deleting remote subvolume {subvol}: {detail}")
+            errors.append(f"failed deleting source subvolume {subvol}: {detail}")
     return deleted, stale_removed, errors
 
-def _delete_remote_tree(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
-    """Delete one remote tree after deleting nested Btrfs subvolumes deepest-first."""
+def _delete_source_tree(source: SourceRunner, path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
+    """Delete one source tree after deleting nested Btrfs subvolumes deepest-first."""
 
     result = DestroyResult(label=label, path=path, location="source")
 
     # Source-side sudoers should only need passwordless timeshift/btrfs. Build
     # the existence/listing view from Btrfs metadata instead of using
     # ``sudo test`` or other broad sudo commands.
-    index = remote_index.build_remote_btrfs_index(
-        ssh,
+    index = remote_index.build_source_btrfs_index(
+        source,
         path,
         sudo=sudo,
         btrfs_command=btrfs_command,
@@ -379,7 +379,7 @@ def _delete_remote_tree(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str
         result.exists = False
         return result
     if index.errors:
-        result.errors.extend(f"could not build remote Btrfs index: {error}" for error in index.errors)
+        result.errors.extend(f"could not build source Btrfs index: {error}" for error in index.errors)
         return result
 
     result.exists = True
@@ -388,19 +388,19 @@ def _delete_remote_tree(ssh: SSHRunner, path: str, sudo: str, btrfs_command: str
     if dry_run:
         return result
 
-    deleted, stale_removed, errors = _remote_delete_subvolumes_batched(ssh, result.subvolumes, sudo, btrfs_command)
+    deleted, stale_removed, errors = _source_delete_subvolumes_batched(source, result.subvolumes, sudo, btrfs_command)
     result.deleted_subvolumes = deleted
     result.removed_stale_dirs += stale_removed
     result.errors.extend(errors)
 
-    exists_after, _ = _remote_exists(ssh, path, sudo)
+    exists_after, _ = _source_exists(source, path, sudo)
     if not result.root_is_subvolume and exists_after:
-        rm = _run_remote_quiet(ssh, quote_join(["rm", "-rf", "--", path]))
+        rm = _run_source_quiet(source, quote_join(["rm", "-rf", "--", path]))
         if rm.returncode == 0:
             result.removed_tree = True
         else:
             result.errors.append(
-                f"failed removing remote directory tree {path} without sudo: "
+                f"failed removing source directory tree {path} without sudo: "
                 f"{rm.stderr.strip() or rm.stdout.strip()}"
             )
     return result
@@ -540,7 +540,7 @@ def destroy_leftovers(
             _confirm_or_raise(f"Type {mode_text} to continue: ", mode_text)
             _confirm_or_raise(f"Type the configured job name ({config.name}) to continue: ", config.name)
 
-    ssh = SSHRunner(config.ssh) if delete_source else None
+    source = SourceRunner.from_config(config) if delete_source else None
     payload_state = _load_payload_state(config) if delete_source and delete_destination else None
 
     results: list[DestroyResult] = []
@@ -548,9 +548,9 @@ def destroy_leftovers(
     print("============" if dry_run else "=================")
     for label, path, location in targets:
         if location == "source":
-            assert ssh is not None
-            result = _delete_remote_tree(
-                ssh,
+            assert source is not None
+            result = _delete_source_tree(
+                source,
                 path,
                 config.source.sudo,
                 config.source.btrfs_command,

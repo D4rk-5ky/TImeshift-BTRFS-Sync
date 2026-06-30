@@ -1,6 +1,8 @@
-# timeshift-btrfs-sync v0.1.9 config
+# timeshift-btrfs-sync v0.1.13 config
 # Run this config on the BACKUP/DESTINATION machine.
-# The SOURCE machine still only needs passwordless sudo for btrfs and timeshift.
+# source.mode = "ssh" pulls from another machine over SSH.
+# source.mode = "local" copies from Timeshift snapshots on this same machine and skips SSH.
+# In both modes the source endpoint only needs passwordless sudo for btrfs and timeshift.
 
 # Human-readable job name. This is only for identification.
 name = "kubuntu-timeshift"
@@ -111,6 +113,7 @@ notify_on_failure = true
 
 
 [ssh]
+# Used only when source.mode = "ssh". In source.mode = "local", this section may be omitted.
 # Source machine containing the Timeshift snapshots.
 host = "source-machine.example.lan"
 
@@ -221,6 +224,13 @@ retention_count = 10
 # missing or not mounted, sync fails before creating a fresh on-demand snapshot.
 #
 [source]
+# Source command mode.
+#   "ssh"   = run source commands through the configured [ssh] connection.
+#   "local" = run source commands on this same machine and skip SSH entirely.
+# Local mode keeps the same sync, parent-UUID, read-only cache, manual snapshot,
+# and retention safety rules; only the command transport changes.
+mode = "ssh"
+
 # Source-side command prefix. sudo -n means sudo must not prompt for a password.
 sudo = "sudo -n"
 
@@ -322,11 +332,13 @@ cleanup_incomplete_receive = true
 
 
 [stream]
-# Optional mbuffer between SSH send and local receive.
-# false pipeline:
+# Optional mbuffer between source send and local receive.
+# SSH mode false pipeline:
 #   ssh source 'btrfs send ...' | btrfs receive ...
-# true pipeline:
-#   ssh source 'btrfs send ...' | mbuffer -m 256M | btrfs receive ...
+# Local mode false pipeline:
+#   sh -c 'btrfs send ...' | btrfs receive ...
+# With mbuffer:
+#   <source send> | mbuffer -m 256M | btrfs receive ...
 use_mbuffer = true
 
 # mbuffer command and memory buffer size.

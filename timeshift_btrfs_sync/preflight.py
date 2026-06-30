@@ -15,7 +15,7 @@ import subprocess
 
 from .commands import sudo_prefix
 from .config import AppConfig
-from .ssh import SSHRunner
+from .source import SourceRunner
 
 
 class PathPreflightError(RuntimeError):
@@ -101,16 +101,16 @@ def _parse_path_check_output(output: str, *, location: str) -> list[PathCheck]:
     return results
 
 
-def _remote_source_path_checks(config: AppConfig, ssh: SSHRunner) -> list[PathCheck]:
-    """Check source.snapshot_root and source.cache_root in one SSH call."""
+def _source_path_checks(config: AppConfig, source: SourceRunner) -> list[PathCheck]:
+    """Check source.snapshot_root and source.cache_root in one source command."""
 
     checks: list[tuple[str, str]] = [("source.snapshot_root", config.source.snapshot_root)]
     if config.source.cache_root:
         checks.append(("source.cache_root", config.source.cache_root))
 
     script = _btrfs_path_check_script(checks, sudo=config.source.sudo, btrfs_command=config.source.btrfs_command)
-    result = ssh.run("sh -c " + shlex.quote(script), check=False, log_stderr=False, mirror_stderr=False)
-    parsed = _parse_path_check_output(result.stdout, location="remote")
+    result = source.run("sh -c " + shlex.quote(script), check=False, log_stderr=False, mirror_stderr=False)
+    parsed = _parse_path_check_output(result.stdout, location=source.location)
     seen = {item.label for item in parsed}
 
     # If SSH or the script failed before printing structured lines, fail every
@@ -120,7 +120,7 @@ def _remote_source_path_checks(config: AppConfig, ssh: SSHRunner) -> list[PathCh
         detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
         for label, path in checks:
             if label not in seen:
-                parsed.append(PathCheck(label=label, path=path, location="remote", ok=False, detail=detail))
+                parsed.append(PathCheck(label=label, path=path, location=source.location, ok=False, detail=detail))
     return parsed
 
 
@@ -164,21 +164,22 @@ def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCh
     return parsed
 
 
-def check_required_sync_paths(config: AppConfig, ssh: SSHRunner, *, dry_run: bool) -> list[PathCheck]:
+def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_run: bool) -> list[PathCheck]:
     """Verify required configured roots before manual snapshot creation or send.
 
     The check runs before automatic/manual on-demand creation and before
     send/receive work. It requires:
 
-    * source.snapshot_root on the source host
-    * source.cache_root on the source host when configured
+    * source.snapshot_root on the source endpoint
+    * source.cache_root on the source endpoint when configured
     * destination.target_root locally
 
     Failing early avoids creating a new on-demand Timeshift snapshot when the app
     could not have used the configured cache or destination paths anyway.
+    Source checks run through SSH in ssh mode and as local commands in local mode.
     """
 
-    results = _remote_source_path_checks(config, ssh)
+    results = _source_path_checks(config, source)
     results.extend(_local_target_path_check(config, dry_run=dry_run))
 
     print("SYNC PATH PREFLIGHT")

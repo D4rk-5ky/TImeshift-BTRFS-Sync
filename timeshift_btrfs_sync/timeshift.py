@@ -8,13 +8,14 @@ from . import btrfs
 from .commands import quote_join, remote_double_quote, sudo_prefix
 from .models import SnapshotMeta, SubvolumeMeta
 from .ssh import SSHRunner
+from .source import SourceRunner
 
 SNAPSHOT_RE = re.compile(r"(?P<name>\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})")
 TAG_CHARS = set("HDWMBO")
 
 
 def timeshift_cmd(sudo: str, timeshift_command: str, args: list[str]) -> str:
-    """Build a remote command that invokes sudo+timeshift."""
+    """Build a source-side shell command that invokes sudo+timeshift."""
 
     return quote_join(sudo_prefix(sudo) + [timeshift_command] + args)
 
@@ -62,6 +63,35 @@ def parse_timeshift_list(output: str, snapshot_root: str) -> list[SnapshotMeta]:
     return sorted(snapshots, key=lambda s: s.name)
 
 
+def list_source_snapshots(
+    source: SourceRunner,
+    *,
+    snapshot_root: str,
+    subvolumes: list[str],
+    sudo: str,
+    timeshift_command: str,
+    btrfs_command: str,
+    include_btrfs_info: bool = True,
+) -> list[SnapshotMeta]:
+    """Discover source snapshots through SSH or local source commands."""
+
+    result = source.run(timeshift_cmd(sudo, timeshift_command, ["--list"]))
+    snapshots = parse_timeshift_list(result.stdout, snapshot_root)
+    if not include_btrfs_info:
+        for snap in snapshots:
+            for subvol in subvolumes:
+                snap.subvolumes[subvol] = SubvolumeMeta(name=subvol, path=str(Path(snap.path) / subvol))
+        return snapshots
+    for snap in snapshots:
+        for subvol in subvolumes:
+            path = str(Path(snap.path) / subvol)
+            meta = btrfs.source_get_subvolume_meta(source, path=path, name=subvol, sudo=sudo, btrfs_command=btrfs_command, required=False)
+            if not meta:
+                continue
+            snap.subvolumes[subvol] = meta
+    return snapshots
+
+
 def list_remote_snapshots(
     ssh: SSHRunner,
     *,
@@ -74,21 +104,15 @@ def list_remote_snapshots(
 ) -> list[SnapshotMeta]:
     """Discover source snapshots using only sudo timeshift and sudo btrfs."""
 
-    result = ssh.run(timeshift_cmd(sudo, timeshift_command, ["--list"]))
-    snapshots = parse_timeshift_list(result.stdout, snapshot_root)
-    if not include_btrfs_info:
-        for snap in snapshots:
-            for subvol in subvolumes:
-                snap.subvolumes[subvol] = SubvolumeMeta(name=subvol, path=str(Path(snap.path) / subvol))
-        return snapshots
-    for snap in snapshots:
-        for subvol in subvolumes:
-            path = str(Path(snap.path) / subvol)
-            meta = btrfs.get_subvolume_meta(location="remote", ssh=ssh, sudo=sudo, btrfs_command=btrfs_command, path=path, name=subvol, required=False)
-            if not meta:
-                continue
-            snap.subvolumes[subvol] = meta
-    return snapshots
+    return list_source_snapshots(
+        SourceRunner(mode="ssh", ssh=ssh),
+        snapshot_root=snapshot_root,
+        subvolumes=subvolumes,
+        sudo=sudo,
+        timeshift_command=timeshift_command,
+        btrfs_command=btrfs_command,
+        include_btrfs_info=include_btrfs_info,
+    )
 
 
 def create_remote_manual_snapshot_cmd(sudo: str, timeshift_command: str, comment: str) -> str:
@@ -110,6 +134,12 @@ def create_remote_manual_snapshot_cmd(sudo: str, timeshift_command: str, comment
     return quote_join(base) + " " + remote_double_quote(comment)
 
 
+def create_source_manual_snapshot(source: SourceRunner, *, sudo: str, timeshift_command: str, comment: str) -> None:
+    """Create a source Timeshift on-demand snapshot through SSH or locally."""
+
+    source.run(create_remote_manual_snapshot_cmd(sudo, timeshift_command, comment), mirror_stdout_on_failure=True)
+
+
 def create_remote_manual_snapshot(ssh: SSHRunner, *, sudo: str, timeshift_command: str, comment: str) -> None:
     """Create a Timeshift on-demand snapshot.
 
@@ -121,4 +151,4 @@ def create_remote_manual_snapshot(ssh: SSHRunner, *, sudo: str, timeshift_comman
     # Timeshift sometimes reports the useful reason for create failures on
     # stdout rather than stderr. Mirror stdout on failure so users can see the
     # real Timeshift error instead of only "Command failed (1)".
-    ssh.run(create_remote_manual_snapshot_cmd(sudo, timeshift_command, comment), mirror_stdout_on_failure=True)
+    create_source_manual_snapshot(SourceRunner(mode="ssh", ssh=ssh), sudo=sudo, timeshift_command=timeshift_command, comment=comment)

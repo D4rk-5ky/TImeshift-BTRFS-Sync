@@ -1,6 +1,33 @@
 # Versioning
 
-This build is version `0.1.9`.
+This build is version `0.1.13`.
+
+### 0.1.13
+
+- Rebuilt the release archive without Python cache folders or compiled cache files.
+- Confirmed no `__pycache__`, `.pyc`, or `.pyo` entries are present in the zip.
+- Kept exactly one canonical example config at `timeshift_btrfs_sync/data/config.example.toml`.
+
+### 0.1.12
+
+- Removed the extra top-level `config.example.toml` from the source archive.
+- Kept exactly one canonical example config at `timeshift_btrfs_sync/data/config.example.toml`.
+- Kept `ts-btrfs init-config` using the packaged data-folder template.
+- Removed Python `__pycache__` files from the release archive.
+
+### 0.1.11
+
+- Added a top-level `config.example.toml` copy to the source archive so the complete example config is visible without looking inside package data.
+- Kept `timeshift_btrfs_sync/data/config.example.toml` as the packaged template used by `ts-btrfs init-config`.
+- Confirmed both config examples include `source.mode = "ssh"` with comments for `ssh` and `local` modes.
+
+### 0.1.10
+
+- Added `source.mode = "local"` so the same sync/prune/destroy workflow can use Timeshift Btrfs snapshots on the machine running `ts-btrfs` without wrapping source commands in SSH.
+- Added `source.py` with a shared `SourceRunner` abstraction. Existing SSH pull behavior now uses `SourceRunner(mode="ssh")`; local sync uses `SourceRunner(mode="local")` and runs source-side shell commands locally.
+- Generalized Timeshift listing/creation, Btrfs source metadata, source send-cache indexing/cleanup, preflight source checks, pruning, destroy-leftovers, and the `btrfs send` side of the pipeline to use the shared source runner.
+- Added `test-source` as the primary source connectivity/sudo check. Existing `test-ssh` remains as a backward-compatible alias and skips SSH checks in local mode.
+- Updated README, the commented code map, and the example config to document SSH and local source modes.
 
 ### 0.1.9
 

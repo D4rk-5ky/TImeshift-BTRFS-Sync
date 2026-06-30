@@ -8,7 +8,7 @@ This file records the audit requested after v0.2.3.
 - All argparse command flags are described in `README.md` under **Complete CLI command reference**.
 - All config options parsed by `timeshift_btrfs_sync/config.py`, including `[mqtt]` and `[manual_snapshot]`, are present in `config.example.toml`.
 - All config options are described in `README.md` under **Complete config option reference**.
-- `init-config` now writes the same complete commented example as `config.example.toml`.
+- `init-config` writes the same complete commented example as `timeshift_btrfs_sync/data/config.example.toml`.
 
 ## CLI commands and flags checked
 

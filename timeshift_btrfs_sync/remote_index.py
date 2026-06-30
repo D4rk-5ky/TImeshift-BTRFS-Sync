@@ -18,6 +18,7 @@ from . import btrfs
 from .commands import run_local, sudo_prefix
 from .models import SubvolumeMeta
 from .ssh import SSHRunner
+from .source import SourceRunner
 
 
 @dataclass(slots=True)
@@ -332,6 +333,38 @@ done < "$queue_file"
 """.strip()
 
 
+def build_source_btrfs_index(
+    source: SourceRunner,
+    root_path: str | Path | None,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    include_root: bool = True,
+    required: bool = False,
+) -> BtrfsIndex:
+    """Build a source Btrfs index in SSH or local mode."""
+
+    if source.uses_ssh:
+        assert source.ssh is not None
+        return build_remote_btrfs_index(
+            source.ssh,
+            root_path,
+            sudo=sudo,
+            btrfs_command=btrfs_command,
+            include_root=include_root,
+            required=required,
+        )
+    if not root_path:
+        return BtrfsIndex(root="", location="local")
+    return build_local_btrfs_index(
+        root_path,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        include_root=include_root,
+        required=required,
+    )
+
+
 def build_remote_btrfs_index(
     ssh: SSHRunner,
     root_path: str | Path | None,
@@ -409,6 +442,26 @@ def build_remote_btrfs_index(
         if root_meta.uuid or root_meta.parent_uuid or root_meta.received_uuid or root_meta.readonly is not None:
             index.add(root_meta)
     return index
+
+
+def refresh_source_path(
+    index: BtrfsIndex | None,
+    source: SourceRunner,
+    path: str | Path,
+    *,
+    name: str | None = None,
+    sudo: str,
+    btrfs_command: str,
+) -> SubvolumeMeta | None:
+    """Refresh one source path in an existing index after source create/delete work."""
+
+    meta = btrfs.source_get_subvolume_meta(source, path, name or Path(path).name, sudo, btrfs_command, required=False)
+    if index is not None:
+        if meta:
+            index.add(meta)
+        else:
+            index.discard(str(path))
+    return meta
 
 
 def refresh_remote_path(

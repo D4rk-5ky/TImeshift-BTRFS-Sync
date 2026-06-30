@@ -17,11 +17,11 @@ from .mqtt import publish_status
 from .notify import build_notification_payload
 from .retention import prune
 from .destroy import destroy_leftovers
-from .ssh import SSHRunner
+from .source import SourceRunner
 from .state import load_state, refresh_state_metadata_and_report
 from .sync import confirm_source_identity_before_manual_snapshot, list_source_snapshots, print_snapshot_table, source_snapshot_index, sync_once
 from .preflight import check_required_sync_paths
-from .timeshift import create_remote_manual_snapshot
+from .timeshift import create_source_manual_snapshot
 
 
 CLI_FORMATTER = argparse.RawTextHelpFormatter
@@ -193,23 +193,26 @@ def cmd_test_ssh(args) -> int:
     config = load_config(args.config)
 
     def _run() -> int:
-        ssh = SSHRunner(config.ssh)
-        ssh.test()
-        ssh.run(timeshift.timeshift_cmd(config.source.sudo, config.source.timeshift_command, ["--list"]))
-        ssh.run(btrfs.remote_btrfs_cmd(config.source.sudo, config.source.btrfs_command, ["--version"]))
-        print("SSH works. Source sudo for timeshift/btrfs works.")
+        source = SourceRunner.from_config(config)
+        if source.uses_ssh:
+            source.test()
+        else:
+            print("Source mode: local; SSH test skipped.")
+        source.run(timeshift.timeshift_cmd(config.source.sudo, config.source.timeshift_command, ["--list"]))
+        source.run(btrfs.remote_btrfs_cmd(config.source.sudo, config.source.btrfs_command, ["--version"]))
+        print("Source command endpoint works. Source sudo for timeshift/btrfs works.")
         return 0
 
-    return _with_logging(config, "test-ssh", _run)
+    return _with_logging(config, "test-source", _run)
 
 
 
 def _refresh_state_metadata_from_timeshift(config, state: dict, *, dry_run: bool) -> list[str]:
     """Refresh mutable state metadata from one fast Timeshift list read."""
 
-    ssh = SSHRunner(config.ssh)
+    source = SourceRunner.from_config(config)
     print("Refreshing state metadata from source Timeshift --list...")
-    source_by_name = source_snapshot_index(list_source_snapshots(config, ssh, include_btrfs_info=False))
+    source_by_name = source_snapshot_index(list_source_snapshots(config, source, include_btrfs_info=False))
     return refresh_state_metadata_and_report(state, source_by_name.values(), config.state_file, dry_run=dry_run)
 
 def cmd_list_source(args) -> int:
@@ -226,7 +229,7 @@ def cmd_list_source(args) -> int:
         print_snapshot_table(
             list_source_snapshots(
                 config,
-                SSHRunner(config.ssh),
+                SourceRunner.from_config(config),
                 include_btrfs_info=args.verify_btrfs,
             )
         )
@@ -285,20 +288,23 @@ def cmd_create_manual(args) -> int:
     config = load_config(args.config)
 
     def _run() -> int:
-        ssh = SSHRunner(config.ssh)
-        ssh.test()
-        check_required_sync_paths(config, ssh, dry_run=False)
+        source = SourceRunner.from_config(config)
+        if source.uses_ssh:
+            source.test()
+        else:
+            print("Source mode: local; SSH setup/test skipped.")
+        check_required_sync_paths(config, source, dry_run=False)
         confirm_source_identity_before_manual_snapshot(
             config,
-            ssh,
+            source,
             load_state(config.state_file, config.destination.target_root),
             load_source_index=lambda: source_snapshot_index(
-                list_source_snapshots(config, ssh, include_btrfs_info=config.source.verify_subvolumes_at_discovery)
+                list_source_snapshots(config, source, include_btrfs_info=config.source.verify_subvolumes_at_discovery)
             ),
         )
         print()
-        create_remote_manual_snapshot(ssh, sudo=config.source.sudo, timeshift_command=config.source.timeshift_command, comment=args.comment)
-        print("Requested remote Timeshift on-demand snapshot.")
+        create_source_manual_snapshot(source, sudo=config.source.sudo, timeshift_command=config.source.timeshift_command, comment=args.comment)
+        print("Requested source Timeshift on-demand snapshot.")
         return 0
 
     return _with_logging(config, "create-manual", _run)
@@ -344,7 +350,8 @@ def cmd_show_state(args) -> int:
 TOP_LEVEL_HELP = """
 Available commands:
   init-config    Write a starter TOML config from the packaged template.
-  test-ssh       Test SSH and required source sudo commands.
+  test-source    Test source command endpoint and required source sudo commands.
+  test-ssh       Backward-compatible alias for test-source.
   list-source    List source Timeshift snapshots.
   sync           Pull missing snapshots and optionally prune.
   prune          Apply destination retention rules only.
@@ -368,7 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="ts-btrfs",
-        description="Pull Timeshift Btrfs snapshots over SSH.",
+        description="Pull or locally copy Timeshift Btrfs snapshots.",
         epilog=TOP_LEVEL_HELP,
         formatter_class=CLI_FORMATTER,
     )
@@ -385,7 +392,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--path", default="./ts-btrfs.toml", help="where to write the example config; default: ./ts-btrfs.toml")
     p.add_argument("--force", action="store_true", help="overwrite the destination config file if it already exists")
 
-    p = new_subparser(sub, "test-ssh", "test SSH and source sudo permissions", "Verify SSH works and source sudo can run timeshift --list and btrfs --version.", cmd_test_ssh)
+    p = new_subparser(sub, "test-source", "test source endpoint and source sudo permissions", "Verify source mode works and source sudo can run timeshift --list and btrfs --version. In local mode, SSH is skipped.", cmd_test_ssh)
+    add_config_arg(p)
+
+    p = new_subparser(sub, "test-ssh", "alias for test-source", "Backward-compatible alias for test-source. In local mode, SSH is skipped.", cmd_test_ssh)
     add_config_arg(p)
 
     p = new_subparser(

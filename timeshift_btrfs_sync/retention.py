@@ -17,7 +17,7 @@ from .state import (
     state_send_path_is_protected_timeshift_original,
 )
 from .log import emit_success_summary, get_logger
-from .ssh import SSHRunner
+from .source import SourceRunner
 
 
 @dataclass(slots=True)
@@ -188,7 +188,7 @@ def initial_sync_keep_names(config: AppConfig, snapshots: Iterable[SnapshotMeta]
 
 def _cleanup_source_cache_for_pruned_snapshot(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     snapshot_name: str,
     snapshot_state: dict,
     source_cache_index: remote_index.BtrfsIndex | None = None,
@@ -222,8 +222,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
                 continue
             existing_children = {send_path for _, send_path in paths if source_cache_index.contains(send_path)}
         else:
-            parent_exists = btrfs.remote_cache_existing_paths(
-                ssh,
+            parent_exists = btrfs.source_cache_existing_paths(
+                source,
                 sudo=config.source.sudo,
                 btrfs_command=config.source.btrfs_command,
                 cache_root=config.source.cache_root,
@@ -236,8 +236,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
                 print(f"  cache parent: already gone on source, confirmed {parent_dir}")
                 continue
 
-            existing_children = btrfs.remote_cache_existing_child_paths(
-                ssh,
+            existing_children = btrfs.source_cache_existing_child_paths(
+                source,
                 sudo=config.source.sudo,
                 btrfs_command=config.source.btrfs_command,
                 cache_root=config.source.cache_root,
@@ -253,8 +253,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
                 print(f"  cache {subvol_name}: already gone on source, confirmed {send_path}")
                 continue
             print(f"  cache {subvol_name}: deleting {send_path}")
-            result = btrfs.remote_delete_subvolume(
-                ssh,
+            result = btrfs.source_delete_subvolume(
+                source,
                 config.source.sudo,
                 config.source.btrfs_command,
                 send_path,
@@ -270,8 +270,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
         empty = (
             source_cache_index.is_empty(parent_dir)
             if source_cache_index is not None
-            else btrfs.remote_cache_is_empty(
-                ssh,
+            else btrfs.source_cache_is_empty(
+                source,
                 sudo=config.source.sudo,
                 btrfs_command=config.source.btrfs_command,
                 cache_root=config.source.cache_root,
@@ -279,8 +279,8 @@ def _cleanup_source_cache_for_pruned_snapshot(
             )
         )
         if empty is True:
-            result = btrfs.remote_delete_subvolume(
-                ssh,
+            result = btrfs.source_delete_subvolume(
+                source,
                 config.source.sudo,
                 config.source.btrfs_command,
                 parent_dir,
@@ -428,7 +428,7 @@ def _delete_prune_item(
     config: AppConfig,
     state: dict,
     plan: PrunePlan,
-    source_cache_ssh: SSHRunner | None,
+    source_cache_runner: SourceRunner | None,
     name: str,
     source_cache_index: remote_index.BtrfsIndex | None = None,
 ) -> bool:
@@ -450,10 +450,10 @@ def _delete_prune_item(
     print()
     print("Retention Delete Source send-cache")
     source_cache_gone = True
-    if source_cache_ssh:
+    if source_cache_runner:
         source_cache_gone = _cleanup_source_cache_for_pruned_snapshot(
             config,
-            source_cache_ssh,
+            source_cache_runner,
             name,
             snapshot_state,
             source_cache_index=source_cache_index,
@@ -529,27 +529,27 @@ def prune(config: AppConfig, state: dict, *, dry_run: bool, yes_delete: bool) ->
     if plan.delete and not yes_delete:
         raise RuntimeError("Refusing to delete without --yes-delete")
     deleted = 0
-    source_cache_ssh = (
-        SSHRunner(config.ssh)
+    source_cache_runner = (
+        SourceRunner.from_config(config)
         if plan.delete and config.source.cleanup_superseded_cache and config.source.cache_root
         else None
     )
     source_cache_index = (
-        remote_index.build_remote_btrfs_index(
-            source_cache_ssh,
+        remote_index.build_source_btrfs_index(
+            source_cache_runner,
             config.source.cache_root,
             sudo=config.source.sudo,
             btrfs_command=config.source.btrfs_command,
             include_root=True,
         )
-        if source_cache_ssh and config.source.cache_root
+        if source_cache_runner and config.source.cache_root
         else None
     )
     if source_cache_index is not None:
         print()
         print(f"Source send-cache index: {len(source_cache_index.by_path)} indexed subvolume(s) below {source_cache_index.root}")
     for name in sorted(plan.delete):
-        if _delete_prune_item(config, state, plan, source_cache_ssh, name, source_cache_index=source_cache_index):
+        if _delete_prune_item(config, state, plan, source_cache_runner, name, source_cache_index=source_cache_index):
             deleted += 1
     save_state(config.state_file, state)
     summary = "\n".join(

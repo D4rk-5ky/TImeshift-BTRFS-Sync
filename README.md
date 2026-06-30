@@ -1,8 +1,18 @@
-# timeshift-btrfs-sync v0.1.9
+# timeshift-btrfs-sync v0.1.13
 
-## v0.1.9 preflight import fix
+## v0.1.13 packaging cleanup
 
-This release fixes a sync startup regression where the new path preflight call could fail with `name 'preflight' is not defined`. The preflight behavior is unchanged; the module is now imported correctly before sync starts.
+This release rebuilds the archive without Python cache folders or compiled cache files. Release zips should not contain `__pycache__`, `.pyc`, or `.pyo` files.
+
+## v0.1.12 config template location cleanup
+
+This release removes the extra top-level `config.example.toml` copy. The project keeps exactly one canonical example config at `timeshift_btrfs_sync/data/config.example.toml`, which is also the template used by `ts-btrfs init-config`.
+
+## v0.1.10 local source mode
+
+This release adds `source.mode = "local"` so the same sync engine can copy from Timeshift Btrfs snapshots on the machine running `ts-btrfs`, without using SSH. The existing SSH pull mode remains the default with `source.mode = "ssh"`.
+
+Local mode keeps the same dry-run behavior, path preflight, manual snapshot guard, read-only send-cache handling, incremental parent UUID verification, state updates, retention pruning, and destroy-leftovers guardrails. Only the source command transport changes: source-side `timeshift` and `btrfs` commands run locally instead of through `ssh`.
 
 
 ## Source sudoers and destroy-leftovers
@@ -30,7 +40,9 @@ MIT License. See [`LICENSE`](LICENSE).
 
 ## What it does
 
-`timeshift-btrfs-sync` is a destination-pull backup tool for Timeshift Btrfs snapshots. It runs on the backup/destination machine, connects to the source over SSH, and pulls Timeshift snapshots with `btrfs send` / `btrfs receive`.
+`source.mode = "ssh"` is the original destination-pull mode. `source.mode = "local"` skips SSH and treats the local machine as both source-command endpoint and destination receiver, while still using separate `source.*` and `destination.*` command/sudo settings.
+
+`timeshift-btrfs-sync` is a destination-pull backup tool for Timeshift Btrfs snapshots. It runs on the backup/destination machine, connects to the source over SSH by default, or uses local source mode on the same machine, and transfers Timeshift snapshots with `btrfs send` / `btrfs receive`.
 
 It supports full and incremental sends, Timeshift snapshot discovery, writable source snapshots through a read-only send cache, safe destination pruning, optional automatic Timeshift on-demand snapshots, split logs, MQTT notifications, and email notifications with optional log attachments.
 
@@ -80,7 +92,7 @@ Normal sync flow:
 ```text
 1. Prepare destination.target_root when real sync is allowed to create it.
 2. Run sync path preflight for source.snapshot_root, configured source.cache_root, and destination.target_root.
-3. Run sudo -n timeshift --list on the source.
+3. Run `sudo -n timeshift --list` on the source endpoint: over SSH in `source.mode = "ssh"`, locally in `source.mode = "local"`.
 4. Parse Timeshift snapshot names and tags.
 5. Build expected paths from source.snapshot_root and source.subvolumes.
 6. Skip snapshots already received or older than the confirmed sync floor.
@@ -104,7 +116,7 @@ source.cache_root, when configured
 destination.target_root
 ```
 
-The source-side checks are batched into one SSH call and use the configured `sudo btrfs subvolume list -o <path>` command. This keeps the existing narrow sudo model; the app does not need passwordless generic `test`, `mkdir`, `cat`, or `rm` access on the source. The destination check is local and runs after destination preparation in a real sync, so `destination.create_target_root = true` can still create the target before the preflight.
+The source-side checks are batched into one source command and use the configured `sudo btrfs subvolume list -o <path>` command. In SSH mode that source command is wrapped in SSH; in local mode it runs locally. This keeps the existing narrow sudo model; the app does not need passwordless generic `test`, `mkdir`, `cat`, or `rm` access on the source. The destination check is local and runs after destination preparation in a real sync, so `destination.create_target_root = true` can still create the target before the preflight.
 
 If any required path is missing, not mounted, or not accessible through the configured Btrfs command, the app fails before creating a fresh Timeshift on-demand snapshot and before trying to send data. This is intended to prevent avoidable leftover on-demand snapshots after a restored VM, changed mount point, or missing send-cache directory.
 
@@ -149,7 +161,7 @@ Prune only deletes send paths that are explicitly app-owned source-cache paths b
 
 ## Remote index/cache optimization
 
-At the beginning of a sync run, the app builds short-lived Btrfs indexes for `source.cache_root` and `destination.target_root`. These indexes store paths, UUIDs, parent UUIDs, received UUIDs, and read-only state where Btrfs reports it. Later parent checks, sync-floor checks, and source send-cache cleanup can use dictionary lookups instead of repeatedly starting new SSH sessions for small `btrfs subvolume list/show` probes.
+At the beginning of a sync run, the app builds short-lived Btrfs indexes for `source.cache_root` and `destination.target_root`. These indexes store paths, UUIDs, parent UUIDs, received UUIDs, and read-only state where Btrfs reports it. Later parent checks, sync-floor checks, and source send-cache cleanup can use dictionary lookups instead of repeatedly starting new source-side `btrfs subvolume list/show` probes.
 
 The index is deliberately per-run only. It is refreshed or updated after operations that change the filesystem: cache snapshot creation refreshes the new source cache path, a successful receive refreshes the new destination path, and prune removes deleted source cache paths from the index. Safety-critical incremental matching still requires the same identity rule:
 
@@ -347,7 +359,7 @@ For PyInstaller builds, see the dedicated `INSTALL.md` section for both folder-s
 ## Usual test flow
 
 ```bash
-ts-btrfs test-ssh --config ./config.toml
+ts-btrfs test-source --config ./config.toml
 ts-btrfs list-source --config ./config.toml
 ts-btrfs sync --config ./config.toml --dry-run
 ts-btrfs sync --config ./config.toml --run --limit 1
@@ -374,7 +386,7 @@ ts-btrfs init-config --path ./config.toml
 nano config.toml
 ```
 
-The packaged `config.example.toml` contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
+The packaged `timeshift_btrfs_sync/data/config.example.toml` file contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
 
 ## Command reference
 
@@ -396,13 +408,13 @@ Writes the complete commented config template.
 | `--path PATH` | Writes the template to `PATH`; default is `./ts-btrfs.toml`. | Lets you create a config in the folder or name you prefer. |
 | `--force` | Overwrites the target file if it already exists. | Needed when refreshing an existing generated template. Review changes before replacing a real config. |
 
-### `test-ssh`
+### `test-source` / `test-ssh`
 
-Tests source SSH access and the required source sudo commands.
+Tests the configured source endpoint and the required source sudo commands. `test-ssh` remains as a backward-compatible alias. In `source.mode = "local"`, SSH is skipped.
 
 | Flag | What it does | Why it may be needed |
 |---|---|---|
-| `--config`, `-c` | Loads the chosen TOML config. | Needed so the app knows the source host, SSH settings, and command paths. |
+| `--config`, `-c` | Loads the chosen TOML config. | Needed so the app knows source mode, source command paths, and SSH settings when SSH mode is used. |
 
 ### `list-source`
 
@@ -410,7 +422,7 @@ Lists source Timeshift snapshots.
 
 | Flag | What it does | Why it may be needed |
 |---|---|---|
-| `--config`, `-c` | Loads the chosen TOML config. | Needed for SSH and source snapshot settings. |
+| `--config`, `-c` | Loads the chosen TOML config. | Needed for source mode and source snapshot settings. |
 | `--verify-btrfs` | Runs slower Btrfs checks for every configured source subvolume during listing. | Useful when validating a new `snapshot_root` or subvolume layout. Omit it for faster normal listing. |
 
 ### `sync`
@@ -445,7 +457,7 @@ Creates one source Timeshift on-demand snapshot using the configured source. Tim
 
 | Flag | What it does | Why it may be needed |
 |---|---|---|
-| `--config`, `-c` | Loads the chosen TOML config. | Needed for source SSH, Timeshift command, and manual snapshot safety settings. |
+| `--config`, `-c` | Loads the chosen TOML config. | Needed for source mode, Timeshift command, and manual snapshot safety settings. |
 | `--comment COMMENT` | Passes a custom comment to `timeshift --create --comments`. | Useful to identify why the snapshot was created and to include the configured marker text. |
 
 ### `show-state`
@@ -475,7 +487,7 @@ When `--delete-both` is used, the command prints `SOURCE / DESTINATION SNAPSHOT 
 
 ## Config reference
 
-Every option below is present in the packaged `config.example.toml`. Commented entries are optional but supported.
+Every option below is present in the packaged `timeshift_btrfs_sync/data/config.example.toml`. Commented entries are optional but supported.
 
 ### Top-level options
 
@@ -530,9 +542,11 @@ Every option below is present in the packaged `config.example.toml`. Commented e
 
 ### `[ssh]`
 
+Used only when `source.mode = "ssh"`. In `source.mode = "local"`, the `[ssh]` section may be omitted and SSH settings are not validated.
+
 | Option | What it does | Why it may be needed |
 |---|---|---|
-| `host` | Source hostname or IP. | Required so the destination can pull snapshots from the source. |
+| `host` | Source hostname or IP. | Required only in SSH mode so the destination can pull snapshots from the source. |
 | `user` | SSH user on the source. | Use a dedicated low-privilege user with only the minimal sudo rules. |
 | `port` | Optional SSH port. | Needed if the source does not use port `22`. |
 | `identity_file` | SSH private key path passed with `ssh -i`. | Recommended for unattended scheduled jobs. |
@@ -578,6 +592,7 @@ Leave `control_master = false` for maximum isolation, on shared machines, or any
 
 | Option | What it does | Why it may be needed |
 |---|---|---|
+| `mode` | Chooses `ssh` or `local`. Default is `ssh`. | Use `local` when Timeshift snapshots and the destination are on the same machine and you want to skip SSH while keeping the same safety rules. |
 | `sudo` | Source sudo prefix, normally `sudo -n`. | Required for Timeshift/Btrfs commands without interactive prompts. |
 | `btrfs_command` | Source Btrfs command name/path. | Use an absolute path if the remote sudo PATH is restricted. |
 | `timeshift_command` | Source Timeshift command name/path. | Use an absolute path if needed by sudo or your distro. |
@@ -605,7 +620,7 @@ Leave `control_master = false` for maximum isolation, on shared machines, or any
 
 | Option | What it does | Why it may be needed |
 |---|---|---|
-| `use_mbuffer` | Inserts `mbuffer` between SSH send and local receive. | Gives useful throughput/total display and smooths network/disk bursts. |
+| `use_mbuffer` | Inserts `mbuffer` between source send and local receive. | Gives useful throughput/total display and smooths network/disk bursts. |
 | `mbuffer_command` | mbuffer command name/path. | Use an absolute path or alternative command name if needed. |
 | `mbuffer_size` | Memory buffer size passed to `mbuffer -m`. | Larger buffers can smooth bursts; too large wastes RAM. |
 | `mbuffer_rate` | Optional rate limit passed to `mbuffer -R`. | Useful if backups should not saturate network or disks. |

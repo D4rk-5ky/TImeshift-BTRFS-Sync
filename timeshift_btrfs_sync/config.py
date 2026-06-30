@@ -47,9 +47,10 @@ class ManualSnapshotConfig:
 
 @dataclass(slots=True)
 class SourceConfig:
-    """Remote/source Timeshift and Btrfs settings."""
+    """Source Timeshift and Btrfs settings."""
 
     snapshot_root: str
+    mode: str = "ssh"
     subvolumes: list[str] = field(default_factory=lambda: ["@", "@home"])
     sudo: str = "sudo -n"
     btrfs_command: str = "btrfs"
@@ -237,44 +238,54 @@ def load_config(path: str | Path) -> AppConfig:
 
     name = str(raw.get("name") or "timeshift-btrfs-sync")
 
-    ssh_raw = _table(raw, "ssh")
-    port = _positive_int(ssh_raw.get("port"), "ssh.port")
-    password = _optional_str(ssh_raw, "password")
-    password_file = _optional_str(ssh_raw, "password_file")
-    if password and password_file:
-        raise ConfigError("Use either ssh.password or ssh.password_file, not both")
-    if password_file and not Path(password_file).expanduser().is_file():
-        raise ConfigError(f"ssh.password_file does not exist or is not a file: {password_file}")
-    extra_args = _string_list(ssh_raw.get("extra_args"), "ssh.extra_args")
-    if (password or password_file) and any("BatchMode=yes" in arg for arg in extra_args):
-        raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
-    control_master = _bool(ssh_raw, "ssh", "control_master", False)
-    control_persist = _optional_str(ssh_raw, "control_persist")
-    control_path = _optional_str(ssh_raw, "control_path")
-    if control_master:
-        try:
-            validate_control_path_safety(control_path)
-        except ValueError as exc:
-            raise ConfigError(str(exc)) from exc
-
-    ssh = SSHConfig(
-        host=_as_str(ssh_raw.get("host"), "ssh.host"),
-        user=_optional_str(ssh_raw, "user"),
-        port=port,
-        identity_file=_optional_str(ssh_raw, "identity_file"),
-        password=password,
-        password_file=password_file,
-        compression=_bool(ssh_raw, "ssh", "compression", False),
-        cipher=_optional_str(ssh_raw, "cipher"),
-        control_master=control_master,
-        control_persist=control_persist,
-        control_path=control_path,
-        extra_args=extra_args,
-    )
-
     source_raw = _table(raw, "source")
+    source_mode = _stripped(source_raw, "mode", "ssh").lower()
+    if source_mode not in {"ssh", "local"}:
+        raise ConfigError("source.mode must be either 'ssh' or 'local'")
+
+    ssh_raw = _table(raw, "ssh")
+    if source_mode == "ssh":
+        port = _positive_int(ssh_raw.get("port"), "ssh.port")
+        password = _optional_str(ssh_raw, "password")
+        password_file = _optional_str(ssh_raw, "password_file")
+        if password and password_file:
+            raise ConfigError("Use either ssh.password or ssh.password_file, not both")
+        if password_file and not Path(password_file).expanduser().is_file():
+            raise ConfigError(f"ssh.password_file does not exist or is not a file: {password_file}")
+        extra_args = _string_list(ssh_raw.get("extra_args"), "ssh.extra_args")
+        if (password or password_file) and any("BatchMode=yes" in arg for arg in extra_args):
+            raise ConfigError("ssh.password/password_file cannot be used with BatchMode=yes; remove that SSH option")
+        control_master = _bool(ssh_raw, "ssh", "control_master", False)
+        control_persist = _optional_str(ssh_raw, "control_persist")
+        control_path = _optional_str(ssh_raw, "control_path")
+        if control_master:
+            try:
+                validate_control_path_safety(control_path)
+            except ValueError as exc:
+                raise ConfigError(str(exc)) from exc
+
+        ssh = SSHConfig(
+            host=_as_str(ssh_raw.get("host"), "ssh.host"),
+            user=_optional_str(ssh_raw, "user"),
+            port=port,
+            identity_file=_optional_str(ssh_raw, "identity_file"),
+            password=password,
+            password_file=password_file,
+            compression=_bool(ssh_raw, "ssh", "compression", False),
+            cipher=_optional_str(ssh_raw, "cipher"),
+            control_master=control_master,
+            control_persist=control_persist,
+            control_path=control_path,
+            extra_args=extra_args,
+        )
+    else:
+        # Local source mode never constructs SSH commands. Keep a placeholder so
+        # AppConfig remains backward-compatible for callers that inspect config.ssh.
+        ssh = SSHConfig(host="")
+
     source = SourceConfig(
         snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
+        mode=source_mode,
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
         sudo=str(source_raw.get("sudo", "sudo -n")),
         btrfs_command=str(source_raw.get("btrfs_command", "btrfs")),

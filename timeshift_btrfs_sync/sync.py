@@ -19,7 +19,7 @@ from . import preflight, remote_index
 from .commands import stream_pipeline
 from .config import AppConfig
 from .models import SnapshotMeta, SubvolumeMeta, tags_text
-from .ssh import SSHRunner
+from .source import SourceRunner
 from .log import emit_success_summary
 from .retention import initial_sync_keep_names
 from .state import latest_synced_before, mark_subvolume_synced, refresh_state_metadata_and_report, resolve_destination_path, save_state, snapshot_is_synced
@@ -33,8 +33,8 @@ def _local_meta(config: AppConfig, path: str | Path, name: str, required: bool =
     return btrfs.get_subvolume_meta("local", path, name, config.destination.sudo, config.destination.btrfs_command, required=required)
 
 
-def _remote_meta(config: AppConfig, ssh: SSHRunner, path: str | Path, name: str, required: bool = True) -> SubvolumeMeta | None:
-    return btrfs.get_subvolume_meta("remote", path, name, config.source.sudo, config.source.btrfs_command, ssh=ssh, required=required)
+def _source_meta(config: AppConfig, source: SourceRunner, path: str | Path, name: str, required: bool = True) -> SubvolumeMeta | None:
+    return btrfs.source_get_subvolume_meta(source, path, name, config.source.sudo, config.source.btrfs_command, required=required)
 
 
 def _human_blank() -> None:
@@ -145,11 +145,11 @@ def prepare_destination(config: AppConfig) -> None:
         config.log_dir.mkdir(parents=True, exist_ok=True)
 
 
-def list_source_snapshots(config: AppConfig, ssh: SSHRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
+def list_source_snapshots(config: AppConfig, source: SourceRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
     """Discover source Timeshift snapshots."""
 
-    return timeshift.list_remote_snapshots(
-        ssh,
+    return timeshift.list_source_snapshots(
+        source,
         snapshot_root=config.source.snapshot_root,
         subvolumes=config.source.subvolumes,
         sudo=config.source.sudo,
@@ -165,7 +165,7 @@ def source_snapshot_index(snapshots) -> dict[str, SnapshotMeta]:
 
 def confirm_source_identity_before_manual_snapshot(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     state: dict,
     source_by_name: dict[str, SnapshotMeta] | None = None,
     load_source_index=None,
@@ -189,7 +189,7 @@ def confirm_source_identity_before_manual_snapshot(
 
     confirmed_name, reason = _find_confirmed_sync_floor(
         config,
-        ssh,
+        source,
         state,
         source_by_name,
         source_cache_index=source_cache_index,
@@ -255,7 +255,7 @@ def _pending_app_manual_snapshots(
 
 def _maybe_create_manual_snapshot(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     *,
     state: dict,
     source_by_name: dict[str, SnapshotMeta],
@@ -304,7 +304,7 @@ def _maybe_create_manual_snapshot(
     _human_blank()
     confirm_source_identity_before_manual_snapshot(
         config,
-        ssh,
+        source,
         state,
         source_by_name,
         source_cache_index=source_cache_index,
@@ -328,8 +328,8 @@ def _maybe_create_manual_snapshot(
         _human_rule("----")
         return False
 
-    timeshift.create_remote_manual_snapshot(
-        ssh,
+    timeshift.create_source_manual_snapshot(
+        source,
         sudo=config.source.sudo,
         timeshift_command=config.source.timeshift_command,
         comment=manual.comment,
@@ -449,19 +449,19 @@ def _send_path_kind_text(config: AppConfig, send_path: str, original_path: str) 
 
 def _ensure_source_send_path(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     snapshot_name: str,
     subvolume: SubvolumeMeta,
     source_cache_index: remote_index.BtrfsIndex | None = None,
 ) -> str:
     """Return a real read-only source path, creating cache snapshots if needed.
 
-    This calls only remote `sudo btrfs ...` commands. It never uses source-side
+    This calls only source-side `sudo btrfs ...` commands. It never uses source-side
     mkdir/cat/find/helper scripts.
     """
 
-    return btrfs.remote_ensure_readonly_send_path(
-        ssh,
+    return btrfs.source_ensure_readonly_send_path(
+        source,
         sudo=config.source.sudo,
         btrfs_command=config.source.btrfs_command,
         original_path=subvolume.path,
@@ -565,7 +565,7 @@ def _read_local_destination_parent_metadata(
 
 def _match_source_path_to_destination_received_uuid(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     *,
     source_path: str,
     subvolume_name: str,
@@ -593,7 +593,7 @@ def _match_source_path_to_destination_received_uuid(
     if source_cache_index is not None and btrfs.path_is_under_cache(source_path, config.source.cache_root):
         remote_meta = source_cache_index.meta(source_path)
     if remote_meta is None:
-        remote_meta = _remote_meta(config, ssh, source_path, subvolume_name, required=False)
+        remote_meta = _source_meta(config, source, source_path, subvolume_name, required=False)
     if not remote_meta or not remote_meta.uuid:
         return False, f"{label} not found or has no UUID: {source_path}"
 
@@ -614,7 +614,7 @@ def _match_source_path_to_destination_received_uuid(
 
 def _select_verified_parent_send_path(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     *,
     parent_name: str,
     parent_subvol: SubvolumeMeta | None,
@@ -644,7 +644,7 @@ def _select_verified_parent_send_path(
     for label, path in candidates:
         ok, reason = _match_source_path_to_destination_received_uuid(
             config,
-            ssh,
+            source,
             source_path=path,
             subvolume_name=subvolume_name,
             destination_meta=local_parent,
@@ -674,7 +674,7 @@ def _select_verified_parent_send_path(
     )
 
 def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: str) -> set[str]:
-    """Return UUID values that may safely identify the remote path.
+    """Return UUID values that may safely identify the source path.
 
     State from newer versions has both original_source_uuid and
     send_source_uuid. Older state may only have source_uuid and
@@ -712,7 +712,7 @@ def _state_uuid_values_for_path(state_subvol: dict, *, path: str, source_path: s
 
 def _find_confirmed_sync_floor(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     state: dict,
     source_by_name: dict[str, SnapshotMeta],
     *,
@@ -784,7 +784,7 @@ def _find_confirmed_sync_floor(
             for path in dict.fromkeys(candidate_paths):
                 sub_ok, reason = _match_source_path_to_destination_received_uuid(
                     config,
-                    ssh,
+                    source,
                     source_path=path,
                     subvolume_name=subvolume_name,
                     destination_path=destination_path,
@@ -843,7 +843,7 @@ def _filesystem_parent_candidates(config: AppConfig, snapshot_name: str, subvolu
 
 def _select_parent(
     config: AppConfig,
-    ssh: SSHRunner,
+    source: SourceRunner,
     state: dict,
     source_by_name: dict[str, SnapshotMeta],
     snapshot: SnapshotMeta,
@@ -932,7 +932,7 @@ def _select_parent(
 
         parent_send_path, reason = _select_verified_parent_send_path(
             config,
-            ssh,
+            source,
             parent_name=parent_name,
             parent_subvol=parent_subvol,
             subvolume_name=subvolume_name,
@@ -990,21 +990,25 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
     destination_empty_at_start = not _destination_has_existing_snapshots(config)
 
-    # Create one SSH runner. The same runner config supplies the SSH command and
-    # optional SSHPASS environment for normal commands and streaming sends.
-    ssh = SSHRunner(config.ssh)
-    ssh.test()
+    # Create one source runner. In ssh mode it wraps SSH; in local mode it runs
+    # the same source-side sudo+btrfs/timeshift commands locally and skips SSH.
+    source = SourceRunner.from_config(config)
+    if source.uses_ssh:
+        source.test()
+    else:
+        print("Source mode: local; SSH setup/test skipped. Source commands run on this machine.")
+        _human_rule("----")
 
     # Before Timeshift creates a fresh on-demand snapshot, before source cache
     # snapshots are created, and before any send/receive pipeline starts, verify
     # that the configured source/destination roots are reachable. This prevents
     # avoidable leftover on-demand snapshots when snapshot_root, cache_root, or
     # target_root is missing/mis-mounted after a restore or setup change.
-    preflight.check_required_sync_paths(config, ssh, dry_run=dry_run)
+    preflight.check_required_sync_paths(config, source, dry_run=dry_run)
 
     source_cache_index = (
-        remote_index.build_remote_btrfs_index(
-            ssh,
+        remote_index.build_source_btrfs_index(
+            source,
             config.source.cache_root,
             sudo=config.source.sudo,
             btrfs_command=config.source.btrfs_command,
@@ -1020,7 +1024,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         include_root=True,
     )
     _human_blank()
-    print("REMOTE INDEX CACHE")
+    print("SOURCE INDEX CACHE")
     if source_cache_index is None:
         print("  source cache: disabled; no source.cache_root configured")
     elif source_cache_index.root_missing:
@@ -1031,7 +1035,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         print(f"  destination:  missing or not listable; indexed 0 subvolumes below {destination_index.root}")
     else:
         print(f"  destination:  indexed {len(destination_index.by_path)} subvolume(s) below {destination_index.root}")
-    print("  purpose:      reuse per-run path/UUID lookups instead of repeated SSH btrfs probes")
+    print("  purpose:      reuse per-run path/UUID lookups instead of repeated source btrfs probes")
     _human_rule("----")
 
     def discover_source_index(reason: str) -> dict[str, SnapshotMeta]:
@@ -1043,14 +1047,14 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             else "Discovery verification: fast mode, delaying btrfs checks until send time."
         )
         _human_rule("----")
-        return source_snapshot_index(list_source_snapshots(config, ssh, include_btrfs_info=config.source.verify_subvolumes_at_discovery))
+        return source_snapshot_index(list_source_snapshots(config, source, include_btrfs_info=config.source.verify_subvolumes_at_discovery))
 
     source_by_name = discover_source_index("before manual snapshot safety check")
     before_manual_snapshot_names = set(source_by_name)
 
     created_manual_snapshot = _maybe_create_manual_snapshot(
         config,
-        ssh,
+        source,
         state=state,
         source_by_name=source_by_name,
         dry_run=dry_run,
@@ -1086,7 +1090,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             snapshots_to_sync = source_by_name.values()
             sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(
                 config,
-                ssh,
+                source,
                 state,
                 source_by_name,
                 source_cache_index=source_cache_index,
@@ -1157,7 +1161,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
             parent_name, parent_send_path = _select_parent(
                 config,
-                ssh,
+                source,
                 state,
                 source_by_name,
                 snapshot,
@@ -1171,7 +1175,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             current_send_path = (
                 _preview_send_path(config, snapshot.name, subvolume)
                 if dry_run
-                else _ensure_source_send_path(config, ssh, snapshot.name, subvolume, source_cache_index)
+                else _ensure_source_send_path(config, source, snapshot.name, subvolume, source_cache_index)
             )
             mode = "incremental" if parent_send_path else "full"
 
@@ -1219,10 +1223,10 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             _human_blank()
             print(f"  {subvol_name}: {mode} send/receive")
             print(f"    source-kind: {_send_path_kind_text(config, current_send_path, subvolume.path)}")
-            # Build remote send command. If parent_send_path is set, btrfs send
+            # Build source send command. If parent_send_path is set, btrfs send
             # receives `-p <parent>` and sends an incremental stream.
-            send_cmd = btrfs.remote_send_cmd(
-                ssh,
+            send_cmd = btrfs.source_send_cmd(
+                source,
                 sudo=config.source.sudo,
                 btrfs_command=config.source.btrfs_command,
                 current_path=current_send_path,
@@ -1242,14 +1246,14 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             )
 
             # Optional mbuffer is inserted as the middle command. Password auth
-            # environment is passed to the SSH side so streamed sends work with
-            # sshpass too.
+            # environment is passed to the source side so streamed sends work
+            # with sshpass in SSH mode. Local mode uses no extra environment.
             stream_pipeline(
                 send_cmd,
                 receive_cmd,
                 middle_cmd=config.stream.command(),
                 verbose=True,
-                left_env=ssh.environment(),
+                left_env=source.environment(),
                 # If stream.btrfs_verbose is enabled, let Btrfs operation
                 # output appear live in the terminal. mbuffer remains the real
                 # byte/throughput progress display.
@@ -1277,21 +1281,21 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # metadata lets later runs establish a prune-safe high-watermark without
             # maintaining tombstones for every deleted destination snapshot.
             try:
-                original_meta = _remote_meta(config, ssh, subvolume.path, subvol_name, required=False)
+                original_meta = _source_meta(config, source, subvolume.path, subvol_name, required=False)
             except Exception:
                 original_meta = None
             try:
                 if source_cache_index is not None and btrfs.path_is_under_cache(current_send_path, config.source.cache_root):
-                    send_meta = source_cache_index.meta(current_send_path) or remote_index.refresh_remote_path(
+                    send_meta = source_cache_index.meta(current_send_path) or remote_index.refresh_source_path(
                         source_cache_index,
-                        ssh,
+                        source,
                         current_send_path,
                         name=subvol_name,
                         sudo=config.source.sudo,
                         btrfs_command=config.source.btrfs_command,
                     )
                 else:
-                    send_meta = _remote_meta(config, ssh, current_send_path, subvol_name, required=False)
+                    send_meta = _source_meta(config, source, current_send_path, subvol_name, required=False)
             except Exception:
                 send_meta = None
 
