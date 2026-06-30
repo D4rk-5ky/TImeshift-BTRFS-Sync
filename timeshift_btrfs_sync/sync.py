@@ -1248,6 +1248,131 @@ def _select_parent(
     return None, None
 
 
+def _verify_sync_viability_before_manual_snapshot(
+    config: AppConfig,
+    source: SourceRunner,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+    *,
+    destination_empty_at_start: bool,
+    only_snapshot: str | None,
+    only_missing: bool,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
+    destination_index: remote_index.BtrfsIndex | None = None,
+) -> None:
+    """Prove sync can start before asking Timeshift to create a snapshot.
+
+    Creating a Timeshift on-demand snapshot is a source-side change. The app
+    must therefore verify the current source/destination chain first. For an
+    existing destination, this check requires an exact UUID-proven parent for
+    the next pending transfer, or for a future manual snapshot when there are
+    no current pending transfers. It performs metadata checks only; it never
+    creates source cache snapshots and never starts send/receive.
+    """
+
+    if not config.manual_snapshot.enabled or only_snapshot:
+        return
+
+    _human_blank()
+    print("PRE-MANUAL SNAPSHOT SYNC CHECK")
+    print("  purpose: prove the current source/destination chain can continue before creating a new Timeshift snapshot")
+
+    if destination_empty_at_start:
+        print("  result:  destination has no existing snapshots; the first selected snapshot can start as a full seed")
+        _human_rule("----")
+        return
+
+    sync_floor_name, sync_floor_reason = _find_confirmed_sync_floor(
+        config,
+        source,
+        state,
+        source_by_name,
+        source_cache_index=source_cache_index,
+        destination_index=destination_index,
+    )
+    if not sync_floor_name:
+        print(f"  result:  failed; no UUID-confirmed sync floor ({sync_floor_reason})")
+        _human_rule("----")
+        raise SyncError(
+            "Refusing to create a new Timeshift on-demand snapshot because the "
+            "existing destination/source chain is not proven syncable. Fix the "
+            "parent/state/source-cache problem first, or use an empty/separate "
+            "target_root for a new full backup.\n\n"
+            f"Sync-floor check: {sync_floor_reason}"
+        )
+
+    print(f"  sync floor: {sync_floor_name} ({sync_floor_reason})")
+
+    def verify_parent_for(snapshot: SnapshotMeta, subvolume_name: str, *, future_manual: bool = False) -> tuple[str | None, str | None]:
+        try:
+            return _select_parent(
+                config,
+                source,
+                state,
+                source_by_name,
+                snapshot,
+                subvolume_name,
+                dry_run=False,
+                trusted_parent_send_paths=set(),
+                allow_full_seed=False,
+                source_cache_index=source_cache_index,
+                destination_index=destination_index,
+            )
+        except SyncError as exc:
+            context = "future manual snapshot" if future_manual else f"pending snapshot {snapshot.name}"
+            print(f"  result:  failed while checking {context}/{subvolume_name}")
+            _human_rule("----")
+            raise SyncError(
+                "Refusing to create a new Timeshift on-demand snapshot because "
+                "the app cannot prove that sync can continue from the current "
+                "destination/source chain. No new source snapshot was created.\n\n"
+                f"Failed check: {context}/{subvolume_name}\n"
+                f"Reason: {exc}"
+            ) from exc
+
+    # If there is already a pending source snapshot newer than the confirmed
+    # floor, verify that the first transfer in the normal oldest-to-newest order
+    # can select a UUID-proven parent. This catches broken state/cache/destination
+    # chains before Timeshift creates another snapshot.
+    for snapshot in _snapshots_in_sync_order(source_by_name.values()):
+        if snapshot.name <= sync_floor_name:
+            continue
+        expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
+        if not expected:
+            continue
+        if only_missing and snapshot_is_synced(state, snapshot.name, expected) and _snapshot_destination_paths_exist(config, snapshot.name, expected):
+            continue
+        for subvolume_name in config.source.subvolumes:
+            if subvolume_name not in snapshot.subvolumes:
+                continue
+            parent_name, _parent_path = verify_parent_for(snapshot, subvolume_name)
+            print(f"  result:  existing pending transfer can start: {snapshot.name}/{subvolume_name} parent={parent_name or 'full'}")
+            _human_rule("----")
+            return
+
+    # No existing snapshot needs transfer. A fresh manual snapshot would be newer
+    # than every current source snapshot, so verify that each configured subvolume
+    # has a usable parent for that future snapshot before asking Timeshift to
+    # create it. The sentinel name sorts after normal Timeshift timestamps.
+    future_snapshot = SnapshotMeta(
+        name="9999-12-31_23-59-59",
+        path="<future manual Timeshift snapshot>",
+        tags=[],
+        comment=None,
+        created=None,
+        subvolumes={},
+    )
+    verified: list[str] = []
+    for subvolume_name in config.source.subvolumes:
+        parent_name, _parent_path = verify_parent_for(future_snapshot, subvolume_name, future_manual=True)
+        verified.append(f"{subvolume_name}: parent={parent_name or 'full'}")
+
+    print("  result:  no current pending transfers; future manual snapshot parent chain is verified")
+    for line in verified:
+        print(f"    - {line}")
+    _human_rule("----")
+
+
 def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | None = None, only_snapshot: str | None = None, only_missing: bool = True) -> int:
     """Run one sync pass.
 
@@ -1338,6 +1463,18 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             source_cache_index=source_cache_index,
             destination_index=destination_index,
         )
+
+    _verify_sync_viability_before_manual_snapshot(
+        config,
+        source,
+        state,
+        source_by_name,
+        destination_empty_at_start=destination_empty_at_start,
+        only_snapshot=only_snapshot,
+        only_missing=only_missing,
+        source_cache_index=source_cache_index,
+        destination_index=destination_index,
+    )
 
     created_manual_snapshot = _maybe_create_manual_snapshot(
         config,

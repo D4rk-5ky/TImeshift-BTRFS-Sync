@@ -1,3 +1,10 @@
+## 0.1.30
+
+- Added a pre-manual sync viability check so automatic Timeshift on-demand snapshot creation happens only after the app proves the current source/destination chain can continue.
+- Existing destinations now require both a UUID-confirmed sync floor and a usable incremental parent for the next pending transfer, or a usable parent for the future manual snapshot when nothing is pending, before `timeshift --create` is run.
+- If parent/state/source-cache validation fails, sync now stops before creating another source snapshot.
+- Updated README.md, COMMENTED_CODE_MAP.md, CONFIG_AND_CLI_AUDIT.md, and the config example comments to document the current manual snapshot ordering.
+
 ## 0.1.29
 
 - Added guarded `clear-state` command to remove only the configured `state_file`. It defaults to dry-run and real removal requires `--run`, `--i-understand-this-clears-state`, app lock acquisition, and two typed confirmations.

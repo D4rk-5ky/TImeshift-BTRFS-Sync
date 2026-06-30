@@ -1,3 +1,9 @@
+## Current audit note
+
+- Automatic manual/on-demand snapshot creation is gated by preflight, optional state recovery, source identity checks, and a sync-viability check.
+- On existing destinations, the app must prove a UUID-confirmed sync floor and a usable incremental parent before running `timeshift --create`.
+- No new config or CLI option was added for this safety behavior; it is mandatory when `manual_snapshot.enabled = true`.
+
 # Config and CLI audit for current release
 
 This file records the current config/CLI audit for the packaged release.

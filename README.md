@@ -45,7 +45,7 @@ The safe defaults are intentionally conservative:
 - `default_dry_run = true` previews changes unless `--run` is passed. In strict dry-run mode the app does not prepare the destination, create lock/state directories, run `btrfs receive`, or delete/prune snapshots.
 - Destination pruning only deletes when `--run --yes-delete` is used.
 - Incremental parents are verified with Btrfs UUID metadata before use.
-- Automatic source-side manual snapshot creation can require a UUID-confirmed source identity first.
+- Automatic source-side manual snapshot creation requires source identity and sync-parent viability checks before Timeshift is changed.
 - Normal/user-created Timeshift on-demand snapshots are not pruned unless explicitly enabled.
 - The app does not manage destination Btrfs compression; mount the receiving Btrfs filesystem/subvolume with compression enabled if you want compressed destination storage.
 
@@ -182,7 +182,7 @@ On a fresh/full sync into an empty destination, the app first applies the active
 
 When `manual_snapshot.enabled = true`, `sync` can create a source Timeshift on-demand snapshot before normal syncing.
 
-The app first runs `timeshift --list`. If the destination already contains snapshots, it checks the configured source against existing `state.json` history by Btrfs UUID before creating the new source snapshot. If the destination is empty, the run may create a first snapshot and seed the backup with a full send; later snapshots then become incremental.
+The app first runs `timeshift --list`. If the destination already contains snapshots, it checks the configured source against existing `state.json` history by Btrfs UUID, then proves sync can actually continue before creating the new source snapshot. That pre-manual check verifies a UUID-confirmed sync floor and a usable incremental parent for the next pending transfer, or a usable parent for the future manual snapshot when no current snapshot needs transfer. If that cannot be proven, the app fails before creating another Timeshift snapshot. If the destination is empty, the run may create a first snapshot and seed the backup with a full send; later snapshots then become incremental.
 
 The create command intentionally omits `--tags O` because Timeshift creates on-demand/tag `O` snapshots by default, and some Timeshift versions reject explicit `--tags O`.
 
@@ -301,7 +301,7 @@ ts-btrfs init-config --path ./config.toml
 nano config.toml
 ```
 
-The packaged `timeshift_btrfs_sync/data/config.example.toml` file contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor, while an empty destination may start with a full seed.
+The packaged `timeshift_btrfs_sync/data/config.example.toml` file contains all options with safe defaults. Keep `default_dry_run = true` and `retention.cleanup_ondemand = false` unless you intentionally want less conservative behavior. Incremental sends require a proven matching parent; there is no unsafe override to continue when source and destination parent metadata does not match. Manual snapshot creation follows the same safety model: existing destinations require a UUID-confirmed source/destination anchor and a proven next-parent path before Timeshift is asked to create a new source snapshot, while an empty destination may start with a full seed.
 
 ## Command reference
 

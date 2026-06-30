@@ -370,8 +370,15 @@ This file describes the current command handlers, shell command families, functi
   comment contains `manual_snapshot.marker`.
 - `_pending_app_manual_snapshots()`: finds existing app-created on-demand snapshots
   that are not fully synced yet, so retry runs keep them in normal order.
+- `_verify_sync_viability_before_manual_snapshot()`: proves the current
+  source/destination chain can continue before changing the source by creating
+  a new Timeshift snapshot. It checks a UUID-confirmed sync floor and a usable
+  incremental parent for the next pending transfer, or for a future manual
+  snapshot when nothing is currently pending.
 - `_maybe_create_manual_snapshot()`: optionally creates a Timeshift manual
-  snapshot and still preserves older pending app-created snapshots in the send queue.
+  snapshot only after preflight, state recovery, source identity, and sync
+  viability checks have proven it is safe to change the source. It still
+  preserves older pending app-created snapshots in the send queue.
 - `_snapshots_in_sync_order()`: sorts source snapshots oldest-to-newest.
 - `_select_initial_sync_snapshots()`: on a fresh destination, applies the retention
   planner and selects only snapshots that would be kept.
@@ -401,8 +408,9 @@ This file describes the current command handlers, shell command families, functi
   are allowed only for empty-destination seeding rules.
 - `sync_once()`: complete sync transaction for one config/run. It creates the
   `SourceRunner`, skips SSH tests in local mode, runs preflight, discovers source
-  snapshots, optionally creates manual snapshots, sends/receives data, writes
-  state, and optionally prunes.
+  snapshots, recovers missing state when possible, proves sync viability before
+  optional manual snapshot creation, sends/receives data, writes state, and
+  optionally prunes.
 
 ### `retention.py`
 

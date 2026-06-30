@@ -188,9 +188,13 @@ extra_args = ["-o", "BatchMode=yes"]
 [manual_snapshot]
 # Optional source-side Timeshift on-demand snapshot creation before a normal sync.
 # When enabled = true, `sync` may create a source-side on-demand snapshot before
-# normal syncing. If the destination already contains backup snapshots, the app
-# first requires a UUID-confirmed source/destination anchor. If the destination
-# is empty, first full seed creation is allowed. It then creates the snapshot:
+# normal syncing. This is a source-side change, so the app first checks that the
+# current source/destination chain can actually continue. Existing destinations
+# must have a UUID-confirmed sync floor and a usable incremental parent for the
+# next pending transfer, or a usable parent for the future manual snapshot when
+# nothing is currently pending. If this cannot be proven, the app refuses before
+# creating another Timeshift snapshot. Empty destinations may start with a full
+# seed. Once the safety checks pass, it creates the snapshot:
 #   sudo -n timeshift --create --scripted --comments <comment>
 #
 # The command intentionally omits explicit --tags O. Timeshift defaults to
