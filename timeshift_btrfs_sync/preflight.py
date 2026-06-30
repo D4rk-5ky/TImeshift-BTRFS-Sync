@@ -12,9 +12,10 @@ the path type, then verifies Btrfs accessibility before sync continues:
 
 * source.snapshot_root is Timeshift-owned. It must already exist as a
   directory on a Btrfs filesystem; it may be a normal directory and is never
-  created by this app.
-* source.cache_root is created as a Btrfs subvolume below an existing
-  Btrfs-accessible parent.
+  created or deleted by this app.
+* source.cache_root is app-owned send-cache storage. It must be outside
+  source.snapshot_root and is created as a Btrfs subvolume below an existing
+  Btrfs-accessible parent when missing.
 * destination.target_root is created as a local Btrfs subvolume when
   destination.create_target_root is true. Existing target roots must already be
   Btrfs subvolumes and are verified with `btrfs subvolume show`.
@@ -30,6 +31,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import posixpath
 import shlex
 import subprocess
 
@@ -52,6 +54,22 @@ class PathCheck:
     ok: bool
     detail: str = ""
 
+
+
+def _normalize_source_path(value: str) -> str:
+    """Return a normalized POSIX source path without a trailing slash."""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    return posixpath.normpath(text).rstrip("/") or "/"
+
+def _source_path_is_same_or_under(path: str, root: str) -> bool:
+    """Return True when path is root itself or below root."""
+
+    normalized_path = _normalize_source_path(path)
+    normalized_root = _normalize_source_path(root)
+    return normalized_path == normalized_root or normalized_path.startswith(normalized_root.rstrip("/") + "/")
 
 def _shell_words(parts: list[str]) -> str:
     """Return a shell-safe string for configured command-prefix words."""
@@ -141,9 +159,10 @@ def _source_snapshot_root_script(
 
     Timeshift creates its Btrfs snapshot subvolumes below snapshot_root. The
     root path itself may be an ordinary directory on a Btrfs filesystem. The app
-    must not create this path, because creating it can hide a missing Timeshift
-    mount or a wrong OS/root selection. Missing snapshot_root is therefore a
-    hard preflight error in both dry-run and real-run mode.
+    must not create or delete this path, because doing so can hide a missing
+    Timeshift mount or remove user-owned Timeshift snapshots. Missing
+    snapshot_root is therefore a hard preflight error in both dry-run and
+    real-run mode.
     """
 
     sudo_words = _shell_words(sudo_prefix(sudo))
@@ -171,18 +190,30 @@ compact_error() {{
 }}
 
 err_file=$(mktemp) || exit 2
-if [ ! -e "$snapshot_root" ]; then
-    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 1 'missing; this is Timeshift-owned and must already exist. Mount/fix the Timeshift Btrfs snapshot root instead of letting the app create it.'
-elif [ ! -d "$snapshot_root" ]; then
-    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 1 'path exists but is not a directory'
-elif run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
-    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'exists as Timeshift-owned directory and is Btrfs-accessible; ordinary directory is allowed'
+fallback_err_file=$(mktemp) || exit 2
+# This entire script is executed on the source endpoint. In ssh mode it is
+# invoked through the configured ssh/sshpass connection; in local mode it is
+# invoked on this machine. Do not add local Path.exists() checks in Python for
+# source.snapshot_root, because the source may be remote.
+if run_btrfs subvolume list -o "$snapshot_root" >/dev/null 2>"$err_file"; then
+    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" 'exists as Timeshift-owned directory and is Btrfs-accessible; ordinary directory is allowed; verified on the source endpoint; app will never create or delete this path'
+elif run_btrfs filesystem df "$snapshot_root" >/dev/null 2>"$fallback_err_file"; then
+    primary_detail=$(compact_error "$err_file")
+    printf 'TSBTRFS_PATH_OK\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "exists as Timeshift-owned ordinary directory on Btrfs; verified on the source endpoint with btrfs filesystem df because btrfs subvolume list -o did not accept the directory: $primary_detail; app will never create or delete this path"
 else
     status=$?
     detail=$(compact_error "$err_file")
-    printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "path exists but is not Btrfs-accessible: $detail"
+    fallback_detail=$(compact_error "$fallback_err_file")
+    combined_detail="subvolume list -o: $detail; filesystem df: $fallback_detail"
+    if [ ! -e "$snapshot_root" ]; then
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "not Btrfs-accessible and not visible to the source SSH/local shell: $combined_detail. This is Timeshift-owned and must already exist on the source endpoint. In SSH mode, verify the path as seen on the remote source through the same SSH/sshpass user, that the Timeshift filesystem is mounted, and that sudo btrfs can access it. The app will not create it."
+    elif [ ! -d "$snapshot_root" ]; then
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "path exists on the source endpoint but is not a directory: $combined_detail"
+    else
+        printf 'TSBTRFS_PATH_FAIL\t%s\t%s\t%s\t%s\n' 'source.snapshot_root' "$snapshot_root" "$status" "path exists on the source endpoint but is not Btrfs-accessible with sudo btrfs: $combined_detail"
+    fi
 fi
-rm -f "$err_file"
+rm -f "$err_file" "$fallback_err_file"
 """.strip()
 
 def _cache_root_check_script(
@@ -286,7 +317,41 @@ def _source_path_checks(config: AppConfig, source: SourceRunner, *, dry_run: boo
         )
     parsed.extend(snapshot_parsed)
 
+    snapshot_ok = any(item.label == "source.snapshot_root" and item.ok for item in snapshot_parsed)
+    if not snapshot_ok:
+        parsed.append(
+            PathCheck(
+                label="source.cache_root",
+                path=config.source.cache_root or "",
+                location=source.location,
+                ok=True,
+                detail=(
+                    "skipped because source.snapshot_root failed preflight; "
+                    "the app must not create or modify source cache storage until the Timeshift-owned "
+                    "snapshot root has been verified on the source endpoint"
+                ),
+            )
+        ) if config.source.cache_root else None
+        return parsed
+
     if config.source.cache_root:
+        if _source_path_is_same_or_under(config.source.cache_root, config.source.snapshot_root):
+            parsed.append(
+                PathCheck(
+                    label="source.cache_root",
+                    path=config.source.cache_root,
+                    location=source.location,
+                    ok=False,
+                    detail=(
+                        "source.cache_root must be outside source.snapshot_root. "
+                        "source.snapshot_root is Timeshift-owned and may be an ordinary directory, "
+                        "but source.cache_root is app-owned send-cache storage. "
+                        "Use a separate path such as <timeshift-root>/.ts-btrfs-sync/send-cache."
+                    ),
+                )
+            )
+            return parsed
+
         cache_script = _cache_root_check_script(
             config.source.cache_root,
             sudo=config.source.sudo,

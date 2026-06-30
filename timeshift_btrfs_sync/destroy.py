@@ -279,11 +279,30 @@ def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: boo
 
 
 
-def _source_delete_subvolumes_batched(source: SourceRunner, paths: list[str], sudo: str, btrfs_command: str) -> tuple[int, int, list[str]]:
-    """Delete many source subvolumes in one source command."""
+def _source_delete_subvolumes_batched(
+    source: SourceRunner,
+    paths: list[str],
+    sudo: str,
+    btrfs_command: str,
+    *,
+    protected_snapshot_root: str | None = None,
+) -> tuple[int, int, list[str]]:
+    """Delete many source subvolumes in one source command.
+
+    Refuse the entire batch if any path is source.snapshot_root or below it.
+    This keeps Timeshift-owned snapshots protected even if a bad config or stale
+    state accidentally passes them to destroy-leftovers.
+    """
 
     if not paths:
         return 0, 0, []
+    protected = [path for path in paths if btrfs.path_is_same_or_under(path, protected_snapshot_root)]
+    if protected:
+        return 0, 0, [
+            "refusing to delete Timeshift-owned source.snapshot_root path(s): "
+            + ", ".join(protected)
+            + f"; protected root: {protected_snapshot_root}"
+        ]
     sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
     btrfs_q = shlex.quote(btrfs_command)
     path_lines = "\n".join(paths)
@@ -360,10 +379,29 @@ TSBTRFS_PATHS
             errors.append(f"failed deleting source subvolume {subvol}: {detail}")
     return deleted, stale_removed, errors
 
-def _delete_source_tree(source: SourceRunner, path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
-    """Delete one source tree after deleting nested Btrfs subvolumes deepest-first."""
+def _delete_source_tree(
+    source: SourceRunner,
+    path: str,
+    sudo: str,
+    btrfs_command: str,
+    *,
+    dry_run: bool,
+    label: str,
+    protected_snapshot_root: str | None = None,
+) -> DestroyResult:
+    """Delete one source tree after deleting nested Btrfs subvolumes deepest-first.
+
+    source.snapshot_root is Timeshift-owned and must never be removed by this
+    app. Only the app-owned source.cache_root may be targeted here.
+    """
 
     result = DestroyResult(label=label, path=path, location="source")
+    if btrfs.path_is_same_or_under(path, protected_snapshot_root):
+        result.errors.append(
+            f"refusing to destroy Timeshift-owned source.snapshot_root path {path}; "
+            f"protected root: {protected_snapshot_root}"
+        )
+        return result
 
     # Source-side sudoers should only need passwordless timeshift/btrfs. Build
     # the existence/listing view from Btrfs metadata instead of using
@@ -388,13 +426,25 @@ def _delete_source_tree(source: SourceRunner, path: str, sudo: str, btrfs_comman
     if dry_run:
         return result
 
-    deleted, stale_removed, errors = _source_delete_subvolumes_batched(source, result.subvolumes, sudo, btrfs_command)
+    deleted, stale_removed, errors = _source_delete_subvolumes_batched(
+        source,
+        result.subvolumes,
+        sudo,
+        btrfs_command,
+        protected_snapshot_root=protected_snapshot_root,
+    )
     result.deleted_subvolumes = deleted
     result.removed_stale_dirs += stale_removed
     result.errors.extend(errors)
 
     exists_after, _ = _source_exists(source, path, sudo)
     if not result.root_is_subvolume and exists_after:
+        if btrfs.path_is_same_or_under(path, protected_snapshot_root):
+            result.errors.append(
+                f"refusing to remove Timeshift-owned source directory tree {path}; "
+                f"protected root: {protected_snapshot_root}"
+            )
+            return result
         rm = _run_source_quiet(source, quote_join(["rm", "-rf", "--", path]))
         if rm.returncode == 0:
             result.removed_tree = True
@@ -513,6 +563,11 @@ def destroy_leftovers(
     if delete_source:
         if not config.source.cache_root:
             raise RuntimeError("--delete-source requires source.cache_root; source.snapshot_root is Timeshift-owned and is never destroyed")
+        if btrfs.path_is_same_or_under(config.source.cache_root, config.source.snapshot_root):
+            raise RuntimeError(
+                "Refusing --delete-source because source.cache_root is source.snapshot_root or below it. "
+                "source.snapshot_root is Timeshift-owned and must never be deleted, pruned, destroyed, or cleaned by this app."
+            )
         targets.append(("Source send-cache root", _safe_cleanup_path(config.source.cache_root, "source.cache_root"), "source"))
     if delete_destination:
         targets.append(("Destination target_root", _safe_cleanup_path(config.destination.target_root, "destination.target_root"), "destination"))
@@ -524,6 +579,7 @@ def destroy_leftovers(
     print("It ignores state.json and retention rules.")
     print("It recursively deletes Btrfs subvolumes and leftover files/directories.")
     print("It only deletes app-created source send-cache paths when --delete-source is used.")
+    print("It must never delete, prune, destroy, or clean source.snapshot_root or anything below it.")
     print()
     print(f"Run mode: {'dry-run' if dry_run else 'REAL DELETION'}")
     print(f"Selected mode: {mode_text}")
@@ -556,6 +612,7 @@ def destroy_leftovers(
                 config.source.btrfs_command,
                 dry_run=dry_run,
                 label=label,
+                protected_snapshot_root=config.source.snapshot_root,
             )
         else:
             result = _delete_local_tree(

@@ -222,11 +222,15 @@ retention_count = 10
 # Sync path preflight:
 # Before automatic/manual on-demand snapshot creation and before any send/receive
 # work, the app verifies source.snapshot_root, source.cache_root policy, and
-# destination.target_root. source.snapshot_root is Timeshift-owned: it must
-# already exist, may be an ordinary directory on Btrfs, and is never created by
-# this app. source.cache_root may already exist as a Btrfs subvolume, or if
-# create_readonly_cache = true it may be missing as long as its parent is
-# Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
+# destination.target_root. In SSH mode source checks run through the configured
+# SSH/sshpass source endpoint; in local mode they run locally.
+# source.snapshot_root is Timeshift-owned: it must already exist, may be an
+# ordinary directory on Btrfs, and is never created, pruned, deleted, destroyed,
+# or cleaned by this app. source.cache_root may already exist as a Btrfs
+# subvolume, or if create_readonly_cache = true it may be missing as long as
+# its parent is Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
+# source.cache_root is not created unless source.snapshot_root has already been
+# verified on the source endpoint.
 # If destination.target_root is missing and create_target_root = true, real
 # preflight creates it as a Btrfs subvolume too. If it already exists, it must
 # pass `btrfs subvolume show`; a plain directory inside Btrfs is refused.
@@ -250,7 +254,10 @@ timeshift_command = "timeshift"
 #   sudo -n timeshift --list
 # This directory belongs to Timeshift and must already exist. It may be a
 # normal directory on a Btrfs filesystem because Timeshift creates snapshot
-# subvolumes inside it. The app never creates source.snapshot_root.
+# subvolumes inside it. The app never creates source.snapshot_root and must
+# never prune, delete, destroy, or clean source.snapshot_root or anything below it.
+# In SSH mode this path is checked on the remote source through SSH/sshpass,
+# not on the local destination.
 # The app parses snapshot names from Timeshift output, then constructs paths as:
 #   snapshot_root/<snapshot-name>/<subvolume>
 snapshot_root = "/timeshift-btrfs/snapshots"
@@ -280,7 +287,9 @@ verify_incremental_parent_once_per_run = true
 # If cache_root is missing, real preflight creates cache_root itself as a Btrfs
 # subvolume. The parent directory of cache_root must already exist and be
 # Btrfs-accessible.
-# An existing cache_root path must be a Btrfs subvolume, not an ordinary folder.
+# cache_root must be outside snapshot_root. Do not point it at the Timeshift
+# snapshots directory. An existing cache_root path must be a Btrfs subvolume,
+# not an ordinary folder.
 # The app creates cache paths with btrfs, not mkdir:
 #   sudo -n btrfs subvolume create <cache_root>
 #   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
@@ -296,6 +305,8 @@ create_readonly_cache = true
 # normal retention plan, it also deletes that snapshot's matching source
 # send-cache subvolumes with:
 #   sudo -n btrfs subvolume delete <cache-subvolume>
+# Safety invariant: source.snapshot_root and all Timeshift snapshots below it
+# are never delete candidates. Only paths inside source.cache_root may be cleaned.
 # The timestamp cache parent <cache_root>/<snapshot-name> is deleted only after
 # `btrfs subvolume list -o <cache_root>/<snapshot-name>` confirms no cached
 # child subvolumes remain below it.

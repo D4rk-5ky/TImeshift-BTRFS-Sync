@@ -1,4 +1,31 @@
+## 0.1.26 - source snapshot-root SSH preflight order and ordinary-directory fallback
+
+- Changed source snapshot-root preflight to run a second Btrfs-only fallback check with `btrfs filesystem df <snapshot_root>` when `btrfs subvolume list -o <snapshot_root>` does not accept an ordinary Timeshift directory. This keeps ordinary Timeshift-owned snapshot roots valid.
+- Clarified in code/config/docs that the source snapshot-root check runs on the selected source endpoint: through SSH/sshpass in SSH mode and locally in local mode.
+- Changed source preflight ordering so `source.cache_root` is not created or modified when `source.snapshot_root` fails verification. This avoids creating send-cache storage on the wrong source/mount when the Timeshift-owned snapshot root is missing or misconfigured.
+- Kept the global safety invariant that `source.snapshot_root` and everything below it are never created, pruned, deleted, destroyed, or cleaned by the app.
+
+This build is version `0.1.26`.
+
 # Versioning
+
+## 0.1.25 - protect Timeshift snapshot root and improve remote snapshot-root diagnostics
+
+- Added explicit source-delete safety guards so prune, source send-cache cleanup, and destroy-leftovers refuse any source path that is `source.snapshot_root` or below it.
+- Updated `source.snapshot_root` comments in code and config example: Timeshift owns this path and the app must never create, prune, delete, destroy, or clean it.
+- Changed `source.snapshot_root` preflight to try the configured `sudo btrfs subvolume list -o <snapshot_root>` check first, then use shell visibility checks only for diagnostics. This gives clearer SSH-mode errors when the remote path is wrong, not mounted, or not accessible through sudo btrfs.
+- Updated README.md and COMMENTED_CODE_MAP.md to describe the current protected-root safety invariant.
+
+This build is version `0.1.25`.
+
+## 0.1.24 - separate source cache root validation
+
+- Added config/preflight validation that `source.cache_root` must be outside `source.snapshot_root`.
+- Clarified the failure case where `source.snapshot_root` is accepted as a normal Timeshift-owned directory, but `source.cache_root` is incorrectly pointed at the same snapshots directory.
+- Kept `source.cache_root` as app-owned send-cache storage that is created as a Btrfs subvolume when missing and cache creation is enabled.
+- Updated README.md, COMMENTED_CODE_MAP.md, VERSIONING.md, and the example config to describe the current cache-root rule.
+
+This build is version `0.1.24`.
 
 ## 0.1.23 - Timeshift-owned snapshot root preflight
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import posixpath
 from typing import Any
 import tomllib
 
@@ -49,6 +50,9 @@ class ManualSnapshotConfig:
 class SourceConfig:
     """Source Timeshift and Btrfs settings."""
 
+    # Timeshift-owned snapshot directory. It may be an ordinary directory on a
+    # Btrfs filesystem, but the app must never create, prune, delete, destroy,
+    # or clean this path or anything below it.
     snapshot_root: str
     mode: str = "ssh"
     subvolumes: list[str] = field(default_factory=lambda: ["@", "@home"])
@@ -227,6 +231,22 @@ def _string_list(value: Any, field_name: str) -> list[str]:
         raise ConfigError(f"{field_name} must be a list of non-empty strings")
     return value
 
+
+def _normalize_source_path(value: str) -> str:
+    """Return a normalized POSIX-style source path without a trailing slash."""
+
+    text = str(value).strip()
+    if not text:
+        return ""
+    return posixpath.normpath(text).rstrip("/") or "/"
+
+def _source_path_is_same_or_under(path: str, root: str) -> bool:
+    """Return True when a source path is the root itself or below it."""
+
+    normalized_path = _normalize_source_path(path)
+    normalized_root = _normalize_source_path(root)
+    return normalized_path == normalized_root or normalized_path.startswith(normalized_root.rstrip("/") + "/")
+
 def load_config(path: str | Path) -> AppConfig:
     """Read and validate TOML config."""
 
@@ -283,14 +303,25 @@ def load_config(path: str | Path) -> AppConfig:
         # AppConfig remains backward-compatible for callers that inspect config.ssh.
         ssh = SSHConfig(host="")
 
+    snapshot_root = _normalize_source_path(_as_str(source_raw.get("snapshot_root"), "source.snapshot_root"))
+    cache_root_raw = source_raw.get("cache_root")
+    cache_root = _normalize_source_path(str(cache_root_raw)) if cache_root_raw else None
+    if cache_root and _source_path_is_same_or_under(cache_root, snapshot_root):
+        raise ConfigError(
+            "source.cache_root must be outside source.snapshot_root. "
+            "source.snapshot_root is Timeshift-owned and may be an ordinary directory, but "
+            "source.cache_root is app-owned send-cache storage. Use a separate path such as "
+            "<timeshift-root>/.ts-btrfs-sync/send-cache, not the snapshots directory itself."
+        )
+
     source = SourceConfig(
-        snapshot_root=_as_str(source_raw.get("snapshot_root"), "source.snapshot_root").rstrip("/"),
+        snapshot_root=snapshot_root,
         mode=source_mode,
         subvolumes=_string_list(source_raw.get("subvolumes", ["@", "@home"]), "source.subvolumes") or ["@", "@home"],
         sudo=str(source_raw.get("sudo", "sudo -n")),
         btrfs_command=str(source_raw.get("btrfs_command", "btrfs")),
         timeshift_command=str(source_raw.get("timeshift_command", "timeshift")),
-        cache_root=(str(source_raw.get("cache_root")) if source_raw.get("cache_root") else None),
+        cache_root=cache_root,
         create_readonly_cache=_bool(source_raw, "source", "create_readonly_cache", True),
         cleanup_superseded_cache=_bool(source_raw, "source", "cleanup_superseded_cache", True),
         verify_subvolumes_at_discovery=_bool(source_raw, "source", "verify_subvolumes_at_discovery", False),

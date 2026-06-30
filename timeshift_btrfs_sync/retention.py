@@ -117,9 +117,15 @@ def _source_cache_delete_paths(config: AppConfig, snapshot_state: dict) -> list[
         if not isinstance(subvol, dict):
             continue
         send_path = subvol.get("send_path")
+        if not isinstance(send_path, str):
+            continue
+        if btrfs.path_is_same_or_under(send_path, config.source.snapshot_root):
+            # Final safety guard: Timeshift owns source.snapshot_root and every
+            # snapshot subvolume below it. Never return those paths as delete
+            # candidates, even if stale state incorrectly marks them as cache.
+            continue
         if (
-            isinstance(send_path, str)
-            and state_send_path_is_app_cache(subvol, cache_root=config.source.cache_root)
+            state_send_path_is_app_cache(subvol, cache_root=config.source.cache_root)
             and btrfs.path_is_under_cache(send_path, config.source.cache_root)
         ):
             paths[subvol_name] = send_path
@@ -252,12 +258,17 @@ def _cleanup_source_cache_for_pruned_snapshot(
             if send_path not in existing_children:
                 print(f"  cache {subvol_name}: already gone on source, confirmed {send_path}")
                 continue
+            if btrfs.path_is_same_or_under(send_path, config.source.snapshot_root):
+                ok = False
+                print(f"  protected {subvol_name}: refusing to delete Timeshift-owned source path {send_path}")
+                continue
             print(f"  cache {subvol_name}: deleting {send_path}")
             result = btrfs.source_delete_subvolume(
                 source,
                 config.source.sudo,
                 config.source.btrfs_command,
                 send_path,
+                protected_snapshot_root=config.source.snapshot_root,
                 check=False,
             )
             if result.returncode == 0:
@@ -279,11 +290,16 @@ def _cleanup_source_cache_for_pruned_snapshot(
             )
         )
         if empty is True:
+            if btrfs.path_is_same_or_under(parent_dir, config.source.snapshot_root):
+                ok = False
+                print(f"  protected cache parent: refusing to delete Timeshift-owned source path {parent_dir}")
+                continue
             result = btrfs.source_delete_subvolume(
                 source,
                 config.source.sudo,
                 config.source.btrfs_command,
                 parent_dir,
+                protected_snapshot_root=config.source.snapshot_root,
                 check=False,
             )
             if result.returncode == 0:

@@ -137,11 +137,14 @@ This file describes the current command handlers, shell command families, functi
 - `_parse_path_check_output()`: parses structured path-check sentinel lines,
   including OK/FAIL details from creation attempts.
 - `_source_snapshot_root_script()`: verifies the Timeshift-owned
-  `source.snapshot_root`. The path must already exist, may be an ordinary
-  directory on a Btrfs filesystem, and is never created by the app. This avoids
-  hiding a missing Timeshift mount or wrong OS root behind an empty replacement
-  directory.
-- `_cache_root_check_script()`: verifies `source.cache_root` is already a Btrfs
+  `source.snapshot_root` on the selected source endpoint. In SSH mode the check
+  runs through the configured SSH/sshpass command; in local mode it runs
+  locally. The path must already exist and may be an ordinary directory on a
+  Btrfs filesystem. The check first tries `btrfs subvolume list -o`, then falls
+  back to `btrfs filesystem df` for Btrfs versions/layouts that reject ordinary
+  directories for subvolume listing. The app never creates or deletes this path,
+  because Timeshift owns the original snapshots.
+- `_cache_root_check_script()`: runs only after `source.snapshot_root` has been verified; verifies `source.cache_root` is already a Btrfs
   subvolume; in real-run mode, if it is missing and `create_readonly_cache =
   true`, it verifies the parent and creates the exact configured path with
   `btrfs subvolume create <cache_root>`. It refuses ordinary directories at
@@ -323,6 +326,7 @@ This file describes the current command handlers, shell command families, functi
 - `send_path_kind_for_state_subvolume()`: returns the stored/fallback ownership kind.
 - `state_send_path_is_app_cache()`: true only for app-owned send-cache paths that prune may delete.
 - `state_send_path_is_protected_timeshift_original()`: true for direct read-only Timeshift original send paths that prune must never delete.
+- `reject_protected_source_snapshot_path()`: final source-delete safety guard; refuses any source-side delete, prune, destroy, or cleanup attempt aimed at `source.snapshot_root` or anything below it.
 - `remove_snapshot_from_state()`: removes a snapshot after successful pruning.
 - `refresh_state_metadata_and_report()`: shared sync/prune helper that refreshes
   mutable metadata, reports changed snapshot names, and saves only when allowed.

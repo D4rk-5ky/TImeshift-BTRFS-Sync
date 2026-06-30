@@ -542,12 +542,18 @@ def source_delete_subvolume(
     btrfs_command: str,
     path: str,
     *,
+    protected_snapshot_root: str | None = None,
     check: bool = False,
     log_stderr: bool = True,
     mirror_stderr: bool = True,
 ):
-    """Delete a source-side Btrfs subvolume."""
+    """Delete a source-side Btrfs subvolume.
 
+    The optional protected_snapshot_root guard is a final safety net: the app
+    must never delete Timeshift-owned source.snapshot_root or any path below it.
+    """
+
+    reject_protected_source_snapshot_path(path, protected_snapshot_root, action="delete")
     return source.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]),
         check=check,
@@ -630,6 +636,21 @@ def remote_ensure_readonly_send_path(
     )
 
 
+def path_is_same_or_under(path: str | None, root: str | None) -> bool:
+    """Return True when path is exactly root or below root.
+
+    This is used for destructive safety guards. In particular,
+    source.snapshot_root is Timeshift-owned and must never be deleted by this
+    app, directly or through any child path.
+    """
+
+    if not path or not root:
+        return False
+    normalized_root = str(Path(root)).rstrip("/")
+    normalized_path = str(Path(path)).rstrip("/")
+    return normalized_path == normalized_root or normalized_path.startswith(normalized_root + "/")
+
+
 def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
     """Return True when path points inside the configured source cache root."""
 
@@ -640,12 +661,29 @@ def path_is_under_cache(path: str | None, cache_root: str | None) -> bool:
     return normalized_path.startswith(normalized_root + "/")
 
 
+def reject_protected_source_snapshot_path(path: str | None, snapshot_root: str | None, *, action: str) -> None:
+    """Raise if a source-side destructive action targets Timeshift snapshots.
+
+    Timeshift owns source.snapshot_root and every snapshot subvolume below it.
+    Prune, destroy-leftovers, cache cleanup, and any source-side delete path must
+    refuse those paths even if stale state or a bad config points at them.
+    """
+
+    if path_is_same_or_under(path, snapshot_root):
+        raise RuntimeError(
+            f"Refusing to {action} Timeshift-owned source.snapshot_root path: {path}. "
+            f"Protected root: {snapshot_root}. This app may only delete source paths "
+            "inside source.cache_root."
+        )
+
+
 def remote_delete_subvolume(
     ssh: SSHRunner,
     sudo: str,
     btrfs_command: str,
     path: str,
     *,
+    protected_snapshot_root: str | None = None,
     check: bool = False,
     log_stderr: bool = True,
     mirror_stderr: bool = True,
@@ -657,6 +695,7 @@ def remote_delete_subvolume(
         sudo,
         btrfs_command,
         path,
+        protected_snapshot_root=protected_snapshot_root,
         check=check,
         log_stderr=log_stderr,
         mirror_stderr=mirror_stderr,
