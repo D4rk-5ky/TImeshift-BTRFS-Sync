@@ -224,7 +224,8 @@ retention_count = 10
 # subvolume, or if create_readonly_cache = true it may be missing as long as its
 # parent is Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
 # If destination.target_root is missing and create_target_root = true, real
-# preflight creates it as a Btrfs subvolume too.
+# preflight creates it as a Btrfs subvolume too. If it already exists, it must
+# pass `btrfs subvolume show`; a plain directory inside Btrfs is refused.
 #
 [source]
 # Source command mode.
@@ -314,8 +315,8 @@ send_compressed_data = true
 # subvolume with:
 #   sudo -n btrfs subvolume create <target_root>
 # The parent directory of target_root must already exist and be Btrfs-accessible.
-# Existing target_root paths are not converted; they must be directories inside
-# Btrfs so existing backups keep working.
+# Existing target_root paths are not converted; they must already be Btrfs
+# subvolumes. Plain directories inside Btrfs are refused.
 #
 # The app creates two ordinary helper folders inside this target_root:
 #   snapshots/       = received Btrfs backup snapshots

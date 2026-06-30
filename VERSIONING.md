@@ -1,5 +1,14 @@
 # Versioning
 
+## 0.1.20 - require destination target root subvolume
+
+- Fixed destination preflight so an existing `destination.target_root` must pass `btrfs subvolume show`.
+- A plain directory inside a Btrfs filesystem is now a hard preflight error instead of being reported as OK by the broader Btrfs-accessibility check.
+- Kept missing-target behavior from the previous release: when allowed, the app creates the missing target root with `btrfs subvolume create <target_root>` and verifies it before continuing.
+- Updated README, commented code map, and config example comments to describe the current target-root rule.
+
+This build is version `0.1.20`.
+
 ## 0.1.19 - release zip directory permissions fix
 
 - Rebuilt the release zip with correct Unix directory permissions so package folders extract as usable directories.

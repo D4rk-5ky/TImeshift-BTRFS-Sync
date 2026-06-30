@@ -14,8 +14,8 @@ before sync continues:
 * source.cache_root is created as a Btrfs subvolume below an existing
   Btrfs-accessible parent.
 * destination.target_root is created as a local Btrfs subvolume when
-  destination.create_target_root is true. Existing target roots are verified as
-  Btrfs-accessible so existing directory-based backup roots keep working.
+  destination.create_target_root is true. Existing target roots must already be
+  Btrfs subvolumes and are verified with `btrfs subvolume show`.
 
 If any creation attempt fails, preflight raises a hard error that names the
 exact configured path that could not be created.
@@ -361,9 +361,11 @@ def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCh
     command. Only the exact configured target root is created; parent directories
     must already exist and must be Btrfs-accessible.
 
-    Existing target roots are not converted. They may be an existing Btrfs
-    subvolume or an ordinary directory inside Btrfs, because older installs may
-    already use that layout. Either way, existing roots must be Btrfs-accessible.
+    Existing target roots are not converted. They must already be Btrfs
+    subvolumes. A plain directory inside a Btrfs filesystem is refused because
+    the destination root is the app-owned backup container and later receive,
+    state, prune, and destroy operations depend on that exact root being a
+    verified subvolume.
     """
 
     path = config.destination.target_root
@@ -380,26 +382,26 @@ def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCh
                     detail="path exists but is not a directory",
                 )
             ]
-        script = _btrfs_path_check_script(
-            [("destination.target_root", path_text)],
-            sudo=config.destination.sudo,
-            btrfs_command=config.destination.btrfs_command,
-        )
-        result = subprocess.run(
-            ["sh", "-c", script],
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-        parsed = _parse_path_check_output(result.stdout, location="local")
-        if result.returncode != 0 or not parsed:
-            detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
-            return [PathCheck(label="destination.target_root", path=path_text, location="local", ok=False, detail=detail)]
-        for item in parsed:
-            if item.ok and not item.detail:
-                item.detail = "exists and is Btrfs-accessible"
-        return parsed
+        show_result = _local_btrfs_result(config, ["subvolume", "show", path_text])
+        if show_result.returncode != 0:
+            return [
+                PathCheck(
+                    label="destination.target_root",
+                    path=path_text,
+                    location="local",
+                    ok=False,
+                    detail="path exists but is not a Btrfs subvolume: " + _compact_process_error(show_result),
+                )
+            ]
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=True,
+                detail="exists as Btrfs subvolume",
+            )
+        ]
 
     if not config.destination.create_target_root:
         return [

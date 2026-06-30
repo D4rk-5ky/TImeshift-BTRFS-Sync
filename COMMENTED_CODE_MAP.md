@@ -149,9 +149,9 @@ This file describes the current command handlers, shell command families, functi
 - `_local_target_path_check()`: verifies `destination.target_root`; in real-run
   mode, if it is missing and `destination.create_target_root = true`, it creates
   the exact target root as a Btrfs subvolume after verifying that the parent
-  already exists and is Btrfs-accessible. Existing target roots are checked for
-  Btrfs accessibility but are not converted, so existing backup folders keep
-  working.
+  already exists and is Btrfs-accessible. Existing target roots must pass
+  `btrfs subvolume show`; ordinary directories inside Btrfs are refused so the
+  backup root cannot be misidentified as a valid app-owned subvolume.
 - `check_required_sync_paths()`: prints the sync path preflight and refuses to
   continue before manual snapshot creation or send/receive when a configured
   path cannot be verified or created.
