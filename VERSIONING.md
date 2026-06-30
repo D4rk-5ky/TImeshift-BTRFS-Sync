@@ -1,6 +1,36 @@
 # Versioning
 
-This build is version `0.1.15`.
+## 0.1.19 - release zip directory permissions fix
+
+- Rebuilt the release zip with correct Unix directory permissions so package folders extract as usable directories.
+- Ensured `timeshift_btrfs_sync/data/` is a real directory containing `config.example.toml`.
+- Kept only one `config.example.toml`, inside the package data folder.
+- Updated README and commented code map to describe the current package-data layout without adding old-version details there.
+
+This build is version `0.1.19`.
+
+## 0.1.18 - destination target root subvolume creation
+
+- Changed real-run preflight so a missing `destination.target_root` is created with `btrfs subvolume create <target_root>` instead of Python `mkdir`.
+- Preflight now verifies that the destination target-root parent already exists and is Btrfs-accessible before creating the exact configured target root.
+- Existing destination target roots are not converted; existing directory-based backup roots keep working as long as they are Btrfs-accessible.
+- Updated README, commented code map, and config example comments to describe the current target-root behavior.
+
+This build is version `0.1.18`.
+
+## 0.1.17 - documentation cleanup
+
+- Cleaned `README.md` so it documents the app as it currently works instead of listing release-by-release changes.
+- Cleaned `COMMENTED_CODE_MAP.md` so it focuses on current CLI commands, shell command families, functions, and classes, with explanations of what each does and why.
+- Kept historical version notes in this `VERSIONING.md` file instead of duplicating them in the README or code map.
+
+This build is version `0.1.17`.
+
+### 0.1.16
+
+- Added `*.toml` to `.gitignore` so local TOML configuration files are ignored by default.
+- Kept the example-config exception after the ignore rule so example configuration files can still be tracked.
+- Kept release packaging free of `__pycache__`, `.pyc`, and `.pyo` files.
 
 ### 0.1.15
 

@@ -13,8 +13,9 @@ before sync continues:
   Btrfs-accessible parent.
 * source.cache_root is created as a Btrfs subvolume below an existing
   Btrfs-accessible parent.
-* destination.target_root is created as a local directory when
-  destination.create_target_root is true.
+* destination.target_root is created as a local Btrfs subvolume when
+  destination.create_target_root is true. Existing target roots are verified as
+  Btrfs-accessible so existing directory-based backup roots keep working.
 
 If any creation attempt fails, preflight raises a hard error that names the
 exact configured path that could not be created.
@@ -326,68 +327,170 @@ def _source_path_checks(config: AppConfig, source: SourceRunner, *, dry_run: boo
     return parsed
 
 
-def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCheck]:
-    """Check/create destination.target_root locally."""
+def _parent_of_path(path: Path) -> Path:
+    """Return the immediate parent path used for exact-path creation checks."""
 
-    path = config.destination.target_root
+    parent = path.parent
+    return parent if str(parent) else Path("/")
 
-    if not path.exists():
-        if not config.destination.create_target_root:
-            return [
-                PathCheck(
-                    label="destination.target_root",
-                    path=str(path),
-                    location="local",
-                    ok=False,
-                    detail="path does not exist and destination.create_target_root is false",
-                )
-            ]
-        if dry_run:
-            return [
-                PathCheck(
-                    label="destination.target_root",
-                    path=str(path),
-                    location="local",
-                    ok=True,
-                    detail="missing now; real preflight would create this directory before verifying Btrfs accessibility",
-                )
-            ]
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            return [
-                PathCheck(
-                    label="destination.target_root",
-                    path=str(path),
-                    location="local",
-                    ok=False,
-                    detail=f"could not create directory: {exc}",
-                )
-            ]
 
-    if not path.is_dir():
-        return [PathCheck(label="destination.target_root", path=str(path), location="local", ok=False, detail="path exists but is not a directory")]
+def _local_btrfs_result(config: AppConfig, args: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run one local destination sudo+btrfs command for preflight checks."""
 
-    script = _btrfs_path_check_script(
-        [("destination.target_root", str(path))],
-        sudo=config.destination.sudo,
-        btrfs_command=config.destination.btrfs_command,
-    )
-    result = subprocess.run(
-        ["sh", "-c", script],
+    return subprocess.run(
+        sudo_prefix(config.destination.sudo) + [config.destination.btrfs_command] + args,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
     )
-    parsed = _parse_path_check_output(result.stdout, location="local")
-    if result.returncode != 0 or not parsed:
-        detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
-        return [PathCheck(label="destination.target_root", path=str(path), location="local", ok=False, detail=detail)]
-    for item in parsed:
-        if item.ok and not item.detail and not dry_run:
-            item.detail = "exists/created and is Btrfs-accessible"
-    return parsed
+
+
+def _compact_process_error(result: subprocess.CompletedProcess[str]) -> str:
+    """Return compact stderr/stdout text from a failed subprocess."""
+
+    detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+    return " ".join(detail.split())
+
+
+def _local_target_path_check(config: AppConfig, *, dry_run: bool) -> list[PathCheck]:
+    """Check/create destination.target_root locally.
+
+    If the configured target root is missing and create_target_root is enabled,
+    it is created as a Btrfs subvolume with the configured destination sudo+btrfs
+    command. Only the exact configured target root is created; parent directories
+    must already exist and must be Btrfs-accessible.
+
+    Existing target roots are not converted. They may be an existing Btrfs
+    subvolume or an ordinary directory inside Btrfs, because older installs may
+    already use that layout. Either way, existing roots must be Btrfs-accessible.
+    """
+
+    path = config.destination.target_root
+    path_text = str(path)
+
+    if path.exists():
+        if not path.is_dir():
+            return [
+                PathCheck(
+                    label="destination.target_root",
+                    path=path_text,
+                    location="local",
+                    ok=False,
+                    detail="path exists but is not a directory",
+                )
+            ]
+        script = _btrfs_path_check_script(
+            [("destination.target_root", path_text)],
+            sudo=config.destination.sudo,
+            btrfs_command=config.destination.btrfs_command,
+        )
+        result = subprocess.run(
+            ["sh", "-c", script],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        parsed = _parse_path_check_output(result.stdout, location="local")
+        if result.returncode != 0 or not parsed:
+            detail = (result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}").strip()
+            return [PathCheck(label="destination.target_root", path=path_text, location="local", ok=False, detail=detail)]
+        for item in parsed:
+            if item.ok and not item.detail:
+                item.detail = "exists and is Btrfs-accessible"
+        return parsed
+
+    if not config.destination.create_target_root:
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail="path does not exist and destination.create_target_root is false",
+            )
+        ]
+
+    parent = _parent_of_path(path)
+    parent_text = str(parent)
+    if dry_run:
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=True,
+                detail=f"missing now; real preflight would verify Btrfs parent {parent_text} and create this path as a Btrfs subvolume",
+            )
+        ]
+
+    if not parent.exists():
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"could not create destination.target_root because parent does not exist: {parent_text}",
+            )
+        ]
+    if not parent.is_dir():
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"could not create destination.target_root because parent is not a directory: {parent_text}",
+            )
+        ]
+
+    parent_check = _local_btrfs_result(config, ["subvolume", "list", "-o", parent_text])
+    if parent_check.returncode != 0:
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"could not create destination.target_root because parent is not Btrfs-accessible: {parent_text}: {_compact_process_error(parent_check)}",
+            )
+        ]
+
+    create_result = _local_btrfs_result(config, ["subvolume", "create", path_text])
+    if create_result.returncode != 0:
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"could not create destination.target_root as Btrfs subvolume: {_compact_process_error(create_result)}",
+            )
+        ]
+
+    verify_result = _local_btrfs_result(config, ["subvolume", "show", path_text])
+    if verify_result.returncode != 0:
+        return [
+            PathCheck(
+                label="destination.target_root",
+                path=path_text,
+                location="local",
+                ok=False,
+                detail=f"created destination.target_root as Btrfs subvolume but verification failed: {_compact_process_error(verify_result)}",
+            )
+        ]
+
+    return [
+        PathCheck(
+            label="destination.target_root",
+            path=path_text,
+            location="local",
+            ok=True,
+            detail="created Btrfs subvolume and verified it",
+        )
+    ]
 
 
 def check_required_sync_paths(config: AppConfig, source: SourceRunner, *, dry_run: bool) -> list[PathCheck]:

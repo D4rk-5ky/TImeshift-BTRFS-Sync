@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.15 config
+# timeshift-btrfs-sync v0.1.17 config
 # Run this config on the BACKUP/DESTINATION machine.
 # source.mode = "ssh" pulls from another machine over SSH.
 # source.mode = "local" copies from Timeshift snapshots on this same machine and skips SSH.
@@ -219,10 +219,12 @@ retention_count = 10
 # Sync path preflight:
 # Before automatic/manual on-demand snapshot creation and before any send/receive
 # work, the app verifies source.snapshot_root, source.cache_root policy, and
-# destination.target_root. source.snapshot_root must exist. source.cache_root may
-# already exist as a Btrfs subvolume, or if create_readonly_cache = true it may
-# be missing as long as its parent is Btrfs-accessible; sync creates it lazily as
-# a Btrfs subvolume only if a writable Timeshift snapshot needs cache.
+# destination.target_root. source.snapshot_root must exist or be creatable below
+# a Btrfs-accessible parent. source.cache_root may already exist as a Btrfs
+# subvolume, or if create_readonly_cache = true it may be missing as long as its
+# parent is Btrfs-accessible; real preflight creates it as a Btrfs subvolume.
+# If destination.target_root is missing and create_target_root = true, real
+# preflight creates it as a Btrfs subvolume too.
 #
 [source]
 # Source command mode.
@@ -307,7 +309,15 @@ send_compressed_data = true
 [destination]
 # Local Btrfs backup root on the BACKUP/DESTINATION machine.
 #
-# The app creates two folders inside this target_root:
+# The destination target root is the backup job root. If this exact path is
+# missing and create_target_root = true, real preflight creates it as a Btrfs
+# subvolume with:
+#   sudo -n btrfs subvolume create <target_root>
+# The parent directory of target_root must already exist and be Btrfs-accessible.
+# Existing target_root paths are not converted; they must be directories inside
+# Btrfs so existing backups keep working.
+#
+# The app creates two ordinary helper folders inside this target_root:
 #   snapshots/       = received Btrfs backup snapshots
 #   .ts-btrfs-sync/ = app state.json, lock file, logs
 #
@@ -326,6 +336,7 @@ sudo = "sudo -n"
 btrfs_command = "btrfs"
 
 # Whether the app may create target_root and internal metadata directories.
+# Missing target_root is created as a Btrfs subvolume, not as a normal directory.
 create_target_root = true
 
 # Interrupted receive cleanup. Keep true. If a previous transfer was cancelled

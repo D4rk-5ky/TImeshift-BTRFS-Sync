@@ -1,42 +1,14 @@
 # Commented code map
 
-Compact map of the **current** codebase for v0.1.15. It documents active
-commands, classes, functions, and the shell commands they build/run. Historical
-changes belong in `VERSIONING.md`.
+This file describes the current command handlers, shell command families, functions, and classes. Each entry explains what the item does and why it exists in the sync workflow.
 
-The purpose of this file is to explain what each part does and why the code is
-conservative around Btrfs UUID safety, local/SSH source transport, dry-run
-safety, retention-based cache handling, state metadata refresh, and pipeline
-logging.
-
-## App flow
-
-`cli.py` parses a command and loads `config.toml`. Source-side operations are
-routed through `source.py`:
-
-- `source.mode = "ssh"` wraps source shell commands in the existing SSH runner.
-- `source.mode = "local"` runs the same source shell commands locally with
-  `sh -c`, skipping SSH setup/tests while keeping the same source sudo and
-  command settings.
-
-Most commands run through the logging wrapper, which creates split log files and
-sends optional notifications. `sync.py` runs preflight with `preflight.py` before Timeshift on-demand creation
-or send/receive work. In real-run mode, preflight creates missing configured
-roots when allowed, then verifies Btrfs accessibility. Sync then reads source
-Timeshift snapshots, optionally creates a manual snapshot, keeps already pending
-app-created manual snapshots in oldest-to-newest order after interrupted runs,
-re-reads the source list, refreshes mutable state metadata, proves the source
-and destination share a valid Btrfs parent, creates per-snapshot read-only cache
-subvolumes as needed, runs `<source btrfs send> | optional mbuffer | <local
-btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
-
-## Active CLI commands
+## CLI commands
 
 | Command | What it does | Important safety behavior |
 | --- | --- | --- |
 | `init-config` | Writes the packaged commented TOML template. | Does not overwrite unless `--force` is used. |
 | `test-source` | Verifies the configured source endpoint and source sudo commands. | In SSH mode it tests SSH first; in local mode SSH is skipped. |
-| `test-ssh` | Backward-compatible alias for `test-source`. | Kept so old scripts do not break; local mode still skips SSH. |
+| `test-ssh` | Alias for `test-source`. | Local mode skips SSH and checks the local source endpoint. |
 | `list-source` | Lists source Timeshift snapshots. | Fast by default; `--verify-btrfs` performs slower UUID/read-only checks. |
 | `sync` | Pulls/copies missing Timeshift Btrfs subvolumes. | Defaults can dry-run; real transfer requires run mode; incremental parents must match UUIDs. |
 | `prune` | Applies destination retention rules. | Real deletion requires `--run --yes-delete`. |
@@ -44,31 +16,25 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 | `show-state` | Prints local `state.json`. | Read-only; can show raw JSON with `--json`. |
 | `destroy-leftovers` | Destroys configured source send-cache/destination leftovers when retiring the app setup. | Dry-run by default; real deletion requires explicit target flag, `--run`, long danger flag, and two typed confirmations. It never deletes `source.snapshot_root`. |
 
-## Module purpose
+## Source, destination, and helper commands
 
-| File | Purpose |
-| --- | --- |
-| `__main__.py` | Lets `python3 -m timeshift_btrfs_sync` call the CLI. |
-| `cli.py` | Command-line parser, command handlers, logging wrapper, notifications. |
-| `config.py` | TOML dataclasses and validation, including `source.mode`. |
-| `source.py` | Source command transport abstraction for SSH or local source mode. |
-| `sync.py` | Main send/receive transaction and Btrfs safety decisions. |
-| `preflight.py` | Required path availability/create-or-hard-error checks before on-demand creation or send/receive work. |
-| `btrfs.py` | Btrfs command builders, metadata parser, source send-cache helpers. |
-| `destroy.py` | Destructive retirement cleanup for configured source send-cache root and destination target root. |
-| `remote_index.py` | Per-run Btrfs subvolume indexes for source and destination path/UUID lookups. |
-| `payload_stats.py` | Normalized source/destination payload statistics used to explain raw subvolume count differences. |
-| `timeshift.py` | Source Timeshift list/create command helpers and parser. |
-| `commands.py` | Local subprocess runner and send/receive stream pipeline. |
-| `state.py` | `state.json` loading, saving, relative paths, metadata refresh, sync markers. |
-| `retention.py` | Retention keep/delete planning, destination pruning, and matching source send-cache pruning. |
-| `log.py` | Split run logs: `.log`, `.err`, `.btrfs`, `.mbuffer`, `.succes`. |
-| `notify.py` | Shared notification payload/timestamp builder. |
-| `mail.py` | Optional SMTP status email with safe attachment filtering. |
-| `mqtt.py` | Optional MQTT status JSON publishing. |
-| `ssh.py` | SSH command wrapper, password-file environment handling, and safe ControlMaster socket validation. |
-| `lock.py` | Per-config lock file guard. |
-| `models.py` | Shared dataclasses and display helpers. |
+| Command family | What it does | Why it does it |
+| --- | --- | --- |
+| `ssh ... <source command>` | Runs source-side Timeshift and Btrfs commands on the configured SSH source when `source.mode = "ssh"`. | Keeps the destination-pull model: the backup machine controls the run and receives the stream. |
+| `sh -c <source command>` | Runs the same source-side commands locally when `source.mode = "local"`. | Allows local sync without duplicating the sync engine or weakening the safety checks. |
+| `sudo -n timeshift --list` | Lists source Timeshift snapshots, tags, comments, and snapshot names. | The app needs Timeshift metadata to decide what exists, what order to process snapshots in, and what retention tags apply. |
+| `sudo -n timeshift --create --comments <text>` | Creates an optional source on-demand snapshot. | Lets a sync run start by capturing the current system state before the normal oldest-to-newest send loop. |
+| `sudo -n btrfs subvolume show <path>` | Reads UUID, parent UUID, received UUID, and read-only state for a subvolume. | Incremental sends are only safe when source and destination Btrfs identities match. |
+| `sudo -n btrfs subvolume list ... <root>` | Builds source-cache and destination indexes of known subvolume paths and UUID metadata. | Reduces repeated metadata probes and helps cleanup find nested subvolumes safely. |
+| `sudo -n btrfs subvolume create <path>` | Creates the source cache root or per-snapshot cache parent as a Btrfs subvolume. | Writable Timeshift snapshots need read-only send copies, and those copies must live inside Btrfs. |
+| `sudo -n btrfs subvolume snapshot -r <src> <dst>` | Creates a read-only source-cache snapshot from a writable Timeshift snapshot child. | `btrfs send` requires the send source to be read-only. |
+| `sudo -n btrfs send [-p <parent>] <current>` | Streams a full or incremental Btrfs snapshot from the chosen source path. | This is the actual payload transfer mechanism. Incremental mode saves time and space by sending only changes since the verified parent. |
+| `sudo -n btrfs receive <destination folder>` | Receives the Btrfs stream into the destination snapshot folder. | Recreates the source snapshot subvolume on the backup filesystem. |
+| `sudo -n btrfs subvolume delete <path>` | Deletes destination snapshots or app-owned source cache subvolumes during cleanup. | Btrfs subvolumes must be deleted with Btrfs, not ordinary `rm`. |
+| `mbuffer` | Optional middle stage between `btrfs send` and `btrfs receive`. | Gives buffering, rate limiting, and transfer statistics when enabled. |
+| `mkdir` / `rmdir` / `rm -rf` | Creates local metadata folders and removes safe ordinary leftover directories when needed. | Some paths are normal directories, while Btrfs subvolume payloads are handled by Btrfs commands. |
+
+| `timeshift_btrfs_sync/data/config.example.toml` | Packaged package-data config template used by `init-config`. | Keeps the example config available after normal install and PyInstaller packaging. The `data` path must remain a directory so import/package-data lookup works correctly. |
 
 ## Functions and classes
 
@@ -103,7 +69,7 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 - `_positive_int()`: validates positive integer settings.
 - `_stripped()`: converts values to stripped strings for legacy-compatible fields.
 - `_bool()`: reads booleans without accepting strings like `yes` or `no`.
-- `_int()`: reads integer fields with the same explicit type checks as before.
+- `_int()`: reads integer fields with explicit type checks.
 - `_as_str()`: strict string reader for required string values.
 - `_as_path()`: strict path reader built on `_as_str()`.
 - `_as_bool()`: strict boolean reader used where wrong types must error.
@@ -111,8 +77,7 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 - `_string_list()`: validates list-of-string config fields such as subvolumes.
 - `load_config()`: reads TOML, builds dataclasses, validates `source.mode`, and
   validates SSH only when `source.mode = "ssh"`. In local mode, `[ssh]` may be
-  omitted and a placeholder SSH config is kept only for backward-compatible
-  `config.ssh` access.
+  omitted and a placeholder SSH config is kept only so shared code can safely access `config.ssh`.
 
 ### `ssh.py`
 
@@ -183,7 +148,10 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
   `PathCheck` objects.
 - `_local_target_path_check()`: verifies `destination.target_root`; in real-run
   mode, if it is missing and `destination.create_target_root = true`, it creates
-  the local directory and then verifies Btrfs accessibility.
+  the exact target root as a Btrfs subvolume after verifying that the parent
+  already exists and is Btrfs-accessible. Existing target roots are checked for
+  Btrfs accessibility but are not converted, so existing backup folders keep
+  working.
 - `check_required_sync_paths()`: prints the sync path preflight and refuses to
   continue before manual snapshot creation or send/receive when a configured
   path cannot be verified or created.
@@ -338,7 +306,7 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
   `destination.target_root` so the whole backup root can be moved safely.
 - `resolve_destination_path()`: resolves relative state paths under current
   target root.
-- `normalize_destination_paths()`: migrates older absolute destination paths into
+- `normalize_destination_paths()`: normalizes absolute destination paths into
   safe relative paths on load.
 - `load_state()`: reads JSON state or creates empty state, then normalizes paths.
 - `save_state()`: atomically writes pretty JSON state.
@@ -502,7 +470,7 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 - `_with_logging()`: shared wrapper for log creation, command execution, notification sending, and exit code handling.
 - `_resolve_dry_run()`: merges command flags with `default_dry_run` config.
 - `cmd_init_config()`: writes the packaged config template.
-- `cmd_test_ssh()`: tests the configured source endpoint and required source sudo commands. It is used by both `test-source` and the backward-compatible `test-ssh` alias.
+- `cmd_test_ssh()`: tests the configured source endpoint and required source sudo commands. It is used by both `test-source` and the `test-ssh` alias.
 - `_refresh_state_metadata_from_timeshift()`: refreshes mutable state metadata for commands that inspect state/source without running a full sync.
 - `cmd_list_source()`: displays source Timeshift snapshots.
 - `cmd_sync()`: loads config, resolves dry-run mode, and calls `sync_once()`.
@@ -551,35 +519,3 @@ btrfs receive>`, writes `state.json`, and optionally runs retention pruning.
 - `FileLock.__init__()`: stores the lock path.
 - `FileLock.__enter__()`: creates/acquires the lock non-blocking.
 - `FileLock.__exit__()`: unlocks and closes the lock file.
-
-## Safety invariants and why they exist
-
-- **Source transport is only a wrapper choice.** Local mode and SSH mode share the
-  same Btrfs, Timeshift, state, preflight, pruning, and destroy-leftovers logic.
-- **Full send only into empty destination.** Prevents mixing two unrelated backup
-  chains in the same target root.
-- **Incremental parent must match destination `received_uuid`.** Btrfs incremental
-  receive needs the source parent UUID to match the destination parent received UUID.
-- **Missing parent cache snapshots are not recreated.** A recreated cache snapshot
-  receives a new UUID, so it cannot be the same parent already received on the destination.
-- **Current writable snapshots may be cached read-only.** That is safe because the
-  new cache snapshot becomes the current send object, not a fake replacement for an old parent.
-- **Destination paths in state are relative.** Moving the whole backup root should
-  not break state; path escape is still rejected.
-- **Timeshift metadata refresh is restricted.** Only `tags`, `comment`, `created`,
-  and `path` may refresh from `timeshift --list`; UUID, send path, destination
-  path, parent, and status fields are transfer identity and must not change.
-- **Pipeline stderr is buffered.** Successful `btrfs send` and `mbuffer` write
-  normal status/progress to stderr, so `.err` is written only when the pipeline fails.
-- **Real pruning requires `--run --yes-delete`.** Dry-run and explicit delete
-  confirmation are separate so a config mistake cannot silently delete backups.
-- **Destroy-leftovers is deliberately separate from prune.** It ignores state and
-  retention only for retiring the setup, refuses broad paths, and requires `--run`,
-  a long danger flag, and two typed confirmations.
-- **Manual snapshot creation checks source identity on non-empty destinations.** It
-  prevents creating a fresh source snapshot for the wrong mounted OS/source endpoint
-  and then appending it to an existing backup chain.
-- **`timeshift --create` omits explicit `--tags O`.** Timeshift creates on-demand
-  snapshots with tag `O` by default, and some versions reject explicit `--tags O`.
-- **Password pair validation stays explicit.** It protects secret handling and
-  avoids accidentally accepting conflicting inline/file password settings.

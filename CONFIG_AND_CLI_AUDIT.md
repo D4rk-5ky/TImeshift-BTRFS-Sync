@@ -1,6 +1,6 @@
-# Config and CLI audit for v0.1.15
+# Config and CLI audit for v0.1.17
 
-This file records the current config/CLI audit for v0.1.15.
+This file records the current config/CLI audit for v0.1.17.
 
 ## Audit result
 
@@ -389,3 +389,15 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 - Confirmed `source.mode`, SSH/local source support, and the preflight create-or-hard-error behavior are documented.
 - Confirmed the canonical config template remains `timeshift_btrfs_sync/data/config.example.toml`.
 - Confirmed the requested `.gitignore` is included in the release archive.
+
+
+## 0.1.17 audit addition
+
+- Documentation cleanup only.
+- `README.md` now focuses on the app as it currently works instead of release-by-release notes.
+- `COMMENTED_CODE_MAP.md` now focuses on current CLI commands, shell command families, functions, and classes.
+
+## 0.1.16 audit addition
+
+- `.gitignore` now ignores `*.toml` to reduce the chance of committing local TOML configuration/secrets.
+- The `!config.example.toml` exception remains after the ignore rule, so example configuration can still be tracked.
