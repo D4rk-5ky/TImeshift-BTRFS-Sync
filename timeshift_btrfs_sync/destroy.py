@@ -44,7 +44,6 @@ class DestroyResult:
     deleted_subvolumes: int = 0
     removed_tree: bool = False
     removed_stale_dirs: int = 0
-    removed_ordinary_files: int = 0
     errors: list[str] = field(default_factory=list)
 
     @property
@@ -153,59 +152,15 @@ def _local_exists(path: str, sudo: str) -> tuple[bool | None, str]:
 
 
 def _source_exists(source: SourceRunner, path: str, sudo: str) -> tuple[bool | None, str]:
-    """Return source shell path existence status without sudo.
+    """Return source path existence status without sudo.
 
-    This is a fallback probe only.  The source sudoers model intentionally
-    stays narrow, so the app cannot rely on sudo ``test``.  Destructive
-    source-cache cleanup first asks ``sudo btrfs`` whether the path is a real
-    Btrfs object, then uses this shell check only to distinguish ordinary
-    user-visible directories from missing paths.
+    Source-side sudoers is intentionally narrow and should only need
+    passwordless ``btrfs`` and ``timeshift``. Existence checks use the source
+    user's normal shell permissions instead of ``sudo test``.
     """
 
     result = _run_source_quiet(source, "test -e " + shlex.quote(path))
     return _path_exists_status(result)
-
-
-def _source_destroy_path_status(
-    source: SourceRunner,
-    path: str,
-    sudo: str,
-    btrfs_command: str,
-) -> tuple[bool | None, bool, str]:
-    """Return source path existence using Btrfs first, then shell fallback.
-
-    ``destroy-leftovers --delete-source`` is only allowed to use source sudo for
-    ``btrfs``.  Earlier builds checked the remote source cache root with plain
-    ``test -e`` first.  On SSH sources that could report "missing" even when
-    ``sudo btrfs subvolume show`` could see the app-owned cache subvolume, so
-    the command skipped deletion and printed a false success.
-
-    Return ``(exists, is_subvolume, detail)`` where ``exists`` is ``None`` only
-    when neither the Btrfs probes nor the shell fallback can determine the
-    status.
-    """
-
-    meta = _source_subvolume_meta(source, path, sudo, btrfs_command)
-    if meta is not None:
-        return True, True, "exists as Btrfs subvolume"
-
-    df_result = _run_source_quiet(
-        source,
-        btrfs.remote_btrfs_cmd(sudo, btrfs_command, ["filesystem", "df", path]),
-    )
-    if df_result.returncode == 0:
-        return True, False, "exists on Btrfs filesystem"
-
-    shell_exists, shell_error = _source_exists(source, path, sudo)
-    if shell_exists is True:
-        return True, False, "exists according to source shell"
-    if shell_exists is False:
-        return False, False, ""
-
-    btrfs_error = df_result.stderr.strip() or df_result.stdout.strip() or f"return code {df_result.returncode}"
-    if shell_error:
-        return None, False, f"btrfs access failed: {btrfs_error}; shell check failed: {shell_error}"
-    return None, False, f"btrfs access failed: {btrfs_error}"
 
 
 def _local_subvolume_meta(path: str, sudo: str, btrfs_command: str):
@@ -240,146 +195,6 @@ def _source_child_subvolumes(source: SourceRunner, path: str, sudo: str, btrfs_c
         return None
     converted = [_listed_path_to_absolute(path, item) for item in btrfs._subvolume_list_paths(result.stdout)]
     return [item for item in converted if item]
-
-
-def _source_cache_layout_subvolumes_batched(
-    source: SourceRunner,
-    path: str,
-    sudo: str,
-    btrfs_command: str,
-    *,
-    protected_snapshot_root: str | None = None,
-) -> tuple[list[str] | None, list[str]]:
-    """Discover app-owned source cache subvolumes by the cache directory layout.
-
-    ``btrfs subvolume list`` output is relative to the Btrfs filesystem root.
-    On SSH sources with bind mounts, unusual mount roots, or different printed
-    paths, converting that output back to absolute paths can fail and produce an
-    empty deletion plan. The source send-cache layout is simpler and
-    app-owned: ``cache_root/<snapshot>/<subvolume>`` plus the per-snapshot
-    container subvolume. This fallback runs in one source shell and asks Btrfs
-    directly whether each candidate directory is a subvolume.
-
-    It uses only the configured source shell user plus sudo for ``btrfs``. It
-    does not use sudo ``find``, ``rm``, ``mkdir``, ``chown``, or ``chmod``.
-    """
-
-    protected = (protected_snapshot_root or "").rstrip("/")
-    sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
-    btrfs_q = shlex.quote(btrfs_command)
-    script = f"""
-root={shlex.quote(path)}
-protected={shlex.quote(protected)}
-sudo_words={shlex.quote(sudo_words)}
-btrfs_cmd={btrfs_q}
-run_btrfs() {{
-    if [ -n "$sudo_words" ]; then
-        # shellcheck disable=SC2086
-        $sudo_words "$btrfs_cmd" "$@"
-    else
-        "$btrfs_cmd" "$@"
-    fi
-}}
-is_protected() {{
-    p=$1
-    [ -n "$protected" ] || return 1
-    [ "$p" = "$protected" ] && return 0
-    case "$p" in
-        "$protected"/*) return 0 ;;
-        *) return 1 ;;
-    esac
-}}
-is_subvol() {{
-    run_btrfs subvolume show "$1" >/dev/null 2>&1
-}}
-emit_subvol() {{
-    candidate=$1
-    [ -d "$candidate" ] || return 0
-    if is_protected "$candidate"; then
-        echo "TSBTRFS_PROTECTED	$candidate"
-        return 0
-    fi
-    if is_subvol "$candidate"; then
-        echo "TSBTRFS_SUBVOL	$candidate"
-    fi
-}}
-if [ ! -e "$root" ]; then
-    echo "TSBTRFS_MISSING	$root"
-    exit 0
-fi
-if is_protected "$root"; then
-    echo "TSBTRFS_PROTECTED	$root"
-    exit 0
-fi
-for snap in "$root"/* "$root"/.[!.]* "$root"/..?*; do
-    [ -e "$snap" ] || continue
-    [ -d "$snap" ] || continue
-    # Payload/cache child subvolumes such as @ and @home must be deleted
-    # before the per-snapshot cache container subvolume.
-    for child in "$snap"/* "$snap"/.[!.]* "$snap"/..?*; do
-        [ -e "$child" ] || continue
-        [ -d "$child" ] || continue
-        emit_subvol "$child"
-    done
-    emit_subvol "$snap"
-done
-emit_subvol "$root"
-""".strip()
-    result = _run_source_quiet(source, "sh -c " + shlex.quote(script))
-    if result.returncode != 0:
-        return None, [result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"]
-    paths: list[str] = []
-    errors: list[str] = []
-    for line in result.stdout.splitlines():
-        if line.startswith("TSBTRFS_SUBVOL\t"):
-            paths.append(line.split("\t", 1)[1])
-        elif line.startswith("TSBTRFS_PROTECTED\t"):
-            errors.append(
-                "refusing to delete Timeshift-owned source.snapshot_root path discovered in source cache layout: "
-                + line.split("\t", 1)[1]
-            )
-    return _sort_deepest_first(paths), errors
-
-
-def _local_remove_timeshift_metadata_files_in_destination_tree(path: str) -> int:
-    """Remove copied Timeshift metadata files from destination date folders.
-
-    This is deliberately narrow: it removes only ordinary files that are direct
-    children of ``snapshots/<date>/`` folders, such as ``info.json``. It does
-    not recurse into payload subvolumes like ``@`` or ``@home``.
-    """
-
-    root = Path(path)
-    candidates: list[Path] = []
-    if root.name == "snapshots":
-        candidates.append(root)
-    candidate = root / "snapshots"
-    if candidate.exists():
-        candidates.append(candidate)
-
-    removed = 0
-    seen: set[Path] = set()
-    for snapshots_root in candidates:
-        if snapshots_root in seen or not snapshots_root.exists() or not snapshots_root.is_dir():
-            continue
-        seen.add(snapshots_root)
-        try:
-            date_dirs = [entry for entry in snapshots_root.iterdir() if entry.is_dir()]
-        except OSError:
-            continue
-        for date_dir in date_dirs:
-            try:
-                children = list(date_dir.iterdir())
-            except OSError:
-                continue
-            for child in children:
-                try:
-                    if child.is_file() or child.is_symlink():
-                        child.unlink()
-                        removed += 1
-                except OSError:
-                    pass
-    return removed
 
 
 def _local_remove_empty_child_dirs(path: str, sudo: str) -> int:
@@ -431,15 +246,7 @@ def _confirm_or_raise(prompt: str, expected: str) -> None:
 
 
 def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: bool, label: str) -> DestroyResult:
-    """Delete one local tree after deleting nested Btrfs subvolumes deepest-first.
-
-    Destination cleanup intentionally deletes child payload subvolumes first,
-    then performs a second ordinary-file/empty-directory cleanup pass before
-    deleting ``destination.target_root`` itself. Copied Timeshift metadata such
-    as ``info.json`` is an ordinary file beside received ``@``/``@home``
-    subvolumes, so it must be removed before the date folder or target root can
-    become empty.
-    """
+    """Delete one local tree after deleting nested Btrfs subvolumes deepest-first."""
 
     result = DestroyResult(label=label, path=path, location="destination")
     print(f"  checking destination path existence: {path}", flush=True)
@@ -461,21 +268,13 @@ def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: boo
             return result
         children = []
 
-    child_subvolumes = [item for item in _sort_deepest_first(children) if os.path.normpath(item) != os.path.normpath(path)]
-    root_subvolume = path if result.root_is_subvolume else None
-    result.subvolumes = child_subvolumes + ([root_subvolume] if root_subvolume else [])
+    result.subvolumes = _sort_deepest_first(children + ([path] if result.root_is_subvolume else []))
     print(f"  discovered destination subvolumes: {len(result.subvolumes)}", flush=True)
     if dry_run:
         return result
 
-    # First pass: remove copied Timeshift metadata before deleting payload
-    # subvolumes. This catches existing info.json files early, but a second
-    # pass is still needed after child subvolumes are gone because Btrfs can
-    # leave ordinary empty mountpoint directories behind.
-    result.removed_ordinary_files += _local_remove_timeshift_metadata_files_in_destination_tree(path)
-
-    print(f"  deleting destination child subvolumes deepest-first: {len(child_subvolumes)}", flush=True)
-    for subvol in child_subvolumes:
+    print(f"  deleting destination subvolumes deepest-first: {len(result.subvolumes)}", flush=True)
+    for subvol in result.subvolumes:
         result.removed_stale_dirs += _local_remove_empty_child_dirs(subvol, sudo)
         try:
             btrfs.delete_local_subvolume(Path(subvol), sudo, btrfs_command)
@@ -484,24 +283,6 @@ def _delete_local_tree(path: str, sudo: str, btrfs_command: str, *, dry_run: boo
                 result.removed_stale_dirs += 1
         except Exception as exc:
             result.errors.append(f"failed deleting local subvolume {subvol}: {exc}")
-
-    # Second pass requested by the cleanup safety model:
-    # after all child subvolumes are deleted, remove any copied Timeshift
-    # metadata files and stale empty directories again before deleting the
-    # configured destination.target_root subvolume.
-    print("  cleaning destination metadata and empty directories before target root delete", flush=True)
-    result.removed_ordinary_files += _local_remove_timeshift_metadata_files_in_destination_tree(path)
-    result.removed_stale_dirs += _local_remove_empty_child_dirs(path, sudo)
-
-    if root_subvolume:
-        print("  deleting destination target_root subvolume", flush=True)
-        try:
-            btrfs.delete_local_subvolume(Path(root_subvolume), sudo, btrfs_command)
-            result.deleted_subvolumes += 1
-            if _local_remove_stale_path(root_subvolume, sudo):
-                result.removed_stale_dirs += 1
-        except Exception as exc:
-            result.errors.append(f"failed deleting local subvolume {root_subvolume}: {exc}")
 
     if not result.root_is_subvolume and Path(path).exists():
         rm = _run_quiet(sudo_prefix(sudo) + ["rm", "-rf", "--", path])
@@ -645,22 +426,32 @@ def _delete_source_tree(
         )
         return result
 
-    # Source-side sudoers should only need passwordless timeshift/btrfs.  Check
-    # existence with sudo btrfs first, because source.cache_root is expected to
-    # be an app-owned Btrfs subvolume and a plain remote ``test -e`` can be a
-    # false negative on SSH sources.  The shell check is only a fallback for
-    # ordinary user-visible leftovers.
-    print(f"  checking source path existence with Btrfs first: {path}", flush=True)
-    exists, is_subvolume, exists_detail = _source_destroy_path_status(source, path, sudo, btrfs_command)
-    if exists is None:
-        result.errors.append(f"could not check source path existence: {exists_detail}")
-        return result
-    result.exists = exists
-    result.root_is_subvolume = is_subvolume
-    if not result.exists:
-        return result
-    print(f"  source path status: {exists_detail}", flush=True)
+    # Source-side sudoers should only need passwordless timeshift/btrfs. Prefer
+    # sudo Btrfs metadata for source.cache_root existence, because the source
+    # shell user may not have ordinary directory traversal permission for the
+    # app-owned cache root. Fall back to a plain shell ``test -e`` only when the
+    # target is not visible as a Btrfs subvolume, preserving the no-sudo-test
+    # policy for ordinary source-side paths.
+    print(f"  checking source Btrfs subvolume status: {path}", flush=True)
+    root_meta = _source_subvolume_meta(source, path, sudo, btrfs_command)
+    result.root_is_subvolume = root_meta is not None
+    if result.root_is_subvolume:
+        result.exists = True
+    else:
+        print(f"  checking source shell path existence: {path}", flush=True)
+        exists, exists_error = _source_exists(source, path, sudo)
+        if exists is None:
+            result.errors.append(f"could not check source path existence: {exists_error}")
+            return result
+        result.exists = exists
+        if not result.exists:
+            return result
 
+    # Discover nested subvolumes by walking ``btrfs subvolume list -o`` from
+    # each child. The walk is intentionally more expensive than the normal sync
+    # metadata index because destroy-leftovers must delete nested cache
+    # subvolumes such as ``send-cache/<snapshot>/@`` before deleting their
+    # parent snapshot container subvolume.
     print(f"  discovering source Btrfs subvolumes below: {path}", flush=True)
     children = _collect_recursive_subvolumes(
         path,
@@ -668,26 +459,11 @@ def _delete_source_tree(
     )
     if children is None:
         if result.root_is_subvolume:
-            result.errors.append("could not recursively list source child subvolumes with btrfs subvolume list -o")
+            result.errors.append("could not recursively list source child subvolumes")
             return result
         children = []
 
-    layout_children, layout_errors = _source_cache_layout_subvolumes_batched(
-        source,
-        path,
-        sudo,
-        btrfs_command,
-        protected_snapshot_root=protected_snapshot_root,
-    )
-    result.errors.extend(layout_errors)
-    if layout_children is None:
-        layout_children = []
-
-    # Merge the generic Btrfs index with the cache-layout fallback. The fallback
-    # is important when SSH/Btrfs prints paths that cannot be converted back to
-    # absolute paths by the destination-side parser; an empty plan must not be
-    # considered a successful source cleanup while cache snapshots remain.
-    result.subvolumes = _sort_deepest_first(children + layout_children + ([path] if result.root_is_subvolume else []))
+    result.subvolumes = _sort_deepest_first(children + ([path] if result.root_is_subvolume else []))
     print(f"  discovered source subvolumes: {len(result.subvolumes)}", flush=True)
     if dry_run:
         return result
@@ -704,7 +480,7 @@ def _delete_source_tree(
     result.removed_stale_dirs += stale_removed
     result.errors.extend(errors)
 
-    exists_after, _is_subvolume_after, after_detail = _source_destroy_path_status(source, path, sudo, btrfs_command)
+    exists_after, _ = _source_exists(source, path, sudo)
     if not result.root_is_subvolume and exists_after:
         if btrfs.path_is_same_or_under(path, protected_snapshot_root):
             result.errors.append(
@@ -720,20 +496,6 @@ def _delete_source_tree(
                 f"failed removing source directory tree {path} without sudo: "
                 f"{rm.stderr.strip() or rm.stdout.strip()}"
             )
-
-    # Final verification is mandatory. A source-cache cleanup that discovers no
-    # subvolumes or cannot delete them must not report success while the
-    # app-owned cache root still exists.  Verify with Btrfs first so SSH source
-    # cleanup cannot falsely report success from a plain shell ``test -e`` miss.
-    exists_final, _is_subvolume_final, final_detail = _source_destroy_path_status(source, path, sudo, btrfs_command)
-    if exists_final:
-        result.errors.append(
-            f"source cleanup incomplete; path still exists after destroy attempt: {path} ({final_detail}). "
-            "The delete plan may not have discovered the source cache subvolumes, "
-            "or the source user could not remove stale ordinary directories/files."
-        )
-    elif exists_final is None:
-        result.errors.append(f"could not verify source path was removed after cleanup: {final_detail}")
     return result
 
 
@@ -770,7 +532,6 @@ def _print_result(result: DestroyResult, *, dry_run: bool) -> None:
         print(f"  result:     {action} ordinary files/directories after subvolumes")
         return
     print(f"  deleted subvolumes: {result.deleted_subvolumes}")
-    print(f"  removed ordinary files: {result.removed_ordinary_files}")
     print(f"  removed stale directories: {result.removed_stale_dirs}")
     print(f"  removed ordinary tree: {'yes' if result.removed_tree or result.root_is_subvolume else 'no'}")
     if result.errors:

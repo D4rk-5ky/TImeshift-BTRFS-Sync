@@ -3,6 +3,9 @@
 - Automatic manual/on-demand snapshot creation is gated by preflight, optional state recovery, source identity checks, and a sync-viability check.
 - On existing destinations, the app must prove a UUID-confirmed sync floor and a usable incremental parent before running `timeshift --create`.
 - No new config or CLI option was added for this safety behavior; it is mandatory when `manual_snapshot.enabled = true`.
+- No new config or CLI option was added for quiet optional Btrfs existence probes; required failures still print and log stderr.
+- No new config or CLI option was added for retention source-cache parent cleanup. Prune now always performs a final live Btrfs child-subvolume check before deleting an app-owned timestamp cache parent.
+- No new config or CLI option was added for snapshot-level sync recovery. The recovery is mandatory: incomplete current versions are retried when all configured source subvolumes still exist, and stale versions are removed/skipped when the source Timeshift snapshot vanished.
 
 # Config and CLI audit for current release
 
@@ -413,23 +416,12 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 
 When `state.json` is missing or empty and destination snapshots already exist, `sync` may rebuild state from exact Btrfs UUID matches. Destination names alone are not trusted, and existing unadopted destination subvolumes are not deleted automatically.
 
+For normal non-empty state files, `sync` also performs guarded recovery for incomplete current-version snapshots. If a snapshot date is missing one configured source subvolume under `source.snapshot_root`, it is treated as vanished/stale and the matching app-owned cache version, destination version, and state entry are removed before continuing. If all configured source subvolumes still exist but the current destination/state version is partial, the app clears the failed cache/destination/state version so the same date can be transferred again.
+
 
 ## Maintenance and destructive command logging
 
 - `destroy-leftovers`, `clear-state`, and `delete-lock` use the same `_with_logging()` wrapper as normal app commands when `log_dir` is enabled.
 - `destroy-leftovers` must not write logs into a selected delete target. If the configured `log_dir` is inside a target being destroyed, the CLI chooses a survivor log directory outside that target.
+- `destroy-leftovers --delete-source` detects an existing Btrfs `source.cache_root` with configured sudo+Btrfs before relying on source-shell path visibility, while still avoiding source-side sudo `test`, `rm`, `find`, `chmod`, and `chown`.
 - `clear-state` and `delete-lock` operate only on exact configured files and still produce logs for dry-run and real execution.
-
-
-## Timeshift folder-name resolution
-
-Source discovery resolves actual snapshot date-folder names from the bulk Btrfs snapshot-root index when `timeshift --list` reports a timestamp that differs by a few seconds. This keeps metadata staging, cache paths, destination paths, and state entries aligned with the real filesystem path.
-
-## Destroy destination cleanup order
-
-`destroy-leftovers --delete-destination` now explicitly removes destination child subvolumes first, then removes copied Timeshift metadata files and empty ordinary directories again before deleting `destination.target_root`. This preserves the Btrfs-first deletion model and avoids `rm -rf` fallback for Btrfs-subvolume roots.
-
-
-## Destroy-leftovers source-cache discovery safety
-
-`destroy-leftovers --delete-source` now combines Btrfs listing with a source-side cache-layout scan. This prevents a successful-looking run when SSH/Btrfs listed paths cannot be converted back to absolute paths and the app-owned cache root still contains timestamp cache subvolumes. Missing `info.json` files do not block deletion; present ordinary metadata files are only relevant for destination/date-folder removal.

@@ -14,7 +14,7 @@ The important performance/safety rule in this version is:
 from __future__ import annotations
 
 from pathlib import Path
-from . import btrfs, timeshift, metadata
+from . import btrfs, timeshift
 from . import preflight, remote_index
 from .commands import stream_pipeline
 from .config import AppConfig
@@ -22,7 +22,15 @@ from .models import SnapshotMeta, SubvolumeMeta, tags_text
 from .source import SourceRunner
 from .log import emit_success_summary
 from .retention import initial_sync_keep_names
-from .state import latest_synced_before, mark_subvolume_synced, refresh_state_metadata_and_report, resolve_destination_path, save_state, snapshot_is_synced
+from .state import (
+    latest_synced_before,
+    mark_subvolume_synced,
+    refresh_state_metadata_and_report,
+    remove_snapshot_from_state,
+    resolve_destination_path,
+    save_state,
+    snapshot_is_synced,
+)
 
 
 class SyncError(RuntimeError):
@@ -509,91 +517,6 @@ def _ensure_source_send_path(
     )
 
 
-def _sync_snapshot_metadata_files(
-    config: AppConfig,
-    source: SourceRunner,
-    snapshot: SnapshotMeta,
-    *,
-    dry_run: bool,
-    reason: str,
-    source_cache_index: remote_index.BtrfsIndex | None = None,
-) -> None:
-    """Copy ordinary Timeshift metadata files for one snapshot date folder.
-
-    Btrfs send/receive transfers only subvolumes. Timeshift also stores
-    ordinary files such as ``info.json`` beside ``@`` and ``@home``. This copy
-    step runs independently from subvolume state so a later run can repair a
-    missing ``info.json`` even when state.json says the subvolumes are already
-    synced or when state.json had to be rebuilt.
-
-    When ``source.cache_root`` is configured, ordinary metadata is first staged
-    into the per-snapshot source send-cache folder. SSH runs often stream the
-    Btrfs payload from that cache folder, so keeping ``info.json`` beside the
-    cached read-only subvolumes makes metadata repair/recovery use the same
-    app-owned source-side snapshot container instead of relying only on the live
-    Timeshift date folder.
-    """
-
-    target_dir = _target_snapshot_dir(config, snapshot.name)
-    metadata_source_dir = snapshot.path
-    staged = None
-    try:
-        if config.source.cache_root:
-            cache_parent = btrfs.readonly_cache_parent_path(config.source.cache_root, snapshot.name)
-            if dry_run:
-                staged = metadata.MetadataStageResult(copied=[], unchanged=[], skipped=True)
-            else:
-                btrfs.source_ensure_cache_parent(
-                    source,
-                    sudo=config.source.sudo,
-                    btrfs_command=config.source.btrfs_command,
-                    cache_root=config.source.cache_root,
-                    cache_parent=cache_parent,
-                    cache_index=source_cache_index,
-                )
-                staged = metadata.stage_snapshot_metadata_files_to_cache(
-                    source,
-                    source_snapshot_dir=snapshot.path,
-                    cache_snapshot_dir=cache_parent,
-                    dry_run=dry_run,
-                )
-                metadata_source_dir = cache_parent
-
-        result = metadata.copy_snapshot_metadata_files(
-            source,
-            snapshot=snapshot,
-            destination_snapshot_dir=target_dir,
-            dry_run=dry_run,
-            source_snapshot_dir=metadata_source_dir,
-            staged=staged,
-        )
-    except Exception as exc:
-        raise SyncError(f"Failed copying Timeshift metadata files for {snapshot.name}: {exc}") from exc
-
-    if result.copied or result.unchanged or result.missing or staged:
-        _human_blank()
-        print(f"  metadata files: {reason}")
-        if config.source.cache_root:
-            cache_parent = btrfs.readonly_cache_parent_path(config.source.cache_root, snapshot.name)
-            if dry_run:
-                print(f"    would stage source metadata into cache: {cache_parent}")
-            elif staged and staged.copied:
-                print(f"    staged in source cache: {', '.join(staged.copied)}")
-            elif staged and staged.unchanged:
-                print(f"    source cache unchanged: {', '.join(staged.unchanged)}")
-        if dry_run:
-            if result.copied:
-                print(f"    would copy/check: {', '.join(result.copied)}")
-        else:
-            if result.copied:
-                print(f"    copied/updated: {', '.join(result.copied)}")
-            if result.unchanged:
-                print(f"    destination unchanged: {', '.join(result.unchanged)}")
-        if result.missing:
-            print(f"    warning: missing on source/cache: {', '.join(result.missing)}")
-        _human_blank()
-
-
 def _cleanup_incomplete_destination_receive(
     config: AppConfig,
     dest_path: Path,
@@ -661,6 +584,458 @@ def _cleanup_incomplete_destination_receive(
     print("  retrying this snapshot/subvolume at its current oldest-to-newest queue position")
     _human_rule("---")
 
+
+
+def _source_cache_live_child_paths(
+    config: AppConfig,
+    source: SourceRunner,
+    parent_dir: str,
+) -> list[str] | None:
+    """Return live source-cache child subvolumes below one date parent.
+
+    The run-start Btrfs indexes are intentionally not trusted for recovery,
+    because this function is used exactly when an hourly snapshot or failed
+    cache entry may have disappeared during the same run. A fresh
+    ``btrfs subvolume list -o`` result is converted back to absolute paths and
+    restricted to source.cache_root before any destructive action is allowed.
+    """
+
+    if not config.source.cache_root or not btrfs.path_is_under_cache(parent_dir, config.source.cache_root):
+        return []
+    listed_paths = btrfs.source_list_child_subvolumes(
+        source,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        path=parent_dir,
+    )
+    if listed_paths is None:
+        return None
+
+    children: set[str] = set()
+    for listed_path in listed_paths:
+        for root in (parent_dir, config.source.cache_root):
+            absolute = remote_index.listed_path_to_absolute(root, listed_path)
+            if (
+                absolute
+                and absolute != parent_dir
+                and btrfs.path_is_under_cache(absolute, config.source.cache_root)
+                and btrfs.path_is_under_cache(absolute, parent_dir)
+            ):
+                children.add(absolute)
+                break
+        else:
+            if "/" not in listed_path and listed_path not in {".", "..", ""}:
+                absolute = str(Path(parent_dir) / listed_path)
+                if btrfs.path_is_under_cache(absolute, parent_dir):
+                    children.add(absolute)
+    return sorted(children, key=lambda item: (item.count("/"), item), reverse=True)
+
+
+def _cleanup_source_cache_snapshot_version(
+    config: AppConfig,
+    source: SourceRunner,
+    snapshot_name: str,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
+) -> None:
+    """Delete only the app-owned source send-cache tree for one snapshot date.
+
+    This is used by sync recovery, not retention. If a snapshot transfer is
+    partial or the source Timeshift snapshot vanished mid-run, the current date
+    cache must not remain as a future parent candidate. The helper deletes live
+    child subvolumes deepest-first, then the cache date parent when it is empty.
+    It never targets source.snapshot_root and never uses source-side ``rm -rf``.
+    """
+
+    if not config.source.cache_root:
+        return
+    parent_dir = btrfs.readonly_cache_parent_path(config.source.cache_root, snapshot_name)
+    if btrfs.path_is_same_or_under(parent_dir, config.source.snapshot_root):
+        raise SyncError(f"Refusing recovery cleanup below Timeshift source.snapshot_root: {parent_dir}")
+
+    parent_meta = remote_index.refresh_source_path(
+        source_cache_index,
+        source,
+        parent_dir,
+        name=Path(parent_dir).name,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+    )
+    if not parent_meta:
+        if source_cache_index is not None:
+            source_cache_index.remove_tree(parent_dir)
+        print(f"  recovery source cache: already gone {parent_dir}")
+        return
+
+    live_children = _source_cache_live_child_paths(config, source, parent_dir)
+    if live_children is None:
+        raise SyncError(f"Could not list source send-cache children for recovery cleanup: {parent_dir}")
+
+    # Also include the configured direct child names in case Btrfs list output
+    # was unusual but targeted metadata can still see a child path.
+    for subvol_name in config.source.subvolumes:
+        child = btrfs.readonly_cache_path(config.source.cache_root, snapshot_name, subvol_name)
+        if child not in live_children:
+            child_meta = remote_index.refresh_source_path(
+                source_cache_index,
+                source,
+                child,
+                name=subvol_name,
+                sudo=config.source.sudo,
+                btrfs_command=config.source.btrfs_command,
+            )
+            if child_meta:
+                live_children.append(child)
+    live_children = sorted(set(live_children), key=lambda item: (item.count("/"), item), reverse=True)
+
+    for child in live_children:
+        if btrfs.path_is_same_or_under(child, config.source.snapshot_root):
+            raise SyncError(f"Refusing recovery cleanup of Timeshift-owned source path: {child}")
+        print(f"  recovery source cache child: deleting {child}")
+        result = btrfs.source_delete_subvolume(
+            source,
+            config.source.sudo,
+            config.source.btrfs_command,
+            child,
+            protected_snapshot_root=config.source.snapshot_root,
+            check=False,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+            raise SyncError(f"Source send-cache recovery cleanup failed for {child}: {detail}")
+        if source_cache_index is not None:
+            source_cache_index.remove_tree(child)
+
+    empty = btrfs.source_cache_is_empty(
+        source,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        cache_root=config.source.cache_root,
+        path=parent_dir,
+    )
+    if empty is True:
+        print(f"  recovery source cache parent: deleting {parent_dir}")
+        result = btrfs.source_delete_subvolume(
+            source,
+            config.source.sudo,
+            config.source.btrfs_command,
+            parent_dir,
+            protected_snapshot_root=config.source.snapshot_root,
+            check=False,
+            remove_empty_child_dirs=True,
+        )
+        if result.returncode != 0:
+            detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+            raise SyncError(f"Source send-cache parent recovery cleanup failed for {parent_dir}: {detail}")
+        if source_cache_index is not None:
+            source_cache_index.remove_tree(parent_dir)
+        return
+    if empty is None:
+        raise SyncError(f"Could not verify source send-cache parent is empty: {parent_dir}")
+    raise SyncError(f"Source send-cache parent still has child subvolumes after recovery cleanup: {parent_dir}")
+
+
+def _remove_empty_destination_dirs_up_to(parent: Path, stop_root: Path) -> None:
+    """Remove empty ordinary directories upward without crossing stop_root."""
+
+    stop_root = stop_root.resolve()
+    current = parent
+    while True:
+        try:
+            resolved = current.resolve()
+        except FileNotFoundError:
+            resolved = current.parent.resolve()
+        if resolved == stop_root or not str(resolved).startswith(str(stop_root) + "/"):
+            return
+        try:
+            current.rmdir()
+        except FileNotFoundError:
+            current = current.parent
+            continue
+        except OSError:
+            return
+        current = current.parent
+
+
+def _cleanup_destination_snapshot_version(
+    config: AppConfig,
+    snapshot_name: str,
+    destination_index: remote_index.BtrfsIndex | None = None,
+) -> None:
+    """Delete the local destination version for one snapshot date safely.
+
+    Recovery removes the whole ``snapshots/<date>`` version, not only the
+    currently failing subvolume. Mixing a newly received ``@home`` with an older
+    ``@`` from the same date would create a misleading partial backup. Only
+    Btrfs subvolumes and empty ordinary directories are removed.
+    """
+
+    snapshot_dir = _target_snapshot_dir(config, snapshot_name)
+    if not snapshot_dir.exists():
+        if destination_index is not None:
+            destination_index.remove_tree(snapshot_dir)
+        print(f"  recovery destination: already gone {snapshot_dir}")
+        return
+
+    live_index = remote_index.build_local_btrfs_index(
+        snapshot_dir,
+        sudo=config.destination.sudo,
+        btrfs_command=config.destination.btrfs_command,
+        include_root=True,
+        required=False,
+    )
+    candidate_paths = set(live_index.child_paths(snapshot_dir))
+    for subvol_name in config.source.subvolumes:
+        candidate_paths.add(str(_dest_subvolume_path(config, snapshot_name, subvol_name)))
+    # If the date folder itself is a Btrfs subvolume in a future layout, delete
+    # it after children. In the current layout it is normally an ordinary dir.
+    if live_index.contains(snapshot_dir):
+        candidate_paths.add(str(snapshot_dir))
+
+    for path_text in sorted(candidate_paths, key=lambda item: (item.count("/"), item), reverse=True):
+        path = Path(path_text)
+        if not remote_index.is_under(path, snapshot_dir):
+            raise SyncError(f"Refusing destination recovery cleanup outside snapshot date folder: {path}")
+        meta = remote_index.refresh_local_path(
+            destination_index,
+            path,
+            name=path.name,
+            sudo=config.destination.sudo,
+            btrfs_command=config.destination.btrfs_command,
+        )
+        if meta:
+            print(f"  recovery destination subvolume: deleting {path}")
+            btrfs.delete_local_subvolume(path, config.destination.sudo, config.destination.btrfs_command)
+            if destination_index is not None:
+                destination_index.remove_tree(path)
+            continue
+        if path.exists() and path.is_dir():
+            try:
+                path.rmdir()
+                print(f"  recovery destination empty dir: removed {path}")
+            except OSError:
+                # It may be a non-empty ordinary mountpoint directory left after
+                # Btrfs subvolume deletion. Keep it for the final parent check.
+                pass
+
+    if snapshot_dir.exists():
+        meta = remote_index.refresh_local_path(
+            destination_index,
+            snapshot_dir,
+            name=snapshot_dir.name,
+            sudo=config.destination.sudo,
+            btrfs_command=config.destination.btrfs_command,
+        )
+        if meta:
+            print(f"  recovery destination date subvolume: deleting {snapshot_dir}")
+            btrfs.delete_local_subvolume(snapshot_dir, config.destination.sudo, config.destination.btrfs_command)
+            if destination_index is not None:
+                destination_index.remove_tree(snapshot_dir)
+        else:
+            try:
+                snapshot_dir.rmdir()
+                print(f"  recovery destination date dir: removed {snapshot_dir}")
+            except OSError as exc:
+                raise SyncError(
+                    "Destination snapshot date folder is not empty after Btrfs recovery cleanup. "
+                    "Only Btrfs subvolumes and empty ordinary directories are removed automatically:\n"
+                    f"  {snapshot_dir}"
+                ) from exc
+
+    if destination_index is not None:
+        destination_index.remove_tree(snapshot_dir)
+    _remove_empty_destination_dirs_up_to(snapshot_dir.parent, config.destination.target_root / "snapshots")
+
+
+def _refresh_snapshot_source_subvolumes_live(
+    config: AppConfig,
+    source: SourceRunner,
+    snapshot: SnapshotMeta,
+    source_snapshot_index: remote_index.BtrfsIndex | None,
+) -> tuple[dict[str, SubvolumeMeta], list[tuple[str, str]]]:
+    """Live-probe every configured source subvolume for one Timeshift snapshot."""
+
+    found: dict[str, SubvolumeMeta] = {}
+    missing: list[tuple[str, str]] = []
+    for subvol_name in config.source.subvolumes:
+        path = snapshot.subvolumes.get(subvol_name).path if subvol_name in snapshot.subvolumes else _expected_original_source_path(config, snapshot.name, subvol_name)
+        meta = remote_index.refresh_source_path(
+            source_snapshot_index,
+            source,
+            path,
+            name=subvol_name,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+        )
+        if meta:
+            found[subvol_name] = meta
+        else:
+            missing.append((subvol_name, path))
+    return found, missing
+
+
+def _snapshot_destination_has_any_path(config: AppConfig, snapshot_name: str) -> bool:
+    """Return True when the destination date folder or configured children exist."""
+
+    snapshot_dir = _target_snapshot_dir(config, snapshot_name)
+    if snapshot_dir.exists():
+        return True
+    return any(_dest_subvolume_path(config, snapshot_name, name).exists() for name in config.source.subvolumes)
+
+
+def _snapshot_state_is_complete_with_destination(config: AppConfig, state: dict, snapshot_name: str) -> bool:
+    """Return True only when state and destination contain every configured subvolume."""
+
+    expected = list(config.source.subvolumes)
+    return snapshot_is_synced(state, snapshot_name, expected) and _snapshot_destination_paths_exist(config, snapshot_name, expected)
+
+
+def _recover_snapshot_version(
+    config: AppConfig,
+    source: SourceRunner,
+    state: dict,
+    snapshot_name: str,
+    *,
+    reason: str,
+    source_still_exists: bool,
+    dry_run: bool,
+    source_cache_index: remote_index.BtrfsIndex | None,
+    destination_index: remote_index.BtrfsIndex | None,
+) -> None:
+    """Remove stale current-version traces from cache, destination, and state."""
+
+    _human_blank()
+    print("SNAPSHOT RECOVERY")
+    print(f"  snapshot: {snapshot_name}")
+    print(f"  reason:   {reason}")
+    if source_still_exists:
+        print("  source:   configured subvolumes still exist in source.snapshot_root")
+        print("  action:   clear failed current cache/destination/state, then recreate cache and transfer again")
+    else:
+        print("  source:   missing from source.snapshot_root")
+        print("  action:   remove stale cache/destination/state for this snapshot and continue")
+
+    if dry_run:
+        print("  dry-run:  would clean source cache, destination version, and state.json")
+        _human_rule("---")
+        return
+
+    _cleanup_source_cache_snapshot_version(config, source, snapshot_name, source_cache_index)
+    _cleanup_destination_snapshot_version(config, snapshot_name, destination_index)
+    if snapshot_name in state.get("snapshots", {}):
+        remove_snapshot_from_state(state, snapshot_name)
+        save_state(config.state_file, state)
+        print("  state:    removed snapshot entry from state.json")
+    else:
+        print("  state:    no snapshot entry to remove")
+    print("  indexes:  source-cache and destination metadata cache updated")
+    _human_rule("---")
+
+
+def _prepare_snapshot_for_transfer_or_recover(
+    config: AppConfig,
+    source: SourceRunner,
+    state: dict,
+    snapshot: SnapshotMeta,
+    *,
+    dry_run: bool,
+    source_cache_index: remote_index.BtrfsIndex | None,
+    source_snapshot_index: remote_index.BtrfsIndex | None,
+    destination_index: remote_index.BtrfsIndex | None,
+) -> bool:
+    """Return True when a snapshot can be transferred, False when skipped.
+
+    Partial snapshot versions are recovered at the snapshot level. This keeps
+    ``@`` and ``@home`` paired by the same Timeshift date: if either configured
+    source subvolume vanished, the whole failed version is removed from cache,
+    destination, and state. If all source subvolumes still exist, any failed
+    destination/current-cache version is cleared so the transfer can start over.
+    """
+
+    expected = list(config.source.subvolumes)
+    state_complete = snapshot_is_synced(state, snapshot.name, expected)
+    dest_complete = _snapshot_destination_paths_exist(config, snapshot.name, expected)
+    has_state = snapshot.name in state.get("snapshots", {})
+    has_destination = _snapshot_destination_has_any_path(config, snapshot.name)
+
+    # Already-complete snapshots do not need source probing. Timeshift may have
+    # pruned old hourly sources, but a complete destination backup remains valid
+    # until normal destination retention deletes it.
+    if state_complete and dest_complete:
+        return True
+
+    found, missing = _refresh_snapshot_source_subvolumes_live(config, source, snapshot, source_snapshot_index)
+    if missing:
+        missing_text = ", ".join(f"{name}={path}" for name, path in missing)
+        _recover_snapshot_version(
+            config,
+            source,
+            state,
+            snapshot.name,
+            reason="source Timeshift subvolume missing during retry/preflight: " + missing_text,
+            source_still_exists=False,
+            dry_run=dry_run,
+            source_cache_index=source_cache_index,
+            destination_index=destination_index,
+        )
+        return False
+
+    # Replace path-only discovery records with live metadata before parent
+    # selection and send-cache creation. This also removes stale index entries
+    # for hourly snapshots that disappeared and then reappeared in Timeshift.
+    snapshot.subvolumes = found
+
+    if has_state or has_destination:
+        reason_parts: list[str] = []
+        if has_state and not state_complete:
+            reason_parts.append("state.json has only a partial current snapshot")
+        if has_destination and not dest_complete:
+            reason_parts.append("destination version is missing at least one configured subvolume")
+        if reason_parts:
+            _recover_snapshot_version(
+                config,
+                source,
+                state,
+                snapshot.name,
+                reason="; ".join(reason_parts),
+                source_still_exists=True,
+                dry_run=dry_run,
+                source_cache_index=source_cache_index,
+                destination_index=destination_index,
+            )
+    return True
+
+
+def _recover_stale_state_snapshots_missing_from_source(
+    config: AppConfig,
+    source: SourceRunner,
+    state: dict,
+    source_by_name: dict[str, SnapshotMeta],
+    *,
+    dry_run: bool,
+    source_cache_index: remote_index.BtrfsIndex | None,
+    destination_index: remote_index.BtrfsIndex | None,
+) -> int:
+    """Clean incomplete state entries whose Timeshift source name is gone."""
+
+    recovered = 0
+    for snapshot_name in sorted(list(state.get("snapshots", {}))):
+        if snapshot_name in source_by_name:
+            continue
+        if _snapshot_state_is_complete_with_destination(config, state, snapshot_name):
+            continue
+        _recover_snapshot_version(
+            config,
+            source,
+            state,
+            snapshot_name,
+            reason="incomplete state entry has no matching source Timeshift snapshot",
+            source_still_exists=False,
+            dry_run=dry_run,
+            source_cache_index=source_cache_index,
+            destination_index=destination_index,
+        )
+        recovered += 1
+    return recovered
 
 def _read_local_destination_parent_metadata(
     config: AppConfig,
@@ -1177,19 +1552,6 @@ def _recover_state_from_existing_destination(
                 skipped.append(f"{snapshot_name}/{subvolume_name}: {reason}")
                 continue
 
-            # If state.json is missing and the destination already has a copied
-            # Timeshift info.json, use it to enrich recovered state metadata.
-            # This never proves chain identity; Btrfs UUID matching above is
-            # still the only adoption rule. It only restores tags/comment fields
-            # for retention and human reporting when state had to be rebuilt.
-            info_tags, info_comment, info_created = metadata.destination_info_metadata(_target_snapshot_dir(config, snapshot_name))
-            if info_tags and not source_snapshot.tags:
-                source_snapshot.tags = info_tags
-            if info_comment and not source_snapshot.comment:
-                source_snapshot.comment = info_comment
-            if info_created and not source_snapshot.created:
-                source_snapshot.created = info_created
-
             synthetic_snapshot = source_snapshot
             parent_snapshot, parent_source_path = parent_by_subvolume.get(subvolume_name, (None, None))
             # Always adopt into the in-memory state. In dry-run this lets the
@@ -1639,6 +2001,19 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             destination_index=destination_index,
         )
 
+    stale_recovered = _recover_stale_state_snapshots_missing_from_source(
+        config,
+        source,
+        state,
+        source_by_name,
+        dry_run=dry_run,
+        source_cache_index=source_cache_index,
+        destination_index=destination_index,
+    )
+    if stale_recovered:
+        print(f"Recovered {stale_recovered} stale incomplete state snapshot(s) before manual-snapshot checks.")
+        _human_rule("----")
+
     _verify_sync_viability_before_manual_snapshot(
         config,
         source,
@@ -1686,6 +2061,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     if refreshed_metadata:
         _human_rule("----")
 
+
     sync_floor_name: str | None = None
     if only_snapshot:
         snapshots_to_sync = [source_by_name[only_snapshot]] if only_snapshot in source_by_name else []
@@ -1717,20 +2093,6 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     transferred = 0
     already_synced = 0
     sync_events: list[dict] = []
-    metadata_checked_snapshots: set[str] = set()
-
-    def ensure_snapshot_metadata(snapshot: SnapshotMeta, reason: str) -> None:
-        if snapshot.name in metadata_checked_snapshots:
-            return
-        _sync_snapshot_metadata_files(
-            config,
-            source,
-            snapshot,
-            dry_run=dry_run,
-            reason=reason,
-            source_cache_index=source_cache_index,
-        )
-        metadata_checked_snapshots.add(snapshot.name)
 
     # Tracks source parent paths that were successfully sent and received during
     # this run. When verify_incremental_parent_once_per_run is true, those freshly
@@ -1745,14 +2107,12 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             skipped_by_floor += 1
             continue
 
-        expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
+        expected = list(config.source.subvolumes)
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
             if _snapshot_destination_paths_exist(config, snapshot.name, expected):
-                ensure_snapshot_metadata(snapshot, "checking existing synced snapshot metadata")
                 already_synced += len(expected)
                 continue
-            print(f"Snapshot {snapshot.name}: state says synced, but at least one destination path is missing; retrying missing path(s).")
-            ensure_snapshot_metadata(snapshot, "state exists but destination subvolume is missing; metadata is repaired independently")
+            print(f"Snapshot {snapshot.name}: state says synced, but at least one destination path is missing; recovering the whole date version before retry.")
             _human_blank()
         if limit is not None and transferred >= limit:
             break
@@ -1764,7 +2124,17 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             print(f"  would ensure local directory: {target_dir}")
             _human_blank()
 
-        ensure_snapshot_metadata(snapshot, "copy Timeshift ordinary metadata beside received subvolumes")
+        if not _prepare_snapshot_for_transfer_or_recover(
+            config,
+            source,
+            state,
+            snapshot,
+            dry_run=dry_run,
+            source_cache_index=source_cache_index,
+            source_snapshot_index=snapshot_root_btrfs_index,
+            destination_index=destination_index,
+        ):
+            continue
 
         for subvol_name in config.source.subvolumes:
             # Incomplete destination cleanup is intentionally performed here,
@@ -1808,18 +2178,60 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 source_snapshot_index=snapshot_root_btrfs_index,
                 destination_index=destination_index,
             )
-            current_send_path = (
-                _preview_send_path(config, snapshot.name, subvolume)
-                if dry_run
-                else _ensure_source_send_path(
-                    config,
-                    source,
-                    snapshot.name,
-                    subvolume,
-                    source_cache_index,
-                    snapshot_root_btrfs_index,
-                )
-            )
+            if dry_run:
+                current_send_path = _preview_send_path(config, snapshot.name, subvolume)
+            else:
+                try:
+                    current_send_path = _ensure_source_send_path(
+                        config,
+                        source,
+                        snapshot.name,
+                        subvolume,
+                        source_cache_index,
+                        snapshot_root_btrfs_index,
+                    )
+                except Exception as exc:
+                    found, missing = _refresh_snapshot_source_subvolumes_live(
+                        config,
+                        source,
+                        snapshot,
+                        snapshot_root_btrfs_index,
+                    )
+                    if missing:
+                        missing_text = ", ".join(f"{name}={path}" for name, path in missing)
+                        _recover_snapshot_version(
+                            config,
+                            source,
+                            state,
+                            snapshot.name,
+                            reason="source disappeared while creating send-cache: " + missing_text,
+                            source_still_exists=False,
+                            dry_run=dry_run,
+                            source_cache_index=source_cache_index,
+                            destination_index=destination_index,
+                        )
+                        break
+                    snapshot.subvolumes = found
+                    _recover_snapshot_version(
+                        config,
+                        source,
+                        state,
+                        snapshot.name,
+                        reason=f"send-cache creation/probe failed even though source still exists: {exc}",
+                        source_still_exists=True,
+                        dry_run=dry_run,
+                        source_cache_index=source_cache_index,
+                        destination_index=destination_index,
+                    )
+                    subvolume = snapshot.subvolumes[subvol_name]
+                    current_send_path = _ensure_source_send_path(
+                        config,
+                        source,
+                        snapshot.name,
+                        subvolume,
+                        source_cache_index,
+                        snapshot_root_btrfs_index,
+                    )
             mode = "incremental" if parent_send_path else "full"
 
             if dry_run:

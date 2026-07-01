@@ -173,8 +173,23 @@ class RunLogger:
         if include_in_btrfs_out:
             self.btrfs_out(line)
 
-    def completed(self, cmd: list[str] | str, returncode: int, stdout: str, stderr: str) -> None:
-        """Record the output from a normal captured command."""
+    def completed(
+        self,
+        cmd: list[str] | str,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+        *,
+        log_stderr: bool = True,
+    ) -> None:
+        """Record the output from a normal captured command.
+
+        Some commands are intentional negative probes, such as checking whether
+        a not-yet-created source cache snapshot already exists. Those callers
+        pass ``log_stderr=False`` so expected Btrfs "not found" text does not
+        create a noisy .err file or look like a real failure. The command and
+        return code are still kept in .log.
+        """
 
         self.command("COMMAND", cmd)
         self.info(f"RETURN CODE: {returncode}")
@@ -182,9 +197,12 @@ class RunLogger:
             self.info("STDOUT:")
             self._write(self._log_fh, stdout if stdout.endswith("\n") else stdout + "\n")
         if stderr:
-            self.info("STDERR: see .err")
-            self.err("COMMAND STDERR: " + (cmd if isinstance(cmd, str) else shlex.join(cmd)))
-            self._write(self._err_fh, stderr if stderr.endswith("\n") else stderr + "\n")
+            if log_stderr:
+                self.info("STDERR: see .err")
+                self.err("COMMAND STDERR: " + (cmd if isinstance(cmd, str) else shlex.join(cmd)))
+                self._write(self._err_fh, stderr if stderr.endswith("\n") else stderr + "\n")
+            else:
+                self.info("STDERR: suppressed by caller because this command is an expected probe")
 
     def pipeline_commands(self, left_cmd: list[str], right_cmd: list[str], middle_cmd: list[str] | None = None) -> None:
         """Record send/buffer/receive commands to the appropriate logs."""

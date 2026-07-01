@@ -106,13 +106,13 @@ def run_local(
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
-    Normal commands are recorded in .log when logging is enabled. Stderr is
-    copied to .err by the logger, but callers may set ``mirror_stderr=False``
-    for expected probe failures so harmless misses do not spam the terminal.
+    Normal commands are recorded in .log when logging is enabled. By default,
+    stderr is copied to .err and mirrored to the terminal when present.
 
-    The ``log_stderr`` parameter is kept for compatibility. File logging still
-    records command stderr when the run logger is active; ``mirror_stderr`` only
-    controls terminal mirroring.
+    Expected negative probes pass ``log_stderr=False`` and
+    ``mirror_stderr=False``. That keeps harmless Btrfs "not found" checks from
+    looking like real failures while still allowing required command failures to
+    surface with full stderr.
     """
 
     proc = subprocess.run(
@@ -128,13 +128,11 @@ def run_local(
 
     logger = runlog.get_logger()
     if logger:
-        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr)
+        logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr, log_stderr=log_stderr)
 
     # Make normal command stderr visible in the terminal too unless the caller
-    # marks it as an expected probe failure. Pipeline stderr is handled
-    # separately by stream_pipeline(), so this only affects captured commands
-    # such as btrfs subvolume show/delete. File logs still receive stderr via
-    # logger.completed() above when logging is enabled.
+    # deliberately marked the command as an expected negative probe. Pipeline
+    # stderr is handled separately by stream_pipeline().
     if proc.stderr and mirror_stderr:
         print(f"COMMAND STDERR: {shlex.join(cmd)}", file=runlog.terminal_stderr())
         print(proc.stderr.rstrip(), file=runlog.terminal_stderr())

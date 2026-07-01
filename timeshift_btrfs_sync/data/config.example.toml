@@ -1,4 +1,4 @@
-# timeshift-btrfs-sync v0.1.29 config
+# timeshift-btrfs-sync v0.1.38 config
 # Run this config on the BACKUP/DESTINATION machine.
 # source.mode = "ssh" pulls from another machine over SSH.
 # source.mode = "local" copies from Timeshift snapshots on this same machine and skips SSH.
@@ -309,12 +309,9 @@ verify_incremental_parent_once_per_run = true
 # If that exact cache snapshot already exists, the app verifies it is a
 # read-only Btrfs subvolume with matching parent identity and reuses it instead
 # of trying to recreate it.
-# Ordinary Timeshift metadata files such as info.json are staged into
-# <cache_root>/<snapshot-name>/ before the destination copy. This keeps metadata
-# beside the app-owned read-only send-cache snapshots and lets later SSH/local
-# recovery runs repair missing destination info.json. The source user must be
-# able to read the Timeshift date folder and write ordinary metadata files into
-# the per-snapshot cache parent; source sudo remains limited to btrfs/timeshift.
+# destroy-leftovers checks cache_root with configured sudo+Btrfs before relying
+# on source-shell `test -e`, so the source user does not need ordinary directory
+# traversal permission just to prove the app-owned cache subvolume exists.
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 
@@ -328,8 +325,11 @@ create_readonly_cache = true
 # Safety invariant: source.snapshot_root and all Timeshift snapshots below it
 # are never delete candidates. Only paths inside source.cache_root may be cleaned.
 # The timestamp cache parent <cache_root>/<snapshot-name> is deleted only after
-# `btrfs subvolume list -o <cache_root>/<snapshot-name>` confirms no cached
-# child subvolumes remain below it.
+# a final live `btrfs subvolume list -o <cache_root>/<snapshot-name>` check and
+# cleanup confirms no cached child subvolumes remain below it. If Btrfs left
+# empty ordinary mountpoint directories behind after child deletion, the app
+# tries to remove only those empty directories with non-sudo `rmdir` before
+# retrying the parent Btrfs delete. It never uses source-side sudo rm/find.
 cleanup_superseded_cache = true
 
 # Optional Btrfs send compressed-data mode.
@@ -365,11 +365,7 @@ send_compressed_data = true
 # If you completely reset/start over with a new full sync, clean both folders.
 # Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.
 # Received @ and @home entries are Btrfs subvolumes, so delete those with
-# `btrfs subvolume delete` before removing the ordinary folders. The app also
-# copies ordinary Timeshift metadata files such as info.json into each
-# snapshots/<snapshot-name>/ folder. Prune and destroy-destination remove those
-# ordinary metadata files before removing the date folder so cleanup does not
-# fail because info.json keeps the directory non-empty.
+# `btrfs subvolume delete` before removing the ordinary folders.
 # If you are retiring this app setup entirely, use the dangerous explicit command:
 #   ts-btrfs destroy-leftovers --config ./config.toml --delete-both --dry-run
 # Real deletion additionally requires --run, --i-understand-this-destroys-data,

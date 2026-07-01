@@ -465,19 +465,10 @@ def refresh_source_path(
     name: str | None = None,
     sudo: str,
     btrfs_command: str,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Refresh one source path in an existing index after source create/delete work."""
 
-    meta = btrfs.source_get_subvolume_meta(
-        source,
-        path,
-        name or Path(path).name,
-        sudo,
-        btrfs_command,
-        required=False,
-        mirror_stderr=mirror_stderr,
-    )
+    meta = btrfs.source_get_subvolume_meta(source, path, name or Path(path).name, sudo, btrfs_command, required=False)
     if index is not None:
         if meta:
             index.add(meta)
@@ -494,20 +485,10 @@ def refresh_remote_path(
     name: str | None = None,
     sudo: str,
     btrfs_command: str,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Refresh one remote path in an existing index after create/delete-sensitive work."""
 
-    meta = btrfs.get_subvolume_meta(
-        "remote",
-        path,
-        name or Path(path).name,
-        sudo,
-        btrfs_command,
-        ssh=ssh,
-        required=False,
-        mirror_stderr=mirror_stderr,
-    )
+    meta = btrfs.get_subvolume_meta("remote", path, name or Path(path).name, sudo, btrfs_command, ssh=ssh, required=False)
     if index is not None:
         if meta:
             index.add(meta)
@@ -523,19 +504,10 @@ def refresh_local_path(
     name: str | None = None,
     sudo: str,
     btrfs_command: str,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Refresh one local path in an existing index after receive/delete-sensitive work."""
 
-    meta = btrfs.get_subvolume_meta(
-        "local",
-        path,
-        name or Path(path).name,
-        sudo,
-        btrfs_command,
-        required=False,
-        mirror_stderr=mirror_stderr,
-    )
+    meta = btrfs.get_subvolume_meta("local", path, name or Path(path).name, sudo, btrfs_command, required=False)
     if index is not None:
         if meta:
             index.add(meta)

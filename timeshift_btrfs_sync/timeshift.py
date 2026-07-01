@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
-import os
 import re
 from . import btrfs
 from .commands import quote_join, remote_double_quote, sudo_prefix
@@ -65,108 +63,6 @@ def parse_timeshift_list(output: str, snapshot_root: str) -> list[SnapshotMeta]:
     return sorted(snapshots, key=lambda s: s.name)
 
 
-def _snapshot_time(name: str) -> datetime | None:
-    """Return a datetime parsed from a Timeshift snapshot folder name."""
-
-    try:
-        return datetime.strptime(name, "%Y-%m-%d_%H-%M-%S")
-    except ValueError:
-        return None
-
-
-def _indexed_snapshot_subvolumes(snapshot_root: str, subvolumes: list[str], btrfs_index) -> dict[str, set[str]]:
-    """Return snapshot date folders and configured subvolumes present in an index.
-
-    Some Timeshift versions can print a creation timestamp in ``timeshift --list``
-    that differs by a few seconds from the actual snapshot directory name.  The
-    Btrfs index contains the real paths, so discovery uses it to resolve the
-    actual folder name before building paths for metadata staging and sending.
-    """
-
-    if btrfs_index is None:
-        return {}
-    root = os.path.normpath(str(snapshot_root)).rstrip("/")
-    found: dict[str, set[str]] = {}
-    wanted = set(subvolumes)
-    for raw_path in getattr(btrfs_index, "by_path", {}):
-        path = os.path.normpath(str(raw_path)).rstrip("/")
-        if path == root or not path.startswith(root + "/"):
-            continue
-        rel = path[len(root) + 1 :]
-        parts = rel.split("/")
-        if len(parts) < 2:
-            continue
-        snapshot_name, subvol_name = parts[0], parts[1]
-        if not SNAPSHOT_RE.fullmatch(snapshot_name):
-            continue
-        if subvol_name in wanted:
-            found.setdefault(snapshot_name, set()).add(subvol_name)
-    return found
-
-
-def _resolve_indexed_snapshot_name(parsed_name: str, indexed: dict[str, set[str]], subvolumes: list[str]) -> str:
-    """Resolve a Timeshift-list timestamp to the real indexed folder name.
-
-    Exact folder names are preferred. If the exact folder is absent, choose a
-    single indexed folder within a small time window that contains at least one
-    configured subvolume. This fixes cases where ``timeshift --list`` reports
-    e.g. ``06-20-20`` while the actual folder is ``06-20-23``. Ambiguous matches
-    are ignored so the app never guesses between multiple possible folders.
-    """
-
-    if not indexed or parsed_name in indexed:
-        return parsed_name
-    parsed_time = _snapshot_time(parsed_name)
-    if parsed_time is None:
-        return parsed_name
-    wanted = set(subvolumes)
-    candidates: list[tuple[float, int, str]] = []
-    for candidate, present in indexed.items():
-        candidate_time = _snapshot_time(candidate)
-        if candidate_time is None:
-            continue
-        delta = abs((candidate_time - parsed_time).total_seconds())
-        if delta > 120:
-            continue
-        score = len(wanted & present)
-        if score <= 0:
-            continue
-        candidates.append((delta, -score, candidate))
-    if not candidates:
-        return parsed_name
-    candidates.sort()
-    best = candidates[0]
-    # Refuse to guess when two indexed folders are equally plausible.
-    if len(candidates) > 1 and candidates[1][0] == best[0] and candidates[1][1] == best[1]:
-        return parsed_name
-    return best[2]
-
-
-def _resolve_snapshot_names_from_index(snapshots: list[SnapshotMeta], snapshot_root: str, subvolumes: list[str], btrfs_index) -> list[SnapshotMeta]:
-    """Return snapshots adjusted to actual Btrfs-indexed directory names."""
-
-    indexed = _indexed_snapshot_subvolumes(snapshot_root, subvolumes, btrfs_index)
-    if not indexed:
-        return snapshots
-    resolved: list[SnapshotMeta] = []
-    seen: set[str] = set()
-    for snap in snapshots:
-        actual_name = _resolve_indexed_snapshot_name(snap.name, indexed, subvolumes)
-        if actual_name != snap.name:
-            snap = SnapshotMeta(
-                name=actual_name,
-                path=str(Path(snapshot_root) / actual_name),
-                tags=list(snap.tags),
-                comment=snap.comment,
-                created=snap.created or snap.name,
-            )
-        if snap.name in seen:
-            continue
-        seen.add(snap.name)
-        resolved.append(snap)
-    return sorted(resolved, key=lambda item: item.name)
-
-
 def list_source_snapshots(
     source: SourceRunner,
     *,
@@ -184,13 +80,11 @@ def list_source_snapshots(
     each configured subvolume from that in-memory metadata. That avoids running
     one ``btrfs subvolume show`` per Timeshift snapshot over SSH. If discovery
     verification is disabled, missing entries are represented by path-only
-    metadata and checked later at send time. The index is also used to correct
-    small timestamp differences between the Timeshift list entry and the real
-    snapshot directory name.
+    metadata and checked later at send time.
     """
 
     result = source.run(timeshift_cmd(sudo, timeshift_command, ["--list"]))
-    snapshots = _resolve_snapshot_names_from_index(parse_timeshift_list(result.stdout, snapshot_root), snapshot_root, subvolumes, btrfs_index)
+    snapshots = parse_timeshift_list(result.stdout, snapshot_root)
     for snap in snapshots:
         for subvol in subvolumes:
             path = str(Path(snap.path) / subvol)

@@ -32,22 +32,14 @@ class MetadataFile:
 
 
 @dataclass(slots=True)
-class MetadataStageResult:
-    """Result from staging source Timeshift metadata into the send cache."""
-
-    copied: list[str]
-    unchanged: list[str]
-    skipped: bool = False
-
-
-@dataclass(slots=True)
 class MetadataCopyResult:
     """Result from copying ordinary Timeshift snapshot metadata files."""
 
     copied: list[str]
     unchanged: list[str]
     missing: list[str]
-    staged: list[str] | None = None
+    source_dir: str | None = None
+    used_existing_destination: bool = False
 
     @property
     def changed(self) -> bool:
@@ -74,28 +66,48 @@ def source_snapshot_metadata_files(source: SourceRunner, snapshot_dir: str) -> l
 
     The command intentionally does not use sudo.  The project keeps source-side
     sudoers narrow: only ``btrfs`` and ``timeshift`` should need passwordless
-    sudo.  Timeshift ``info.json`` is normally readable; if ordinary metadata
-    files are not readable, the app reports that as a source permission problem
-    instead of asking for broad sudo ``cat``/``tar`` access.
+    sudo.  Timeshift ``info.json`` is normally readable by direct pathname even
+    on folders that the normal source user cannot directory-list.  Read that
+    exact file first, then copy any other ordinary top-level metadata files only
+    when the directory itself is listable.  If an existing metadata file cannot
+    be read, report that as a source permission problem instead of asking for
+    broad sudo ``cat``/``tar`` access.
     """
 
     dir_q = shlex.quote(str(snapshot_dir))
     script = f"""
 dir={dir_q}
+
+emit_metadata_file() {{
+    name=$1
+    file=$2
+    [ -f "$file" ] || return 0
+    printf 'TSBTRFS_META_FILE\t%s\t' "$name"
+    if base64 "$file" 2>/dev/null | tr -d '\n'; then
+        printf '\n'
+    else
+        printf '\nTSBTRFS_META_ERROR\t%s\tbase64 failed or file is not readable\n' "$name"
+    fi
+}}
+
+# Always try Timeshift's required metadata file by exact pathname first.
+# This does not require read permission on the snapshot directory itself; it
+# only requires search permission on the path and read permission on info.json.
+emit_metadata_file info.json "$dir/info.json"
+
+# Other ordinary side files are optional.  Copy them only when the date folder
+# can be listed by the normal source user, so a root-owned/non-listable
+# Timeshift folder does not make a readable info.json look missing.
 [ -d "$dir" ] || exit 0
+[ -r "$dir" ] || exit 0
 for file in "$dir"/* "$dir"/.[!.]* "$dir"/..?*; do
     [ -e "$file" ] || continue
     [ -f "$file" ] || continue
     name=${{file##*/}}
     case "$name" in
-        .|..) continue ;;
+        .|..|info.json) continue ;;
     esac
-    printf 'TSBTRFS_META_FILE\\t%s\\t' "$name"
-    if base64 -- "$file" 2>/dev/null | tr -d '\\n'; then
-        printf '\\n'
-    else
-        printf '\\nTSBTRFS_META_ERROR\\t%s\\tbase64 failed or file is not readable\\n' "$name"
-    fi
+    emit_metadata_file "$name" "$file"
 done
 """.strip()
     result = source.run("sh -c " + shlex.quote(script), mirror_stderr=False)
@@ -127,84 +139,73 @@ done
     return files
 
 
-def stage_snapshot_metadata_files_to_cache(
-    source: SourceRunner,
+def _existing_destination_metadata_names(destination_snapshot_dir: Path) -> list[str]:
+    """Return safe top-level ordinary metadata names already on destination."""
+
+    if not destination_snapshot_dir.exists() or not destination_snapshot_dir.is_dir():
+        return []
+    names: list[str] = []
+    for child in destination_snapshot_dir.iterdir():
+        try:
+            if not child.is_file():
+                continue
+        except OSError:
+            continue
+        safe_name = _safe_metadata_name(child.name)
+        if safe_name is not None:
+            names.append(safe_name)
+    return sorted(set(names))
+
+
+def _metadata_source_candidates(
     *,
-    source_snapshot_dir: str,
-    cache_snapshot_dir: str,
-    dry_run: bool,
-) -> MetadataStageResult:
-    """Stage Timeshift ordinary metadata files into the source send-cache folder.
+    snapshot: SnapshotMeta,
+    source_snapshot_dir: str | None = None,
+    source_snapshot_dirs: list[str] | tuple[str, ...] | None = None,
+) -> list[str]:
+    """Build a de-duplicated list of source Timeshift metadata folders."""
 
-    SSH syncs may stream Btrfs data from ``source.cache_root`` instead of the
-    live Timeshift snapshot date folder.  Keep the ordinary Timeshift metadata
-    beside that cached send copy too, so the later destination metadata copy can
-    use the app-owned cache path and so interrupted/recovery runs can still
-    find ``info.json`` with the cached read-only subvolumes.
+    candidates: list[str] = []
+    if source_snapshot_dirs:
+        candidates.extend(str(item) for item in source_snapshot_dirs if item)
+    if source_snapshot_dir:
+        candidates.append(str(source_snapshot_dir))
+    candidates.append(snapshot.path)
 
-    The command intentionally uses only the source user, not sudo. Source sudo
-    stays limited to ``btrfs`` and ``timeshift``. Therefore the per-snapshot
-    cache parent must be writable by the source user if metadata staging is
-    required. If a sudo-created cache parent is root-owned, this function raises
-    a clear permission error instead of silently reporting ``info.json`` as
-    missing.
+    seen: set[str] = set()
+    result: list[str] = []
+    for candidate in candidates:
+        value = str(candidate).rstrip("/")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def _read_first_available_source_metadata(
+    source: SourceRunner,
+    candidates: list[str],
+) -> tuple[list[MetadataFile], str | None]:
+    """Read metadata from the best candidate source folder that has files.
+
+    Prefer a candidate containing ``info.json``. If none has that file, keep the
+    first candidate that has any ordinary metadata so the caller can still copy
+    useful Timeshift side files and warn that ``info.json`` is missing.
     """
 
-    if dry_run:
-        return MetadataStageResult(copied=[], unchanged=[], skipped=True)
-
-    src_q = shlex.quote(str(source_snapshot_dir))
-    dst_q = shlex.quote(str(cache_snapshot_dir))
-    script = f"""
-src={src_q}
-dst={dst_q}
-[ -d "$src" ] || {{ printf 'TSBTRFS_META_STAGE_ERROR\\tsource snapshot metadata directory is missing: %s\\n' "$src"; exit 0; }}
-[ -r "$src" ] || {{ printf 'TSBTRFS_META_STAGE_ERROR\\tsource snapshot metadata directory is not readable by the source user: %s\\n' "$src"; exit 0; }}
-[ -d "$dst" ] || {{ printf 'TSBTRFS_META_STAGE_ERROR\\tcache metadata directory is missing: %s\\n' "$dst"; exit 0; }}
-[ -w "$dst" ] || {{ printf 'TSBTRFS_META_STAGE_ERROR\\tcache metadata directory is not writable by the source user: %s\\n' "$dst"; exit 0; }}
-for file in "$src"/* "$src"/.[!.]* "$src"/..?*; do
-    [ -e "$file" ] || continue
-    [ -f "$file" ] || continue
-    name=${{file##*/}}
-    case "$name" in
-        .|..|.ts-btrfs-meta-*) continue ;;
-    esac
-    target="$dst/$name"
-    if [ -f "$target" ] && cmp -s -- "$file" "$target"; then
-        printf 'TSBTRFS_META_STAGE_UNCHANGED\\t%s\\n' "$name"
-        continue
-    fi
-    tmp="$dst/.ts-btrfs-meta-$name.$$"
-    if cp -p -- "$file" "$tmp" 2>/dev/null && mv -f -- "$tmp" "$target" 2>/dev/null; then
-        printf 'TSBTRFS_META_STAGE_COPIED\\t%s\\n' "$name"
-    else
-        rm -f -- "$tmp" 2>/dev/null || true
-        printf 'TSBTRFS_META_STAGE_ERROR\\tfailed copying metadata file to cache: %s\\n' "$name"
-    fi
-done
-""".strip()
-    result = source.run("sh -c " + shlex.quote(script), mirror_stderr=False)
-    copied: list[str] = []
-    unchanged: list[str] = []
-    errors: list[str] = []
-    for line in result.stdout.splitlines():
-        if line.startswith("TSBTRFS_META_STAGE_COPIED\t"):
-            name = line.split("\t", 1)[1]
-            safe_name = _safe_metadata_name(name)
-            if safe_name is not None:
-                copied.append(safe_name)
-        elif line.startswith("TSBTRFS_META_STAGE_UNCHANGED\t"):
-            name = line.split("\t", 1)[1]
-            safe_name = _safe_metadata_name(name)
-            if safe_name is not None:
-                unchanged.append(safe_name)
-        elif line.startswith("TSBTRFS_META_STAGE_ERROR\t"):
-            errors.append(line.split("\t", 1)[1])
-        elif line.strip():
-            errors.append(f"unexpected metadata staging output: {line!r}")
-    if errors:
-        raise RuntimeError("Could not stage source Timeshift metadata files into send-cache: " + "; ".join(errors))
-    return MetadataStageResult(copied=sorted(copied), unchanged=sorted(unchanged))
+    first_files: list[MetadataFile] = []
+    first_dir: str | None = None
+    for candidate in candidates:
+        files = source_snapshot_metadata_files(source, candidate)
+        if not files:
+            continue
+        if any(item.name == "info.json" for item in files):
+            return files, candidate
+        if first_dir is None:
+            first_files = files
+            first_dir = candidate
+    return first_files, first_dir
 
 
 def copy_snapshot_metadata_files(
@@ -214,24 +215,56 @@ def copy_snapshot_metadata_files(
     destination_snapshot_dir: Path,
     dry_run: bool,
     source_snapshot_dir: str | None = None,
-    staged: MetadataStageResult | None = None,
+    source_snapshot_dirs: list[str] | tuple[str, ...] | None = None,
 ) -> MetadataCopyResult:
     """Copy ordinary Timeshift metadata files beside received subvolumes.
+
+    Btrfs send/receive transfers only subvolumes such as ``@`` and ``@home``.
+    Ordinary Timeshift files are read directly from the real source snapshot date
+    folder with the normal source user and are written directly to the matching
+    destination date folder.  The source send-cache is deliberately not used for
+    metadata because Btrfs cache parent subvolumes are commonly created as root
+    and are not reliably writable by the normal source user.
 
     This is intentionally independent of ``state.json``.  A destination may
     already contain ``@``/``@home`` while ``info.json`` is missing because a
     previous version only sent Btrfs subvolumes.  Each sync run can therefore
     repair metadata files even when state says the subvolumes are already synced.
+    If the original source Timeshift folder is unavailable but destination
+    metadata already exists, the existing destination files are kept and reported
+    as the fallback instead of requiring metadata to exist in the source cache.
     """
 
-    files = source_snapshot_metadata_files(source, source_snapshot_dir or snapshot.path)
+    candidates = _metadata_source_candidates(
+        snapshot=snapshot,
+        source_snapshot_dir=source_snapshot_dir,
+        source_snapshot_dirs=source_snapshot_dirs,
+    )
+    files, source_dir_used = _read_first_available_source_metadata(source, candidates)
     copied: list[str] = []
     unchanged: list[str] = []
     present_names = {item.name for item in files}
+
+    if not files:
+        existing_destination = _existing_destination_metadata_names(destination_snapshot_dir)
+        missing = [] if "info.json" in existing_destination else ["info.json"]
+        return MetadataCopyResult(
+            copied=[],
+            unchanged=existing_destination,
+            missing=missing,
+            source_dir=None,
+            used_existing_destination=bool(existing_destination),
+        )
+
     missing = ["info.json"] if "info.json" not in present_names else []
 
     if dry_run:
-        return MetadataCopyResult(copied=sorted(present_names), unchanged=[], missing=missing, staged=(staged.copied if staged else None))
+        return MetadataCopyResult(
+            copied=sorted(present_names),
+            unchanged=[],
+            missing=missing,
+            source_dir=source_dir_used,
+        )
 
     destination_snapshot_dir.mkdir(parents=True, exist_ok=True)
     for item in files:
@@ -246,8 +279,12 @@ def copy_snapshot_metadata_files(
         tmp.write_bytes(item.data)
         tmp.replace(dest)
         copied.append(item.name)
-    return MetadataCopyResult(copied=sorted(copied), unchanged=sorted(unchanged), missing=missing, staged=(staged.copied if staged else None))
-
+    return MetadataCopyResult(
+        copied=sorted(copied),
+        unchanged=sorted(unchanged),
+        missing=missing,
+        source_dir=source_dir_used,
+    )
 
 def remove_destination_metadata_files(snapshot_dir: Path) -> int:
     """Remove top-level ordinary metadata files from a destination date folder.

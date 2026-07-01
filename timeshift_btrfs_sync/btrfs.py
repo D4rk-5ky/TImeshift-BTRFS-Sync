@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from typing import TYPE_CHECKING
 from .commands import quote_join, run_local, sudo_prefix
 from .models import SubvolumeMeta
@@ -67,16 +68,25 @@ def get_subvolume_meta(
     *,
     ssh: SSHRunner | None = None,
     required: bool = True,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Read and parse `btrfs subvolume show` metadata locally or over SSH."""
 
     path_text = str(path)
     args = ["subvolume", "show", path_text]
     if location == "local":
-        result = run_local(local_btrfs_cmd(sudo, btrfs_command, args), check=False, mirror_stderr=mirror_stderr)
+        result = run_local(
+            local_btrfs_cmd(sudo, btrfs_command, args),
+            check=False,
+            log_stderr=required,
+            mirror_stderr=required,
+        )
     elif location == "remote" and ssh:
-        result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, args), check=False, mirror_stderr=mirror_stderr)
+        result = ssh.run(
+            remote_btrfs_cmd(sudo, btrfs_command, args),
+            check=False,
+            log_stderr=required,
+            mirror_stderr=required,
+        )
     else:
         raise ValueError("location must be 'local' or 'remote' with ssh")
 
@@ -98,7 +108,6 @@ def source_get_subvolume_meta(
     btrfs_command: str = "btrfs",
     *,
     required: bool = True,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Read and parse source-side ``btrfs subvolume show`` metadata.
 
@@ -110,7 +119,8 @@ def source_get_subvolume_meta(
     result = source.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path_text]),
         check=False,
-        mirror_stderr=mirror_stderr,
+        log_stderr=required,
+        mirror_stderr=required,
     )
     if result.returncode == 0:
         return parse_subvolume_show(result.stdout, name=name, path=path_text)
@@ -192,6 +202,8 @@ def source_list_child_subvolumes(
     result = source.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-o", path]),
         check=False,
+        log_stderr=False,
+        mirror_stderr=False,
     )
     return None if result.returncode != 0 else _subvolume_list_paths(result.stdout)
 
@@ -360,20 +372,12 @@ def _source_refresh_cache_path(
     *,
     sudo: str,
     btrfs_command: str,
-    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Refresh one source cache path in the optional per-run Btrfs index."""
 
     from .remote_index import refresh_source_path
 
-    return refresh_source_path(
-        cache_index,
-        source,
-        path,
-        sudo=sudo,
-        btrfs_command=btrfs_command,
-        mirror_stderr=mirror_stderr,
-    )
+    return refresh_source_path(cache_index, source, path, sudo=sudo, btrfs_command=btrfs_command)
 
 
 def source_ensure_cache_root(
@@ -485,14 +489,7 @@ def _reuse_existing_cache_snapshot(
     # A bulk cache index may be stale or incomplete, especially after a prior
     # interrupted run or after switching between SSH and local mode. Always do a
     # targeted metadata refresh before attempting to create the same cache path.
-    refreshed = _source_refresh_cache_path(
-        cache_index,
-        source,
-        cache_path,
-        sudo=sudo,
-        btrfs_command=btrfs_command,
-        mirror_stderr=False,
-    )
+    refreshed = _source_refresh_cache_path(cache_index, source, cache_path, sudo=sudo, btrfs_command=btrfs_command)
     reused = validate(refreshed)
     if reused:
         return reused
@@ -505,7 +502,6 @@ def _reuse_existing_cache_snapshot(
             sudo,
             btrfs_command,
             required=False,
-            mirror_stderr=False,
         )
         reused = validate(meta)
         if reused:
@@ -656,14 +652,62 @@ def source_delete_subvolume(
     check: bool = False,
     log_stderr: bool = True,
     mirror_stderr: bool = True,
+    remove_empty_child_dirs: bool = False,
 ):
     """Delete a source-side Btrfs subvolume.
 
     The optional protected_snapshot_root guard is a final safety net: the app
     must never delete Timeshift-owned source.snapshot_root or any path below it.
+    When remove_empty_child_dirs is true, the source shell first removes only
+    empty ordinary child directories with rmdir. This is used for app-owned
+    cache parent subvolumes, where deleted nested subvolumes can leave empty
+    ordinary mountpoint directories that make Btrfs report "Directory not
+    empty". It never removes files and never uses source-side sudo rm/find.
     """
 
     reject_protected_source_snapshot_path(path, protected_snapshot_root, action="delete")
+    if remove_empty_child_dirs:
+        sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
+        script = f"""
+path={shlex.quote(path)}
+sudo_words={shlex.quote(sudo_words)}
+btrfs_cmd={shlex.quote(btrfs_command)}
+run_btrfs() {{
+    if [ -n "$sudo_words" ]; then
+        # shellcheck disable=SC2086
+        $sudo_words "$btrfs_cmd" "$@"
+    else
+        "$btrfs_cmd" "$@"
+    fi
+}}
+remove_empty_child_dirs() {{
+    base=$1
+    while :; do
+        changed=0
+        for child in "$base"/* "$base"/.[!.]* "$base"/..?*; do
+            [ -e "$child" ] || continue
+            [ -d "$child" ] || continue
+            if rmdir -- "$child" 2>/dev/null; then
+                changed=1
+            fi
+        done
+        [ "$changed" -eq 1 ] || break
+    done
+}}
+remove_empty_child_dirs "$path"
+run_btrfs subvolume delete "$path"
+status=$?
+if [ "$status" -eq 0 ] && [ -e "$path" ]; then
+    rmdir -- "$path" >/dev/null 2>&1 || true
+fi
+exit "$status"
+""".strip()
+        return source.run(
+            "sh -c " + shlex.quote(script),
+            check=check,
+            log_stderr=log_stderr,
+            mirror_stderr=mirror_stderr,
+        )
     return source.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "delete", path]),
         check=check,
