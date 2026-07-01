@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 from . import btrfs
+from . import metadata
 from . import remote_index
 from .config import AppConfig
 from .models import SnapshotMeta, tags_text
@@ -428,10 +429,12 @@ def _delete_destination_snapshot_for_prune(config: AppConfig, state: dict, snaps
             ok = False
             print(f"  warning: destination subvolume cleanup failed; keeping state entry for retry: {exc}")
     if snap_path.exists():
-        try:
-            snap_path.rmdir()
-        except OSError:
-            pass
+        removed_files = metadata.remove_destination_metadata_files(snap_path)
+        removed_dirs = metadata.remove_empty_directories(snap_path)
+        if removed_files:
+            print(f"  destination metadata: removed {removed_files} ordinary file(s) before removing snapshot folder")
+        if removed_dirs:
+            print(f"  destination directories: removed {removed_dirs} empty director{'y' if removed_dirs == 1 else 'ies'}")
     destination_gone = not any(path.exists() for path in subvol_paths) and not snap_path.exists()
     if destination_gone:
         print("  destination: confirmed gone")

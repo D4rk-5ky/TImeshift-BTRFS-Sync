@@ -106,12 +106,13 @@ def run_local(
 ) -> Completed:
     """Run a local command and capture stdout/stderr.
 
-    Normal commands are recorded in .log when logging is enabled. Every byte of
-    stderr is always copied to .err and mirrored to the terminal when present.
+    Normal commands are recorded in .log when logging is enabled. Stderr is
+    copied to .err by the logger, but callers may set ``mirror_stderr=False``
+    for expected probe failures so harmless misses do not spam the terminal.
 
-    The log_stderr/mirror_stderr parameters are kept for compatibility with older
-    callers, but stderr is no longer suppressible. Even expected probe failures
-    are visible, because hiding stderr made real troubleshooting harder.
+    The ``log_stderr`` parameter is kept for compatibility. File logging still
+    records command stderr when the run logger is active; ``mirror_stderr`` only
+    controls terminal mirroring.
     """
 
     proc = subprocess.run(
@@ -129,10 +130,12 @@ def run_local(
     if logger:
         logger.completed(cmd, proc.returncode, proc.stdout, proc.stderr)
 
-    # Make normal command stderr visible in the terminal too. Pipeline stderr is
-    # handled separately by stream_pipeline(), so this only affects captured
-    # commands such as btrfs subvolume show/delete.
-    if proc.stderr:
+    # Make normal command stderr visible in the terminal too unless the caller
+    # marks it as an expected probe failure. Pipeline stderr is handled
+    # separately by stream_pipeline(), so this only affects captured commands
+    # such as btrfs subvolume show/delete. File logs still receive stderr via
+    # logger.completed() above when logging is enabled.
+    if proc.stderr and mirror_stderr:
         print(f"COMMAND STDERR: {shlex.join(cmd)}", file=runlog.terminal_stderr())
         print(proc.stderr.rstrip(), file=runlog.terminal_stderr())
 

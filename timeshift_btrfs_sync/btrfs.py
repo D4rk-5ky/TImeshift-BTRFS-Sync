@@ -67,15 +67,16 @@ def get_subvolume_meta(
     *,
     ssh: SSHRunner | None = None,
     required: bool = True,
+    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Read and parse `btrfs subvolume show` metadata locally or over SSH."""
 
     path_text = str(path)
     args = ["subvolume", "show", path_text]
     if location == "local":
-        result = run_local(local_btrfs_cmd(sudo, btrfs_command, args), check=False)
+        result = run_local(local_btrfs_cmd(sudo, btrfs_command, args), check=False, mirror_stderr=mirror_stderr)
     elif location == "remote" and ssh:
-        result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, args), check=False)
+        result = ssh.run(remote_btrfs_cmd(sudo, btrfs_command, args), check=False, mirror_stderr=mirror_stderr)
     else:
         raise ValueError("location must be 'local' or 'remote' with ssh")
 
@@ -97,6 +98,7 @@ def source_get_subvolume_meta(
     btrfs_command: str = "btrfs",
     *,
     required: bool = True,
+    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Read and parse source-side ``btrfs subvolume show`` metadata.
 
@@ -108,6 +110,7 @@ def source_get_subvolume_meta(
     result = source.run(
         remote_btrfs_cmd(sudo, btrfs_command, ["subvolume", "show", path_text]),
         check=False,
+        mirror_stderr=mirror_stderr,
     )
     if result.returncode == 0:
         return parse_subvolume_show(result.stdout, name=name, path=path_text)
@@ -357,12 +360,20 @@ def _source_refresh_cache_path(
     *,
     sudo: str,
     btrfs_command: str,
+    mirror_stderr: bool = True,
 ) -> SubvolumeMeta | None:
     """Refresh one source cache path in the optional per-run Btrfs index."""
 
     from .remote_index import refresh_source_path
 
-    return refresh_source_path(cache_index, source, path, sudo=sudo, btrfs_command=btrfs_command)
+    return refresh_source_path(
+        cache_index,
+        source,
+        path,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        mirror_stderr=mirror_stderr,
+    )
 
 
 def source_ensure_cache_root(
@@ -474,7 +485,14 @@ def _reuse_existing_cache_snapshot(
     # A bulk cache index may be stale or incomplete, especially after a prior
     # interrupted run or after switching between SSH and local mode. Always do a
     # targeted metadata refresh before attempting to create the same cache path.
-    refreshed = _source_refresh_cache_path(cache_index, source, cache_path, sudo=sudo, btrfs_command=btrfs_command)
+    refreshed = _source_refresh_cache_path(
+        cache_index,
+        source,
+        cache_path,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        mirror_stderr=False,
+    )
     reused = validate(refreshed)
     if reused:
         return reused
@@ -487,6 +505,7 @@ def _reuse_existing_cache_snapshot(
             sudo,
             btrfs_command,
             required=False,
+            mirror_stderr=False,
         )
         reused = validate(meta)
         if reused:

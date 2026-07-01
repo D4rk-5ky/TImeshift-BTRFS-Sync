@@ -117,7 +117,8 @@ This file describes the current command handlers, shell command families, functi
 - `SSHRunner.__init__()`: stores SSH config for later command building.
 - `SSHRunner.command()`: wraps a source shell command in the configured SSH argv.
 - `SSHRunner.run()`: executes a source shell command through SSH with the shared
-  command runner.
+  command runner. It can avoid terminal mirroring for expected probe failures
+  while still returning captured stderr to the caller and file logger.
 - `SSHRunner.environment()`: exposes SSH password environment variables.
 - `SSHRunner.test()`: runs a simple remote command to confirm SSH works.
 
@@ -190,7 +191,9 @@ This file describes the current command handlers, shell command families, functi
 - `remote_double_quote()`: quotes a source shell string for nested SSH commands.
 - `_merged_env()`: merges optional command environment with the current process.
 - `run_local()`: runs a normal local command, logs command/result, and raises
-  `CommandError` on failure.
+  `CommandError` on failure. Callers can set `mirror_stderr = false` for
+  expected probes such as checking a cache path that may not exist yet, so
+  harmless cache misses do not look like terminal errors.
 - `_start_pipeline_readers()`: starts tee threads from one stream-routing table.
 - `_failed_stderr()`: combines captured stderr-like streams that belong in an
   error message after a failed pipeline.
@@ -261,9 +264,11 @@ This file describes the current command handlers, shell command families, functi
 - `remote_btrfs_cmd()`: builds source-side Btrfs argv with optional sudo. The name
   is kept for compatibility; local source mode can still reuse the command text.
 - `local_btrfs_cmd()`: builds destination-side Btrfs argv with optional sudo.
-- `get_subvolume_meta()`: shared metadata reader for a local argv command; avoids
-  separate parser paths that could disagree.
-- `source_get_subvolume_meta()`: reads source Btrfs metadata through `SourceRunner`.
+- `get_subvolume_meta()`: shared metadata reader for a local or SSH Btrfs
+  `subvolume show` command; avoids separate parser paths that could disagree
+  and can suppress terminal stderr for expected optional probes.
+- `source_get_subvolume_meta()`: reads source Btrfs metadata through `SourceRunner`;
+  optional cache-path probes can keep missing-path stderr out of the terminal.
 - `_validate_cache_snapshot_name()`: rejects unsafe cache snapshot names.
 - `_validate_cache_subvolume_name()`: rejects unsafe cache child names.
 - `readonly_cache_parent_path()`: path for one timestamp folder inside cache root.
@@ -286,12 +291,15 @@ This file describes the current command handlers, shell command families, functi
 - `cache_child_display_path()`: formats cache child paths for logs.
 - `_source_refresh_cache_path()`: refreshes one source cache path in the optional
   per-run Btrfs index after cache-root/parent/snapshot creation or before
-  deciding whether an existing cache snapshot can be reused.
+  deciding whether an existing cache snapshot can be reused. It can perform
+  expected missing-cache checks without mirroring stderr to the terminal.
 - `_reuse_existing_cache_snapshot()`: checks one exact source-cache send path
   before creation. It reuses the path only when Btrfs proves it is an existing
   read-only subvolume and, when parent UUID metadata is available, that it was
-  created from the requested original Timeshift subvolume. This prevents
-  recreate attempts after interrupted runs or state recovery.
+  created from the requested original Timeshift subvolume. A missing exact cache
+  path is a normal cache miss, so the probe is silent on the terminal and the
+  caller can create the cache snapshot. This prevents recreate attempts after
+  interrupted runs or state recovery without adding scary false error output.
 - `source_ensure_cache_root()`: lazily creates the configured `source.cache_root`
   as a Btrfs subvolume when cache is actually needed. It creates only the exact
   configured root, requires the parent to already exist, and refuses an existing
@@ -312,6 +320,8 @@ This file describes the current command handlers, shell command families, functi
 - `delete_local_subvolume()`: deletes a destination Btrfs subvolume.
 
 ### `timeshift.py`
+
+- `_resolve_snapshot_names_from_index()`: uses indexed Btrfs paths to map Timeshift-list timestamps to the actual snapshot date folders before metadata staging and send paths are built.
 
 - `timeshift_cmd()`: builds source-side Timeshift argv with optional sudo.
 - `normalize_tags()`: keeps only native Timeshift tags `H/D/W/M/B/O`.
@@ -356,6 +366,20 @@ This file describes the current command handlers, shell command families, functi
 - `latest_synced_before()`: finds the newest older synced parent candidate,
   including saved send-cache parents when the original Timeshift snapshot was pruned.
 
+### `metadata.py`
+
+- `MetadataFile`: stores one ordinary Timeshift metadata filename and its bytes.
+- `MetadataStageResult`: reports ordinary metadata files staged into the source send-cache date folder.
+- `MetadataCopyResult`: reports copied, unchanged, missing, and staged ordinary metadata files.
+- `_safe_metadata_name()`: rejects unsafe source filenames so metadata copy cannot escape the destination snapshot folder.
+- `source_snapshot_metadata_files()`: reads top-level ordinary files from one source Timeshift snapshot/cache folder through `SourceRunner` without sudo; this preserves narrow source sudoers.
+- `stage_snapshot_metadata_files_to_cache()`: copies top-level ordinary Timeshift files such as `info.json` from `source.snapshot_root/<snapshot>/` to `source.cache_root/<snapshot>/` before transfer so SSH/local runs can use the same app-owned cache container for metadata repair.
+- `copy_snapshot_metadata_files()`: copies files such as `info.json` beside received `@`/`@home` subvolumes and runs independently from state so missing metadata can be repaired later.
+- `remove_destination_metadata_files()`: removes top-level ordinary metadata files from a destination snapshot date folder before prune removes the folder.
+- `remove_empty_directories()`: removes empty ordinary directories after subvolume/metadata cleanup.
+- `parse_info_json_text()`: extracts tags/comment/created fields from Timeshift-like `info.json` content when possible.
+- `destination_info_metadata()`: reads copied destination `info.json` so state recovery can restore human/retention metadata after UUID-safe adoption.
+
 ### `sync.py`
 
 - `SyncError`: fatal sync safety/logic error.
@@ -397,6 +421,9 @@ This file describes the current command handlers, shell command families, functi
 - `_send_path_kind_text()`: explains whether the selected send path is protected Timeshift original or app-owned cache.
 - `_ensure_source_send_path()`: verifies/creates the current read-only send path
   through `SourceRunner`.
+- `_sync_snapshot_metadata_files()`: copies ordinary Timeshift metadata files,
+  especially `info.json`, from the source date folder to the destination date
+  folder independently from subvolume state.
 - `_cleanup_incomplete_destination_receive()`: removes only the current partial
   destination receive before retry and invalidates the destination index entry.
 - `_read_local_destination_parent_metadata()`: reads metadata for a candidate destination parent.
@@ -409,7 +436,7 @@ This file describes the current command handlers, shell command families, functi
 - `_expected_original_source_path()`: builds the expected Timeshift-owned source path for a snapshot/subvolume without creating it.
 - `_source_cache_meta_by_uuid()`: finds an existing source-cache subvolume by exact UUID and refreshes its metadata so recovery can prove read-only cache identity.
 - `_match_existing_destination_to_source()`: compares one existing destination subvolume's `Received UUID` with the matching source Timeshift subvolume and source-cache index. It returns a send path only for exact UUID matches.
-- `_recover_state_from_existing_destination()`: rebuilds missing or empty state from already-existing destination snapshots. It adopts only exact UUID matches and refuses to treat unadopted existing destination paths as incomplete receives.
+- `_recover_state_from_existing_destination()`: rebuilds missing or empty state from already-existing destination snapshots. It adopts only exact UUID matches, can enrich recovered tags/comment/created fields from copied destination `info.json`, and refuses to treat unadopted existing destination paths as incomplete receives.
 - `_select_parent()`: chooses full seed or verified incremental parent. Full sends
   are allowed only for empty-destination seeding rules.
 - `sync_once()`: complete sync transaction for one config/run. It creates the
@@ -435,7 +462,7 @@ This file describes the current command handlers, shell command families, functi
   parent, lists nested `@`/`@home` children, and deletes only app-owned cache
   subvolumes through `SourceRunner`.
 - `build_prune_plan()`: computes retention keep/delete decisions from state, source tags, and config; it does not delete anything.
-- `_delete_destination_snapshot_for_prune()`: deletes destination Btrfs subvolumes for one snapshot and returns true only when destination paths are confirmed gone or already absent.
+- `_delete_destination_snapshot_for_prune()`: deletes destination Btrfs subvolumes for one snapshot, removes copied ordinary metadata files such as `info.json`, removes empty date folders, and returns true only when destination paths are confirmed gone or already absent.
 - `_delete_prune_item()`: runs coordinated per-snapshot destination cleanup and source send-cache cleanup before removing state.
 - `print_prune_plan()`: prints retention summary and delete plan to terminal and `.succes`.
 - `prune()`: prints the plan and only deletes in real mode with explicit confirmation. It creates a `SourceRunner` for source-cache cleanup.
@@ -543,12 +570,15 @@ This file describes the current command handlers, shell command families, functi
 - `_source_subvolume_meta()`: detects whether a source cleanup root itself is a Btrfs subvolume.
 - `_local_child_subvolumes()`: lists local child Btrfs subvolumes below a cleanup root.
 - `_source_child_subvolumes()`: lists source child Btrfs subvolumes below a cleanup root.
+- `_local_remove_timeshift_metadata_files_in_destination_tree()`: removes copied destination Timeshift metadata files such as `info.json` from snapshot date folders without recursing into payload subvolumes.
 - `_local_remove_empty_child_dirs()`: removes empty ordinary directories below a local cleanup subvolume deepest-first before parent deletion, so stale child-subvolume mountpoint directories do not block `btrfs subvolume delete`.
 - `_local_remove_stale_path()`: removes an ordinary local directory that remains at a path after the subvolume at that path was deleted.
 - `_confirm_or_raise()`: requires exact typed confirmation instead of yes/no.
 - `_delete_local_tree()`: recursively discovers and deletes local child subvolumes deepest-first, then removes stale ordinary directories/files.
+- `_source_cache_layout_subvolumes_batched()`: asks the source endpoint to inspect the expected app-owned cache layout (`cache_root/<snapshot>/<subvolume>`) in one shell command and report every real Btrfs subvolume it finds. It exists as a fallback when SSH/Btrfs path output cannot be converted back to absolute paths by the destination-side parser, so an empty source-delete plan cannot be reported as success while cache snapshots remain.
+- `_source_destroy_path_status()`: checks a source destroy root with source-side `sudo btrfs subvolume show` and `sudo btrfs filesystem df` before falling back to the normal source shell `test -e`. This prevents SSH source cleanup from falsely treating an app-owned remote cache subvolume as missing.
 - `_source_delete_subvolumes_batched()`: deletes many source-cache subvolumes in one source command during `destroy-leftovers`, removing empty ordinary child directories before parent deletion without requiring sudo `rm`, `find`, `chmod`, or `chown`.
-- `_delete_source_tree()`: checks the source send-cache root, recursively walks `btrfs subvolume list -o` from each discovered cache subvolume, deletes nested payload subvolumes such as `@` before timestamp/container parents, and keeps `source.snapshot_root` protected.
+- `_delete_source_tree()`: checks the source send-cache root with the Btrfs-first status helper, recursively walks `btrfs subvolume list -o` from each discovered cache subvolume, deletes nested payload subvolumes such as `@` before timestamp/container parents, and keeps `source.snapshot_root` protected.
 - `_mode_text()`: returns the exact typed phrase for the chosen destructive mode.
 - `_print_target()`: prints one configured cleanup root before any deletion.
 - `_print_result()`: prints one target result with subvolume count and errors.
@@ -572,3 +602,9 @@ This file describes the current command handlers, shell command families, functi
 - `FileLock.__init__()`: stores the lock path.
 - `FileLock.__enter__()`: opens/acquires the already-prepared lock file non-blocking. It no longer creates parent directories itself, because lock path preflight must create the parent safely as either a directory or Btrfs subvolume before locking.
 - `FileLock.__exit__()`: unlocks and closes the lock file.
+
+### Destination destroy cleanup order
+
+- `_delete_local_tree(...)` deletes destination child Btrfs subvolumes deepest-first, performs a second cleanup of copied Timeshift metadata files such as `info.json`, removes stale empty ordinary directories, and only then deletes `destination.target_root` itself. This ordering keeps ordinary metadata files and empty mountpoint leftovers from blocking the final target-root subvolume delete.
+- `_local_remove_timeshift_metadata_files_in_destination_tree(...)` removes only direct ordinary files in `snapshots/<date>/` folders. It exists so copied Timeshift metadata can be cleaned without recursing into received payload subvolumes like `@` and `@home`.
+- `_local_remove_empty_child_dirs(...)` removes only empty ordinary directories left behind by deleted nested subvolumes. It does not delete files or use broad recursive removal.

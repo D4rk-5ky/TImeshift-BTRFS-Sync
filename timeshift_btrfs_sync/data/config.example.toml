@@ -309,6 +309,12 @@ verify_incremental_parent_once_per_run = true
 # If that exact cache snapshot already exists, the app verifies it is a
 # read-only Btrfs subvolume with matching parent identity and reuses it instead
 # of trying to recreate it.
+# Ordinary Timeshift metadata files such as info.json are staged into
+# <cache_root>/<snapshot-name>/ before the destination copy. This keeps metadata
+# beside the app-owned read-only send-cache snapshots and lets later SSH/local
+# recovery runs repair missing destination info.json. The source user must be
+# able to read the Timeshift date folder and write ordinary metadata files into
+# the per-snapshot cache parent; source sudo remains limited to btrfs/timeshift.
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 
@@ -359,7 +365,11 @@ send_compressed_data = true
 # If you completely reset/start over with a new full sync, clean both folders.
 # Do not delete only .ts-btrfs-sync/state.json while leaving old snapshots/.
 # Received @ and @home entries are Btrfs subvolumes, so delete those with
-# `btrfs subvolume delete` before removing the ordinary folders.
+# `btrfs subvolume delete` before removing the ordinary folders. The app also
+# copies ordinary Timeshift metadata files such as info.json into each
+# snapshots/<snapshot-name>/ folder. Prune and destroy-destination remove those
+# ordinary metadata files before removing the date folder so cleanup does not
+# fail because info.json keeps the directory non-empty.
 # If you are retiring this app setup entirely, use the dangerous explicit command:
 #   ts-btrfs destroy-leftovers --config ./config.toml --delete-both --dry-run
 # Real deletion additionally requires --run, --i-understand-this-destroys-data,

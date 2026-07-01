@@ -184,9 +184,9 @@ class SSHRunner:
     ) -> Completed:
         """Run a remote command and capture stdout/stderr.
 
-        Stderr is always mirrored to the terminal and to .err when file logging
-        is enabled. The log_stderr/mirror_stderr arguments are kept only for
-        compatibility with older callers and no longer suppress stderr.
+        Stderr is logged when file logging is enabled. Callers may set
+        ``mirror_stderr=False`` for expected metadata probes where a missing path
+        is normal and should not be shown as a scary terminal error.
         """
 
         return run_local(

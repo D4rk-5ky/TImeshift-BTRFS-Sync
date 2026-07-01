@@ -419,3 +419,17 @@ When `state.json` is missing or empty and destination snapshots already exist, `
 - `destroy-leftovers`, `clear-state`, and `delete-lock` use the same `_with_logging()` wrapper as normal app commands when `log_dir` is enabled.
 - `destroy-leftovers` must not write logs into a selected delete target. If the configured `log_dir` is inside a target being destroyed, the CLI chooses a survivor log directory outside that target.
 - `clear-state` and `delete-lock` operate only on exact configured files and still produce logs for dry-run and real execution.
+
+
+## Timeshift folder-name resolution
+
+Source discovery resolves actual snapshot date-folder names from the bulk Btrfs snapshot-root index when `timeshift --list` reports a timestamp that differs by a few seconds. This keeps metadata staging, cache paths, destination paths, and state entries aligned with the real filesystem path.
+
+## Destroy destination cleanup order
+
+`destroy-leftovers --delete-destination` now explicitly removes destination child subvolumes first, then removes copied Timeshift metadata files and empty ordinary directories again before deleting `destination.target_root`. This preserves the Btrfs-first deletion model and avoids `rm -rf` fallback for Btrfs-subvolume roots.
+
+
+## Destroy-leftovers source-cache discovery safety
+
+`destroy-leftovers --delete-source` now combines Btrfs listing with a source-side cache-layout scan. This prevents a successful-looking run when SSH/Btrfs listed paths cannot be converted back to absolute paths and the app-owned cache root still contains timestamp cache subvolumes. Missing `info.json` files do not block deletion; present ordinary metadata files are only relevant for destination/date-folder removal.

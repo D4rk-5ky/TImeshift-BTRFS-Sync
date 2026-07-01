@@ -1,3 +1,63 @@
+### 0.1.42
+
+- Fixed SSH `destroy-leftovers --delete-source/--delete-both` source cache detection.
+- Source-cache destroy now verifies `source.cache_root` with `sudo btrfs subvolume show` / `sudo btrfs filesystem df` before falling back to the normal remote shell `test -e`.
+- Final source-cache removal verification also uses the Btrfs-first status check, so SSH cleanup cannot report complete while the app-owned remote cache root still exists.
+- Updated README.md and COMMENTED_CODE_MAP.md to document the Btrfs-first source destroy path check.
+
+This build is version `0.1.42`.
+
+# Versioning
+
+### 0.1.41
+
+- Removed the top-level `CONFIG_AND_CLI_AUDIT.md` document from the release package.
+- Kept the current user-facing documentation in `README.md`, function/command explanations in `COMMENTED_CODE_MAP.md`, install notes in `INSTALL.md`, and release history in `VERSIONING.md`.
+- No application behavior changed in this version.
+
+### 0.1.40
+
+- Hardened `destroy-leftovers --delete-source` so source send-cache deletion also scans the expected cache layout directly on the source endpoint in one command. This catches cache subvolumes even when SSH/Btrfs path output cannot be converted to absolute paths by the destination-side parser.
+- Added final verification that the app-owned source cache root is gone; a run no longer reports success when no source cache snapshots were deleted and the cache root still exists.
+- Documented that missing `info.json` does not block deletion. Present copied metadata files are removed where ordinary date folders need to become empty.
+
+### 0.1.39
+
+- Improved `destroy-leftovers --delete-destination` ordering for Btrfs subvolume target roots.
+- Destination cleanup now deletes child subvolumes deepest-first, then performs a second Timeshift metadata-file cleanup and empty-directory cleanup before deleting `destination.target_root` itself.
+- This ensures copied ordinary metadata files such as `info.json` and stale empty mountpoint directories cannot leave the target root non-empty after child subvolumes have been deleted.
+- `rm -rf` is still not used for a Btrfs-subvolume `destination.target_root`; failed Btrfs subvolume deletes remain hard errors instead of being replaced by recursive file deletion.
+
+### 0.1.38
+
+- Fixed Timeshift snapshot-folder resolution when `timeshift --list` reports a timestamp that differs by a few seconds from the actual snapshot directory.
+- Source discovery now uses the bulk `source.snapshot_root` Btrfs index to resolve the real Timeshift folder name before metadata staging, `info.json` copying, send-cache paths, and destination paths are built.
+- This prevents SSH sync from staging `info.json` into the correct cache folder while later looking for metadata under the slightly different Timeshift-list timestamp.
+
+## 0.1.37
+
+- Changed Timeshift ordinary metadata handling so files such as `info.json` are staged into the per-snapshot source send-cache folder before destination copy.
+- Metadata flow is now `source.snapshot_root/<snapshot>/info.json` → `source.cache_root/<snapshot>/info.json` → `destination.target_root/snapshots/<snapshot>/info.json`.
+- This keeps Timeshift metadata beside the app-owned read-only send-cache snapshots used for SSH/local sends and lets later recovery runs repair missing destination metadata from the cache.
+- Metadata staging still uses the source user without sudo, preserving the minimal source sudo model of only `btrfs` and `timeshift`; permission problems now produce explicit errors instead of only warning that `info.json` is missing.
+- Updated README.md, COMMENTED_CODE_MAP.md, VERSIONING.md, and config example comments to document current staged metadata behavior.
+
+## 0.1.36
+
+- Added Timeshift ordinary metadata-file backup for each synced snapshot. The app now copies top-level files from each source Timeshift date folder, especially `info.json`, into the matching destination `snapshots/<snapshot>/` folder beside received `@`/`@home` subvolumes.
+- Metadata copy is independent from `state.json`, so a later run can repair missing `info.json` even when subvolumes are already synced or state was rebuilt.
+- Missing/empty state recovery can now enrich recovered snapshot tags/comment/created fields from copied destination `info.json`; Btrfs UUID matching remains the only chain-safety proof.
+- Prune now removes copied ordinary destination metadata files before removing the snapshot date folder, preventing `info.json` from making the folder non-empty after `@`/`@home` subvolumes are deleted.
+- Destroy-destination now removes copied Timeshift metadata files from destination snapshot date folders without recursing into payload subvolumes.
+- Updated README.md, COMMENTED_CODE_MAP.md, VERSIONING.md, and the config example comments to document the current metadata-file behavior.
+
+## 0.1.35
+
+- Suppressed terminal noise for expected missing source-cache metadata probes.
+- When checking whether `<cache_root>/<snapshot>/<subvolume>` already exists before cache creation, a missing cache snapshot is now treated as a normal cache miss instead of printing `COMMAND STDERR` to the terminal.
+- File logging still records captured command output when logging is enabled; the change only stops harmless `btrfs subvolume show <missing cache path>` probes from looking like sync errors during local or SSH incremental runs.
+- Kept real metadata failures visible for required paths and real command failures.
+
 ## 0.1.34
 
 - Fixed read-only source-cache reuse before creation. When a writable Timeshift subvolume needs a send-cache snapshot, the app now refreshes and validates the exact `<cache_root>/<snapshot>/<subvolume>` path before attempting `btrfs subvolume snapshot -r`.

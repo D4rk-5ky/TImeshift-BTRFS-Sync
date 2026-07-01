@@ -14,7 +14,7 @@ The important performance/safety rule in this version is:
 from __future__ import annotations
 
 from pathlib import Path
-from . import btrfs, timeshift
+from . import btrfs, timeshift, metadata
 from . import preflight, remote_index
 from .commands import stream_pipeline
 from .config import AppConfig
@@ -507,6 +507,91 @@ def _ensure_source_send_path(
         cache_index=source_cache_index,
         original_index=source_snapshot_index,
     )
+
+
+def _sync_snapshot_metadata_files(
+    config: AppConfig,
+    source: SourceRunner,
+    snapshot: SnapshotMeta,
+    *,
+    dry_run: bool,
+    reason: str,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
+) -> None:
+    """Copy ordinary Timeshift metadata files for one snapshot date folder.
+
+    Btrfs send/receive transfers only subvolumes. Timeshift also stores
+    ordinary files such as ``info.json`` beside ``@`` and ``@home``. This copy
+    step runs independently from subvolume state so a later run can repair a
+    missing ``info.json`` even when state.json says the subvolumes are already
+    synced or when state.json had to be rebuilt.
+
+    When ``source.cache_root`` is configured, ordinary metadata is first staged
+    into the per-snapshot source send-cache folder. SSH runs often stream the
+    Btrfs payload from that cache folder, so keeping ``info.json`` beside the
+    cached read-only subvolumes makes metadata repair/recovery use the same
+    app-owned source-side snapshot container instead of relying only on the live
+    Timeshift date folder.
+    """
+
+    target_dir = _target_snapshot_dir(config, snapshot.name)
+    metadata_source_dir = snapshot.path
+    staged = None
+    try:
+        if config.source.cache_root:
+            cache_parent = btrfs.readonly_cache_parent_path(config.source.cache_root, snapshot.name)
+            if dry_run:
+                staged = metadata.MetadataStageResult(copied=[], unchanged=[], skipped=True)
+            else:
+                btrfs.source_ensure_cache_parent(
+                    source,
+                    sudo=config.source.sudo,
+                    btrfs_command=config.source.btrfs_command,
+                    cache_root=config.source.cache_root,
+                    cache_parent=cache_parent,
+                    cache_index=source_cache_index,
+                )
+                staged = metadata.stage_snapshot_metadata_files_to_cache(
+                    source,
+                    source_snapshot_dir=snapshot.path,
+                    cache_snapshot_dir=cache_parent,
+                    dry_run=dry_run,
+                )
+                metadata_source_dir = cache_parent
+
+        result = metadata.copy_snapshot_metadata_files(
+            source,
+            snapshot=snapshot,
+            destination_snapshot_dir=target_dir,
+            dry_run=dry_run,
+            source_snapshot_dir=metadata_source_dir,
+            staged=staged,
+        )
+    except Exception as exc:
+        raise SyncError(f"Failed copying Timeshift metadata files for {snapshot.name}: {exc}") from exc
+
+    if result.copied or result.unchanged or result.missing or staged:
+        _human_blank()
+        print(f"  metadata files: {reason}")
+        if config.source.cache_root:
+            cache_parent = btrfs.readonly_cache_parent_path(config.source.cache_root, snapshot.name)
+            if dry_run:
+                print(f"    would stage source metadata into cache: {cache_parent}")
+            elif staged and staged.copied:
+                print(f"    staged in source cache: {', '.join(staged.copied)}")
+            elif staged and staged.unchanged:
+                print(f"    source cache unchanged: {', '.join(staged.unchanged)}")
+        if dry_run:
+            if result.copied:
+                print(f"    would copy/check: {', '.join(result.copied)}")
+        else:
+            if result.copied:
+                print(f"    copied/updated: {', '.join(result.copied)}")
+            if result.unchanged:
+                print(f"    destination unchanged: {', '.join(result.unchanged)}")
+        if result.missing:
+            print(f"    warning: missing on source/cache: {', '.join(result.missing)}")
+        _human_blank()
 
 
 def _cleanup_incomplete_destination_receive(
@@ -1092,6 +1177,19 @@ def _recover_state_from_existing_destination(
                 skipped.append(f"{snapshot_name}/{subvolume_name}: {reason}")
                 continue
 
+            # If state.json is missing and the destination already has a copied
+            # Timeshift info.json, use it to enrich recovered state metadata.
+            # This never proves chain identity; Btrfs UUID matching above is
+            # still the only adoption rule. It only restores tags/comment fields
+            # for retention and human reporting when state had to be rebuilt.
+            info_tags, info_comment, info_created = metadata.destination_info_metadata(_target_snapshot_dir(config, snapshot_name))
+            if info_tags and not source_snapshot.tags:
+                source_snapshot.tags = info_tags
+            if info_comment and not source_snapshot.comment:
+                source_snapshot.comment = info_comment
+            if info_created and not source_snapshot.created:
+                source_snapshot.created = info_created
+
             synthetic_snapshot = source_snapshot
             parent_snapshot, parent_source_path = parent_by_subvolume.get(subvolume_name, (None, None))
             # Always adopt into the in-memory state. In dry-run this lets the
@@ -1619,6 +1717,20 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     transferred = 0
     already_synced = 0
     sync_events: list[dict] = []
+    metadata_checked_snapshots: set[str] = set()
+
+    def ensure_snapshot_metadata(snapshot: SnapshotMeta, reason: str) -> None:
+        if snapshot.name in metadata_checked_snapshots:
+            return
+        _sync_snapshot_metadata_files(
+            config,
+            source,
+            snapshot,
+            dry_run=dry_run,
+            reason=reason,
+            source_cache_index=source_cache_index,
+        )
+        metadata_checked_snapshots.add(snapshot.name)
 
     # Tracks source parent paths that were successfully sent and received during
     # this run. When verify_incremental_parent_once_per_run is true, those freshly
@@ -1636,9 +1748,11 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         expected = [name for name in config.source.subvolumes if name in snapshot.subvolumes]
         if only_missing and snapshot_is_synced(state, snapshot.name, expected):
             if _snapshot_destination_paths_exist(config, snapshot.name, expected):
+                ensure_snapshot_metadata(snapshot, "checking existing synced snapshot metadata")
                 already_synced += len(expected)
                 continue
             print(f"Snapshot {snapshot.name}: state says synced, but at least one destination path is missing; retrying missing path(s).")
+            ensure_snapshot_metadata(snapshot, "state exists but destination subvolume is missing; metadata is repaired independently")
             _human_blank()
         if limit is not None and transferred >= limit:
             break
@@ -1649,6 +1763,8 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         if dry_run:
             print(f"  would ensure local directory: {target_dir}")
             _human_blank()
+
+        ensure_snapshot_metadata(snapshot, "copy Timeshift ordinary metadata beside received subvolumes")
 
         for subvol_name in config.source.subvolumes:
             # Incomplete destination cleanup is intentionally performed here,
