@@ -192,6 +192,36 @@ def _index_from_list_output(root_path: str | Path, output: str, *, location: str
     return index
 
 
+def _paths_from_list_output(output: str, root_path: str | Path) -> set[str]:
+    """Return absolute subvolume paths parsed from any ``btrfs subvolume list`` output."""
+
+    paths: set[str] = set()
+    for line in output.splitlines():
+        _before, sep, raw_path = line.strip().partition(" path ")
+        if not sep:
+            continue
+        abs_path = listed_path_to_absolute(root_path, raw_path)
+        if abs_path:
+            paths.add(abs_path)
+    return paths
+
+
+def _mark_readonly_from_list(index: BtrfsIndex, output: str, root_path: str | Path) -> None:
+    """Mark indexed paths read-only using one ``btrfs subvolume list -r`` result."""
+
+    readonly_paths = _paths_from_list_output(output, root_path)
+    if not readonly_paths:
+        # A successful empty readonly list means indexed descendants are writable.
+        for meta in index.by_path.values():
+            if is_under(meta.path, root_path):
+                meta.readonly = False
+        return
+    for path, meta in list(index.by_path.items()):
+        if not is_under(path, root_path):
+            continue
+        meta.readonly = path in readonly_paths
+
+
 def build_local_btrfs_index(
     root_path: str | Path,
     *,
@@ -200,7 +230,13 @@ def build_local_btrfs_index(
     include_root: bool = True,
     required: bool = False,
 ) -> BtrfsIndex:
-    """Build a local destination index with no SSH overhead."""
+    """Build a local Btrfs index with bulk list commands.
+
+    One UUID/parent/received-UUID list command is used for descendants below the
+    root, and one read-only list command marks which indexed subvolumes can be
+    used directly as ``btrfs send`` sources. This avoids running
+    ``btrfs subvolume show`` for every Timeshift/cache child.
+    """
 
     root = normalize_path(root_path)
     index = BtrfsIndex(root=root, location="local")
@@ -210,80 +246,49 @@ def build_local_btrfs_index(
             index.errors.append(f"local index root is missing: {root}")
         return index
 
-    pending = [root]
-    seen: set[str] = set()
-    while pending:
-        current = pending.pop(0)
-        if current in seen:
-            continue
-        seen.add(current)
-        result = run_local(
-            btrfs.local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-u", "-q", "-R", "-o", current]),
-            check=False,
-            log_stderr=False,
-            mirror_stderr=False,
-        )
-        if result.returncode != 0:
-            if current == root and required:
-                index.errors.append(result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}")
-            continue
-        metas = parse_subvolume_list(result.stdout, current)
-        for meta in metas:
+    result = run_local(
+        btrfs.local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-u", "-q", "-R", "-o", root]),
+        check=False,
+        log_stderr=False,
+        mirror_stderr=False,
+    )
+    if result.returncode != 0:
+        if required:
+            index.errors.append(result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}")
+    else:
+        for meta in parse_subvolume_list(result.stdout, root):
             index.add(meta)
-            if is_under(meta.path, root) and meta.path not in seen:
-                pending.append(meta.path)
+
+    readonly_result = run_local(
+        btrfs.local_btrfs_cmd(sudo, btrfs_command, ["subvolume", "list", "-r", "-o", root]),
+        check=False,
+        log_stderr=False,
+        mirror_stderr=False,
+    )
+    if readonly_result.returncode == 0:
+        _mark_readonly_from_list(index, readonly_result.stdout, root)
 
     if include_root:
         root_meta = btrfs.get_subvolume_meta("local", root, Path(root).name, sudo, btrfs_command, required=False)
         index.add(root_meta)
     return index
 
+def _remote_bulk_index_script(root: str, sudo: str, btrfs_command: str) -> str:
+    """Return a POSIX shell script that bulk-lists source Btrfs metadata.
 
-def _remote_recursive_index_script(root: str, sudo: str, btrfs_command: str) -> str:
-    """Return a POSIX shell script that recursively lists subvolumes in one SSH call."""
+    The script is intentionally executed in one SSH session. It runs one
+    UUID/parent/received-UUID list for descendants, one read-only list for the
+    same root, and an optional root ``subvolume show``. That gives the app the
+    metadata it normally needs without opening one SSH connection per snapshot.
+    """
 
     root_q = shlex.quote(normalize_path(root))
     sudo_words = " ".join(shlex.quote(part) for part in sudo_prefix(sudo))
     btrfs_q = shlex.quote(btrfs_command)
     return f"""
 root={root_q}
-root_no_slash=${{root#/}}
-root_base=${{root##*/}}
-root_parent=${{root%/*}}
 sudo_words={shlex.quote(sudo_words)}
 btrfs_cmd={btrfs_q}
-
-emit_abs() {{
-    p=$1
-    case "$p" in
-        /*) printf '%s\n' "$p"; return 0 ;;
-    esac
-    case "$p" in
-        "$root_no_slash"|"$root_no_slash"/*) printf '/%s\n' "$p"; return 0 ;;
-        "$root_base") printf '%s\n' "$root"; return 0 ;;
-        "$root_base"/*) printf '%s/%s\n' "$root_parent" "${{p#"$root_base"/}}"; return 0 ;;
-    esac
-
-    # Last-resort suffix match. Walk the configured root from left to right and
-    # accept any listed path beginning with a suffix of the root.
-    suffix=$root_no_slash
-    prefix=''
-    while [ -n "$suffix" ]; do
-        case "$p" in
-            "$suffix"|"$suffix"/*)
-                printf '/%s%s\n' "$prefix" "$p"
-                return 0
-                ;;
-        esac
-        first=${{suffix%%/*}}
-        if [ "$first" = "$suffix" ]; then
-            break
-        fi
-        prefix="$prefix$first/"
-        suffix=${{suffix#*/}}
-    done
-    return 1
-}}
 
 run_btrfs() {{
     if [ -n "$sudo_words" ]; then
@@ -299,39 +304,20 @@ printf 'TSBTRFS_ROOT_SHOW_BEGIN\n'
 run_btrfs subvolume show "$root" 2>&1
 printf 'TSBTRFS_ROOT_SHOW_END\n'
 
-queue_file=$(mktemp)
-seen_file=$(mktemp)
-trap 'rm -f "$queue_file" "$seen_file"' EXIT
-printf '%s\n' "$root" > "$queue_file"
+printf 'TSBTRFS_LIST_BEGIN\t%s\n' "$root"
+list_output=$(run_btrfs subvolume list -u -q -R -o "$root" 2>&1)
+list_status=$?
+printf 'TSBTRFS_LIST_STATUS\t%s\t%s\n' "$root" "$list_status"
+printf '%s\n' "$list_output"
+printf 'TSBTRFS_LIST_END\t%s\n' "$root"
 
-while IFS= read -r current; do
-    grep -Fx -- "$current" "$seen_file" >/dev/null 2>&1 && continue
-    printf '%s\n' "$current" >> "$seen_file"
-    printf 'TSBTRFS_LIST_BEGIN\t%s\n' "$current"
-    list_output=$(run_btrfs subvolume list -u -q -R -o "$current" 2>&1)
-    list_status=$?
-    printf 'TSBTRFS_LIST_STATUS\t%s\t%s\n' "$current" "$list_status"
-    printf '%s\n' "$list_output"
-    printf 'TSBTRFS_LIST_END\t%s\n' "$current"
-    [ "$list_status" -eq 0 ] || continue
-    printf '%s\n' "$list_output" | while IFS= read -r line; do
-        case "$line" in
-            *' path '*) p=${{line##* path }} ;;
-            *) continue ;;
-        esac
-        abs=$(emit_abs "$p") || continue
-        case "$abs" in
-            "$root"|"$root"/*)
-                grep -Fx -- "$abs" "$seen_file" >/dev/null 2>&1 || printf '%s\n' "$abs" >> "$queue_file"
-                ;;
-        esac
-    done
-    # POSIX sh reads newly appended lines from the same file in this loop on the
-    # target systems this app supports, allowing one SSH command to walk nested
-    # cache parents such as send-cache/<date>/@ and @home.
-done < "$queue_file"
+printf 'TSBTRFS_READONLY_BEGIN\t%s\n' "$root"
+readonly_output=$(run_btrfs subvolume list -r -o "$root" 2>&1)
+readonly_status=$?
+printf 'TSBTRFS_READONLY_STATUS\t%s\t%s\n' "$root" "$readonly_status"
+printf '%s\n' "$readonly_output"
+printf 'TSBTRFS_READONLY_END\t%s\n' "$root"
 """.strip()
-
 
 def build_source_btrfs_index(
     source: SourceRunner,
@@ -385,7 +371,7 @@ def build_remote_btrfs_index(
     if not root_path:
         return BtrfsIndex(root="", location="remote")
     root = normalize_path(root_path)
-    script = _remote_recursive_index_script(root, sudo, btrfs_command)
+    script = _remote_bulk_index_script(root, sudo, btrfs_command)
     result = ssh.run("sh -c " + shlex.quote(script), check=False, log_stderr=False, mirror_stderr=False)
     index = BtrfsIndex(root=root, location="remote")
     if result.returncode != 0:
@@ -400,6 +386,8 @@ def build_remote_btrfs_index(
     in_root_show = False
     current_list_root: str | None = None
     current_list_lines: list[str] = []
+    current_readonly_root: str | None = None
+    current_readonly_lines: list[str] = []
 
     def flush_list() -> None:
         nonlocal current_list_root, current_list_lines
@@ -409,8 +397,17 @@ def build_remote_btrfs_index(
         current_list_root = None
         current_list_lines = []
 
+    def flush_readonly() -> None:
+        nonlocal current_readonly_root, current_readonly_lines
+        if current_readonly_root is not None:
+            _mark_readonly_from_list(index, "\n".join(current_readonly_lines), current_readonly_root)
+        current_readonly_root = None
+        current_readonly_lines = []
+
     for line in result.stdout.splitlines():
         if line == "TSBTRFS_ROOT_SHOW_BEGIN":
+            flush_list()
+            flush_readonly()
             in_root_show = True
             continue
         if line == "TSBTRFS_ROOT_SHOW_END":
@@ -421,6 +418,7 @@ def build_remote_btrfs_index(
             continue
         if line.startswith("TSBTRFS_LIST_BEGIN\t"):
             flush_list()
+            flush_readonly()
             current_list_root = normalize_path(line.split("\t", 1)[1])
             continue
         if line.startswith("TSBTRFS_LIST_STATUS\t"):
@@ -433,9 +431,24 @@ def build_remote_btrfs_index(
         if line.startswith("TSBTRFS_LIST_END\t"):
             flush_list()
             continue
+        if line.startswith("TSBTRFS_READONLY_BEGIN\t"):
+            flush_list()
+            flush_readonly()
+            current_readonly_root = normalize_path(line.split("\t", 1)[1])
+            continue
+        if line.startswith("TSBTRFS_READONLY_STATUS\t"):
+            # The read-only list is an optimization. Failure is not fatal; the
+            # app can still fall back to a targeted subvolume show when needed.
+            continue
+        if line.startswith("TSBTRFS_READONLY_END\t"):
+            flush_readonly()
+            continue
         if current_list_root is not None:
             current_list_lines.append(line)
+        elif current_readonly_root is not None:
+            current_readonly_lines.append(line)
     flush_list()
+    flush_readonly()
 
     if include_root and root_show:
         root_meta = btrfs.parse_subvolume_show("\n".join(root_show), Path(root).name, root)

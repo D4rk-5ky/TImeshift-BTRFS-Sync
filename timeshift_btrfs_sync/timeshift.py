@@ -72,23 +72,32 @@ def list_source_snapshots(
     timeshift_command: str,
     btrfs_command: str,
     include_btrfs_info: bool = True,
+    btrfs_index=None,
 ) -> list[SnapshotMeta]:
-    """Discover source snapshots through SSH or local source commands."""
+    """Discover source snapshots through SSH or local source commands.
+
+    When a bulk Btrfs index for ``snapshot_root`` is supplied, discovery fills
+    each configured subvolume from that in-memory metadata. That avoids running
+    one ``btrfs subvolume show`` per Timeshift snapshot over SSH. If discovery
+    verification is disabled, missing entries are represented by path-only
+    metadata and checked later at send time.
+    """
 
     result = source.run(timeshift_cmd(sudo, timeshift_command, ["--list"]))
     snapshots = parse_timeshift_list(result.stdout, snapshot_root)
-    if not include_btrfs_info:
-        for snap in snapshots:
-            for subvol in subvolumes:
-                snap.subvolumes[subvol] = SubvolumeMeta(name=subvol, path=str(Path(snap.path) / subvol))
-        return snapshots
     for snap in snapshots:
         for subvol in subvolumes:
             path = str(Path(snap.path) / subvol)
-            meta = btrfs.source_get_subvolume_meta(source, path=path, name=subvol, sudo=sudo, btrfs_command=btrfs_command, required=False)
-            if not meta:
+            indexed = btrfs_index.meta(path) if btrfs_index is not None else None
+            if indexed:
+                snap.subvolumes[subvol] = indexed
                 continue
-            snap.subvolumes[subvol] = meta
+            if not include_btrfs_info:
+                snap.subvolumes[subvol] = SubvolumeMeta(name=subvol, path=path)
+                continue
+            meta = btrfs.source_get_subvolume_meta(source, path=path, name=subvol, sudo=sudo, btrfs_command=btrfs_command, required=False)
+            if meta:
+                snap.subvolumes[subvol] = meta
     return snapshots
 
 
@@ -101,6 +110,7 @@ def list_remote_snapshots(
     timeshift_command: str,
     btrfs_command: str,
     include_btrfs_info: bool = True,
+    btrfs_index=None,
 ) -> list[SnapshotMeta]:
     """Discover source snapshots using only sudo timeshift and sudo btrfs."""
 
@@ -112,6 +122,7 @@ def list_remote_snapshots(
         timeshift_command=timeshift_command,
         btrfs_command=btrfs_command,
         include_btrfs_info=include_btrfs_info,
+        btrfs_index=btrfs_index,
     )
 
 

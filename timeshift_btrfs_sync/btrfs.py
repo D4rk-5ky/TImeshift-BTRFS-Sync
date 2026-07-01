@@ -425,6 +425,75 @@ def source_ensure_cache_root(
     )
 
 
+def _reuse_existing_cache_snapshot(
+    source: SourceRunner,
+    *,
+    sudo: str,
+    btrfs_command: str,
+    cache_root: str,
+    cache_path: str,
+    subvolume_name: str,
+    original_meta: SubvolumeMeta,
+    cache_index: "BtrfsIndex | None" = None,
+) -> str | None:
+    """Return an existing safe read-only cache snapshot, or None when absent.
+
+    The app must not try to recreate ``send-cache/<snapshot>/<subvolume>``
+    when it already exists. Recreating a Btrfs snapshot either fails or produces
+    a new UUID that cannot be used for previously received incremental parents.
+    Existing cache snapshots are reused only after Btrfs metadata proves they are
+    real read-only subvolumes and, when parent UUIDs are available, descended
+    from the requested original Timeshift subvolume.
+    """
+
+    def validate(meta: SubvolumeMeta | None) -> str | None:
+        if not meta:
+            return None
+        if meta.readonly is not True:
+            raise RuntimeError(
+                "Existing source cache path is a Btrfs subvolume but is not read-only:\n"
+                f"  {cache_path}\n"
+                "Refusing to use or overwrite it. Inspect the send-cache path manually."
+            )
+        if original_meta.uuid and meta.parent_uuid and meta.parent_uuid != original_meta.uuid:
+            raise RuntimeError(
+                "Existing source cache snapshot does not belong to the requested Timeshift snapshot:\n"
+                f"  original: {original_meta.path}\n"
+                f"  original UUID: {original_meta.uuid}\n"
+                f"  cache:    {cache_path}\n"
+                f"  cache Parent UUID: {meta.parent_uuid}\n"
+                "Refusing to use it as a send source."
+            )
+        return cache_path
+
+    indexed = cache_index.meta(cache_path) if cache_index is not None else None
+    reused = validate(indexed)
+    if reused:
+        return reused
+
+    # A bulk cache index may be stale or incomplete, especially after a prior
+    # interrupted run or after switching between SSH and local mode. Always do a
+    # targeted metadata refresh before attempting to create the same cache path.
+    refreshed = _source_refresh_cache_path(cache_index, source, cache_path, sudo=sudo, btrfs_command=btrfs_command)
+    reused = validate(refreshed)
+    if reused:
+        return reused
+
+    if cache_index is None and source_cache_contains(source, sudo, btrfs_command, cache_root, cache_path):
+        meta = source_get_subvolume_meta(
+            source,
+            cache_path,
+            subvolume_name,
+            sudo,
+            btrfs_command,
+            required=False,
+        )
+        reused = validate(meta)
+        if reused:
+            return reused
+    return None
+
+
 def source_ensure_cache_parent(
     source: SourceRunner,
     *,
@@ -483,10 +552,18 @@ def source_ensure_readonly_send_path(
     subvolume_name: str,
     create_readonly_cache: bool,
     cache_index: "BtrfsIndex | None" = None,
+    original_index: "BtrfsIndex | None" = None,
 ) -> str:
-    """Return the original read-only source or create/reuse a read-only cache snapshot."""
+    """Return the original read-only source or create/reuse a read-only cache snapshot.
 
-    original_meta = source_get_subvolume_meta(source, original_path, subvolume_name, sudo, btrfs_command, required=False)
+    When a bulk source snapshot-root index is available, use it first. That
+    avoids a source-side ``btrfs subvolume show`` for every writable Timeshift
+    snapshot just to decide whether a read-only cache snapshot is needed.
+    """
+
+    original_meta = original_index.meta(original_path) if original_index is not None else None
+    if original_meta is None:
+        original_meta = source_get_subvolume_meta(source, original_path, subvolume_name, sudo, btrfs_command, required=False)
     if not original_meta:
         raise RuntimeError(f"Source path is not a Btrfs subvolume or cannot be read: {original_path}")
     if original_meta.readonly is True:
@@ -500,10 +577,18 @@ def source_ensure_readonly_send_path(
     cache_parent = readonly_cache_parent_path(cache_root, snapshot_name)
     cache_path = readonly_cache_path(cache_root, snapshot_name, subvolume_name)
 
-    if cache_index is not None and cache_index.contains(cache_path):
-        return cache_path
-    if cache_index is None and source_cache_contains(source, sudo, btrfs_command, cache_root, cache_path):
-        return cache_path
+    existing_cache_path = _reuse_existing_cache_snapshot(
+        source,
+        sudo=sudo,
+        btrfs_command=btrfs_command,
+        cache_root=cache_root,
+        cache_path=cache_path,
+        subvolume_name=subvolume_name,
+        original_meta=original_meta,
+        cache_index=cache_index,
+    )
+    if existing_cache_path:
+        return existing_cache_path
 
     source_ensure_cache_parent(
         source,
@@ -526,14 +611,20 @@ def source_ensure_readonly_send_path(
         return cache_path
 
     if "target path already exists" in result.stderr.lower():
-        if cache_index is not None:
-            from .remote_index import refresh_source_path
-
-            if refresh_source_path(cache_index, source, cache_path, name=subvolume_name, sudo=sudo, btrfs_command=btrfs_command):
-                return cache_path
-        elif source_cache_contains(source, sudo, btrfs_command, cache_root, cache_path):
-            return cache_path
-    raise RuntimeError("Failed to create read-only source cache snapshot.\n" + result.stderr.strip())
+        existing_cache_path = _reuse_existing_cache_snapshot(
+            source,
+            sudo=sudo,
+            btrfs_command=btrfs_command,
+            cache_root=cache_root,
+            cache_path=cache_path,
+            subvolume_name=subvolume_name,
+            original_meta=original_meta,
+            cache_index=cache_index,
+        )
+        if existing_cache_path:
+            return existing_cache_path
+    detail = result.stderr.strip() or result.stdout.strip() or f"return code {result.returncode}"
+    raise RuntimeError("Failed to create read-only source cache snapshot.\n" + detail)
 
 
 def source_delete_subvolume(

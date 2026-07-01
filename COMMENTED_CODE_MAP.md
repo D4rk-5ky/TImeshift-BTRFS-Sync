@@ -52,8 +52,8 @@ This file describes the current command handlers, shell command families, functi
 - `_looks_like_lock_file()`: refuses to delete a lock target that does not look like the app's simple lock file.
 - `_print_header()`: prints the shared warning block for guarded metadata maintenance.
 - `_require_real_confirmation()`: enforces real-mode danger flags and typed confirmations.
-- `clear_state_file()`: removes only the configured `state_file` after confirmation; the CLI acquires the app lock before calling it in real mode.
-- `delete_lock_file()`: removes only the configured `lock_file` when `flock` proves no running process currently holds it.
+- `clear_state_file()`: removes only the configured `state_file` after confirmation; the CLI runs it inside normal logging and acquires the app lock before calling it in real mode.
+- `delete_lock_file()`: removes only the configured `lock_file` when `flock` proves no running process currently holds it; the CLI runs it inside normal logging so stale-lock cleanup is auditable.
 
 ### `models.py`
 
@@ -218,11 +218,11 @@ This file describes the current command handlers, shell command families, functi
 - `_clean_uuid()`: normalizes Btrfs `-` UUID fields to `None`.
 - `parse_subvolume_list()`: parses `btrfs subvolume list -u -q -R` output into metadata.
 - `_index_from_list_output()`: helper for constructing an index from list output.
-- `build_local_btrfs_index()`: builds a local/destination Btrfs index without SSH.
-- `_remote_recursive_index_script()`: builds the single source shell script used
-  to recursively list source cache subvolumes.
-- `build_source_btrfs_index()`: builds a source cache index using either SSH mode
-  or local mode through `SourceRunner`.
+- `_paths_from_list_output()`: parses path-only Btrfs list output, used by read-only detection.
+- `_mark_readonly_from_list()`: marks indexed subvolumes read-only or writable from one `btrfs subvolume list -r` result.
+- `build_local_btrfs_index()`: builds a local Btrfs index with bulk list commands instead of one `subvolume show` per child.
+- `_remote_bulk_index_script()`: builds the single source shell script used to list UUID metadata and read-only paths below one source root in one SSH session.
+- `build_source_btrfs_index()`: builds a source snapshot-root or cache-root index using either SSH mode or local mode through `SourceRunner`.
 - `build_remote_btrfs_index()`: compatibility wrapper for SSH source indexes.
 - `refresh_source_path()`: refreshes one source path after creation/deletion-sensitive work.
 - `refresh_remote_path()`: compatibility wrapper for refreshing one SSH source path.
@@ -285,7 +285,13 @@ This file describes the current command handlers, shell command families, functi
   `remote_cache_is_empty()`: SSH compatibility wrappers around the source helpers.
 - `cache_child_display_path()`: formats cache child paths for logs.
 - `_source_refresh_cache_path()`: refreshes one source cache path in the optional
-  per-run Btrfs index after cache-root/parent/snapshot creation.
+  per-run Btrfs index after cache-root/parent/snapshot creation or before
+  deciding whether an existing cache snapshot can be reused.
+- `_reuse_existing_cache_snapshot()`: checks one exact source-cache send path
+  before creation. It reuses the path only when Btrfs proves it is an existing
+  read-only subvolume and, when parent UUID metadata is available, that it was
+  created from the requested original Timeshift subvolume. This prevents
+  recreate attempts after interrupted runs or state recovery.
 - `source_ensure_cache_root()`: lazily creates the configured `source.cache_root`
   as a Btrfs subvolume when cache is actually needed. It creates only the exact
   configured root, requires the parent to already exist, and refuses an existing
@@ -294,8 +300,8 @@ This file describes the current command handlers, shell command families, functi
   as a Btrfs subvolume, then creates the timestamp cache parent if missing and
   updates the source cache index when one is supplied.
 - `source_ensure_readonly_send_path()`: returns the original Timeshift path when
-  it is already read-only, otherwise creates/reuses an app-owned read-only cache
-  snapshot for the current send.
+  indexed or probed metadata proves it is already read-only, otherwise creates/reuses
+  an app-owned read-only cache snapshot for the current send.
 - `source_delete_subvolume()`: deletes one source Btrfs subvolume through SSH or local source mode.
 - `source_send_cmd()`: builds the argv for `btrfs send`, including `-p` for
   incremental sends, wrapped through SSH or local source mode.
@@ -312,7 +318,8 @@ This file describes the current command handlers, shell command families, functi
 - `parse_timeshift_list()`: parses `timeshift --list` into snapshots while
   keeping tags/comment/path mutable.
 - `list_source_snapshots()`: runs Timeshift through `SourceRunner`, parses the
-  result, and optionally reads Btrfs metadata for configured subvolumes.
+  result, and fills configured subvolume metadata from the bulk snapshot-root
+  index before falling back to individual Btrfs probes when verification is enabled.
 - `list_remote_snapshots()`: compatibility wrapper for SSH source listing.
 - `create_remote_manual_snapshot_cmd()`: builds `timeshift --create --comments`.
 - `create_source_manual_snapshot()`: runs manual creation through `SourceRunner`.
@@ -353,15 +360,14 @@ This file describes the current command handlers, shell command families, functi
 
 - `SyncError`: fatal sync safety/logic error.
 - `_local_meta()`: reads destination Btrfs metadata through the shared parser.
-- `_source_meta()`: reads source Btrfs metadata through `SourceRunner`.
+- `_source_meta()`: reads source Btrfs metadata, preferring bulk snapshot/cache indexes before falling back to a targeted `subvolume show`.
 - `_human_blank()`: prints a blank line in human-readable summaries.
 - `_human_rule()`: prints section dividers for terminal/log summaries.
 - `_record_sync_event()`: adds one sync/full/incremental/skipped event to the run
   summary without changing state.
 - `_print_sync_summary()`: writes the readable `SYNC SUMMARY` to terminal and `.succes`.
 - `prepare_destination()`: creates destination directories needed for a real run.
-- `list_source_snapshots()`: runs Timeshift source discovery and optionally checks
-  Btrfs metadata for every configured subvolume.
+- `list_source_snapshots()`: runs Timeshift source discovery and uses the bulk source snapshot-root index to avoid one SSH `subvolume show` per configured subvolume.
 - `source_snapshot_index()`: builds a name-to-snapshot dict for the current source list stage.
 - `confirm_source_identity_before_manual_snapshot()`: shared source identity guard
   for automatic and standalone manual snapshot creation. Empty destinations may
@@ -503,7 +509,9 @@ This file describes the current command handlers, shell command families, functi
 - `_stderr_tail_for_exception()`: chooses useful stderr tail text for failure notifications.
 - `_send_notifications()`: sends MQTT/email status after logged commands.
 - `_mail_attachment_paths()`: selects non-empty log files for email attachments.
-- `_with_logging()`: shared wrapper for log creation, command execution, notification sending, and exit code handling.
+- `_path_is_same_or_under()`: checks whether a candidate log directory is inside a selected destroy target without relying on loose string matching.
+- `_safe_destroy_log_dir()`: chooses a log directory for `destroy-leftovers`; it keeps the configured `log_dir` when safe, but switches to a survivor log directory when the configured logs would be deleted with the target.
+- `_with_logging()`: shared wrapper for log creation, command execution, notification sending, and exit code handling. It accepts an optional log-directory override for commands such as `destroy-leftovers` that may delete the configured log path.
 - `_resolve_dry_run()`: merges command flags with `default_dry_run` config.
 - `cmd_init_config()`: writes the packaged config template.
 - `cmd_test_ssh()`: tests the configured source endpoint and required source sudo commands. It is used by both `test-source` and the `test-ssh` alias.
@@ -512,7 +520,7 @@ This file describes the current command handlers, shell command families, functi
 - `cmd_sync()`: loads config, resolves dry-run mode, and calls `sync_once()`.
 - `cmd_prune()`: loads config, refreshes metadata, and runs retention pruning.
 - `cmd_create_manual()`: runs the standalone manual snapshot command after the same source identity guard used by automatic manual creation.
-- `cmd_destroy_leftovers()`: loads config and runs the destructive retirement cleanup command.
+- `cmd_destroy_leftovers()`: loads config, chooses a survivor log directory when needed, and runs the destructive retirement cleanup command inside the normal logging/notification wrapper.
 - `cmd_show_state()`: prints local state summary or raw JSON.
 - `build_parser()`: builds the top-level argparse parser and active subcommands.
 - `main()`: CLI entrypoint and final exception-to-exit-code handler.
@@ -526,7 +534,7 @@ This file describes the current command handlers, shell command families, functi
 - `_is_under()`: verifies a candidate path stays inside the selected cleanup root.
 - `_sort_deepest_first()`: orders subvolumes deepest-first so child subvolumes are deleted before parents.
 - `_collect_recursive_subvolumes()`: walks Btrfs child subvolumes one level at a time so nested cache children are found before deleting the timestamp parent.
-- `_run_quiet()`: runs cleanup probes/deletes without duplicating expected stderr noise.
+- `_run_quiet()`: runs cleanup probes/deletes quietly on the terminal while recording the command, return code, stdout, and stderr in the active run logs.
 - `_run_source_quiet()`: runs quiet source-side cleanup commands through `SourceRunner`.
 - `_path_exists_status()`: separates missing paths from probe failures so reruns can be idempotent.
 - `_local_exists()`: checks local destination path existence using configured sudo.
@@ -535,19 +543,19 @@ This file describes the current command handlers, shell command families, functi
 - `_source_subvolume_meta()`: detects whether a source cleanup root itself is a Btrfs subvolume.
 - `_local_child_subvolumes()`: lists local child Btrfs subvolumes below a cleanup root.
 - `_source_child_subvolumes()`: lists source child Btrfs subvolumes below a cleanup root.
-- `_local_remove_empty_child_dirs()`: removes empty ordinary directories left by deleted local child subvolumes before parent deletion.
+- `_local_remove_empty_child_dirs()`: removes empty ordinary directories below a local cleanup subvolume deepest-first before parent deletion, so stale child-subvolume mountpoint directories do not block `btrfs subvolume delete`.
 - `_local_remove_stale_path()`: removes an ordinary local directory that remains at a path after the subvolume at that path was deleted.
 - `_confirm_or_raise()`: requires exact typed confirmation instead of yes/no.
 - `_delete_local_tree()`: recursively discovers and deletes local child subvolumes deepest-first, then removes stale ordinary directories/files.
-- `_source_delete_subvolumes_batched()`: deletes many source-cache subvolumes in one source command during `destroy-leftovers`.
-- `_delete_source_tree()`: recursively discovers and deletes source child subvolumes deepest-first, then removes stale ordinary directories when normal permissions allow it.
+- `_source_delete_subvolumes_batched()`: deletes many source-cache subvolumes in one source command during `destroy-leftovers`, removing empty ordinary child directories before parent deletion without requiring sudo `rm`, `find`, `chmod`, or `chown`.
+- `_delete_source_tree()`: checks the source send-cache root, recursively walks `btrfs subvolume list -o` from each discovered cache subvolume, deletes nested payload subvolumes such as `@` before timestamp/container parents, and keeps `source.snapshot_root` protected.
 - `_mode_text()`: returns the exact typed phrase for the chosen destructive mode.
 - `_print_target()`: prints one configured cleanup root before any deletion.
 - `_print_result()`: prints one target result with subvolume count and errors.
 - `_result_by_label()`: finds the source or destination destroy result used for normalized payload reporting.
 - `_load_payload_state()`: loads state.json only for reporting protected direct-send payloads; destroy-leftovers still ignores state for delete decisions.
 - `_print_payload_match_if_available()`: prints the normalized source/destination payload match block when both source cache and destination target were selected.
-- `destroy_leftovers()`: main retirement cleanup entry point. It ignores retention/state by design and attempts source/destination targets independently so one failing side does not prevent the other side from being cleaned.
+- `destroy_leftovers()`: main retirement cleanup entry point. It ignores retention/state by design, prints progress before each source/destination target, and attempts source/destination targets independently so one failing side does not prevent the other side from being cleaned.
 
 ### `preflight.py`
 

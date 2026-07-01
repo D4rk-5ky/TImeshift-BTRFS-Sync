@@ -160,13 +160,15 @@ sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolum
 
 The app checks cache paths with Btrfs subvolume listings under `source.cache_root` and, for deletion, under each timestamp cache parent. This prevents normal Timeshift snapshot paths with the same date/name from being mistaken for app-created send-cache snapshots.
 
+Before creating `<cache_root>/<snapshot>/<subvolume>`, the app also does a targeted Btrfs metadata refresh for that exact cache path. If the cache snapshot already exists, is read-only, and its parent UUID matches the original Timeshift subvolume when both UUIDs are available, the app reuses it instead of trying to recreate it. This matters after interrupted runs, state recovery, or switching between SSH and local mode, because an existing read-only cache snapshot has the UUID needed for safe incremental sends.
+
 Every read-only cache snapshot created by `sync` is kept until retention runs. This preserves more possible source/destination UUID common ground when short-lived snapshots, such as hourly snapshots, disappear later. For each pruned snapshot, `prune` attempts both destination deletion and matching source send-cache deletion in one coordinated item. It removes the `state.json` entry only after destination subvolumes and source send-cache are both confirmed gone or already absent. If either side is unavailable, it still attempts the available side and keeps state so the next prune can retry.
 
 Prune only deletes send paths that are explicitly app-owned source-cache paths below `source.cache_root`. It also refuses any source delete candidate that is `source.snapshot_root` or below it, even if stale state or a bad configuration incorrectly marks such a path as cache. If a snapshot was sent directly from a read-only Timeshift original, prune prints it as a protected original send path and never deletes it.
 
-## Remote index/cache optimization
+## Source/destination Btrfs index optimization
 
-At the beginning of a sync run, the app builds short-lived Btrfs indexes for `source.cache_root` and `destination.target_root`. These indexes store paths, UUIDs, parent UUIDs, received UUIDs, and read-only state where Btrfs reports it. Later parent checks, sync-floor checks, and source send-cache cleanup can use dictionary lookups instead of repeatedly starting new source-side `btrfs subvolume list/show` probes.
+At the beginning of a sync run, the app builds short-lived Btrfs indexes for `source.snapshot_root`, `source.cache_root`, and `destination.target_root`. The source indexes are built in bulk: one list reads UUID/parent/received-UUID metadata below the root and one read-only list marks which indexed source subvolumes can be sent directly. In SSH mode this happens inside one SSH session per source root instead of one SSH connection per snapshot/subvolume. Later Timeshift discovery, parent checks, sync-floor checks, send-path checks, and source send-cache cleanup can use dictionary lookups instead of repeatedly starting new source-side `btrfs subvolume list/show` probes.
 
 The index is deliberately per-run only. It is refreshed or updated after operations that change the filesystem: cache snapshot creation refreshes the new source cache path, a successful receive refreshes the new destination path, and prune removes deleted source cache paths from the index. Safety-critical incremental matching still requires the same identity rule:
 
@@ -222,13 +224,17 @@ Examples:
 
 `destroy-leftovers` is a separate destructive command for the case where you no longer want to use this app/setup and want to remove app-created source send-cache and/or destination backup leftovers. It ignores retention rules and `state.json` because it is not a normal prune operation. It never deletes `source.snapshot_root`, because that belongs to Timeshift and contains the user's own source snapshots.
 
+Source send-cache cleanup deletes nested Btrfs subvolumes deepest-first. This matters because cache entries can be container subvolumes such as `send-cache/<snapshot>` with child payload subvolumes such as `send-cache/<snapshot>/@`. The app walks each source cache subvolume with `btrfs subvolume list -o`, deletes children before parents, and removes empty ordinary directory entries left behind by child deletion before retrying the parent. This still uses only the configured source user plus passwordless `btrfs`; it does not require sudo access to `rm`, `find`, `chmod`, or `chown`.
+
 Dry-run is the default:
 
 ```bash
 
 ## Logging and notifications
 
-Set top-level `log_dir` to enable split per-run logs. Logging starts immediately after the config is loaded and before command work begins. Normal app stdout is copied to `.log`. Normal command stderr is copied to `.err`. Transfer stderr is handled differently because successful `btrfs send` and `mbuffer` both write normal status/progress to stderr: that transfer text is kept in `.btrfs`/`.mbuffer`, and is copied to `.err` only if the transfer pipeline fails.
+Set top-level `log_dir` to enable split per-run logs. Logging starts immediately after the config is loaded and before command work begins. Normal app stdout is copied to `.log`. Normal command stderr is copied to `.err`. This applies to sync/prune and also to guarded maintenance/destructive commands such as `destroy-leftovers`, `clear-state`, and `delete-lock`. Transfer stderr is handled differently because successful `btrfs send` and `mbuffer` both write normal status/progress to stderr: that transfer text is kept in `.btrfs`/`.mbuffer`, and is copied to `.err` only if the transfer pipeline fails.
+
+For `destroy-leftovers`, logs must survive the cleanup. If the configured `log_dir` is inside a selected delete target, the command warns and uses a survivor log directory outside the target, such as `./logs` or `~/.cache/timeshift-btrfs-sync/logs`. This avoids opening log files inside a tree that is about to be removed.
 
 ```text
 *.log      normal command/control output
@@ -377,7 +383,7 @@ Creates one source Timeshift on-demand snapshot using the configured source. Tim
 
 ### `clear-state`
 
-Removes the configured `state_file` after guarded confirmation. This command does not delete source snapshots, source cache snapshots, destination snapshots, or Timeshift-owned paths. It is useful after a failed transfer when you want the next sync to rebuild state from exact Btrfs UUID matches.
+Removes the configured `state_file` after guarded confirmation. This command does not delete source snapshots, source cache snapshots, destination snapshots, or Timeshift-owned paths. It is useful after a failed transfer when you want the next sync to rebuild state from exact Btrfs UUID matches. When `log_dir` is enabled, the command writes the normal split run logs.
 
 Real removal acquires the existing app lock first, so it refuses to run while another sync/prune job is active. It does not create destination/helper folders as a side effect.
 
@@ -390,7 +396,7 @@ Real removal acquires the existing app lock first, so it refuses to run while an
 
 ### `delete-lock`
 
-Removes the configured `lock_file` only when it is stale and no running `ts-btrfs` process currently holds it. This command is not for stopping a running sync/prune job. Stop the process first; then use `delete-lock` only if the file remains.
+Removes the configured `lock_file` only when it is stale and no running `ts-btrfs` process currently holds it. This command is not for stopping a running sync/prune job. Stop the process first; then use `delete-lock` only if the file remains. When `log_dir` is enabled, the command writes the normal split run logs.
 
 | Flag | What it does | Why it may be needed |
 |---|---|---|
@@ -410,7 +416,7 @@ Shows the local state tracking file.
 
 ### `destroy-leftovers`
 
-Destroys configured source/destination leftover trees when this app setup is being retired. This is not a prune command and does not use retention or `state.json` safety.
+Destroys configured source/destination leftover trees when this app setup is being retired. This is not a prune command and does not use retention or `state.json` safety. When `log_dir` is enabled, the command is logged like other app commands. It also prints progress before each source/destination target and during subvolume discovery/deletion, so long destination cleanup does not look like a frozen SSH run after the source side finishes.
 
 | Flag | What it does | Why it may be needed |
 |---|---|---|

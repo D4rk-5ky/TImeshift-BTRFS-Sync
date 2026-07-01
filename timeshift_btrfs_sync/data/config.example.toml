@@ -306,6 +306,9 @@ verify_incremental_parent_once_per_run = true
 #   sudo -n btrfs subvolume create <cache_root>/<snapshot-name>
 # Read-only send snapshots are then created with:
 #   sudo -n btrfs subvolume snapshot -r <original> <cache_root>/<snapshot>/<subvolume>
+# If that exact cache snapshot already exists, the app verifies it is a
+# read-only Btrfs subvolume with matching parent identity and reuses it instead
+# of trying to recreate it.
 cache_root = "/timeshift-btrfs/.ts-btrfs-sync/send-cache"
 create_readonly_cache = true
 

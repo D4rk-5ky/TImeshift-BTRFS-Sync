@@ -122,7 +122,60 @@ def _mail_attachment_paths(logger) -> list[Path] | None:
     except Exception:
         return None
 
-def _with_logging(config, command_name: str, callback):
+def _path_is_same_or_under(path: Path | str, root: Path | str) -> bool:
+    """Return True when path is root or below root after local normalization."""
+
+    try:
+        path_norm = Path(path).expanduser().resolve(strict=False)
+        root_norm = Path(root).expanduser().resolve(strict=False)
+        path_norm.relative_to(root_norm)
+        return True
+    except Exception:
+        return False
+
+
+def _safe_destroy_log_dir(config, selected_delete_roots: list[Path]) -> Path | None:
+    """Return a log directory that will survive a destructive cleanup.
+
+    Normal commands use the configured ``log_dir``.  destroy-leftovers is
+    different: the configured log directory may live inside destination.target_root,
+    and that target may be deleted by the same command.  If so, use a stable
+    fallback under the current working directory or the user's cache directory so
+    the destructive-run logs remain available after cleanup.
+    """
+
+    configured = config.log_dir
+    if configured is None:
+        return None
+    selected = [Path(root).expanduser() for root in selected_delete_roots]
+    if not any(_path_is_same_or_under(configured, root) for root in selected):
+        return configured
+
+    candidates = [
+        Path.cwd() / "logs",
+        Path.home() / ".cache" / "timeshift-btrfs-sync" / "logs",
+    ]
+    for candidate in candidates:
+        if any(_path_is_same_or_under(candidate, root) for root in selected):
+            continue
+        try:
+            candidate.mkdir(mode=0o755, parents=True, exist_ok=True)
+            print(
+                "WARNING: configured log_dir is inside a destroy-leftovers target; "
+                f"using survivor log_dir instead: {candidate}",
+                file=sys.stderr,
+            )
+            return candidate
+        except OSError:
+            continue
+    print(
+        "WARNING: configured log_dir is inside a destroy-leftovers target and no survivor log_dir could be prepared; "
+        "file logging is disabled for this command.",
+        file=sys.stderr,
+    )
+    return None
+
+def _with_logging(config, command_name: str, callback, *, log_dir_override: Path | None = None):
     """Run a command with optional logging and MQTT notification.
 
     If config.log_dir is None, this is just a direct callback call plus optional
@@ -131,7 +184,7 @@ def _with_logging(config, command_name: str, callback):
     re-raised to main().
     """
 
-    logger = create_run_logger(config.log_dir, config.name)
+    logger = create_run_logger(config.log_dir if log_dir_override is None else log_dir_override, config.name)
     with active_logger(logger):
         if logger:
             logger.info(f"CLI COMMAND: {command_name}")
@@ -328,56 +381,75 @@ def cmd_create_manual(args) -> int:
 
 
 def cmd_clear_state(args) -> int:
-    """Guardedly remove the configured state_file."""
+    """Guardedly remove the configured state_file with normal run logging."""
 
     config = load_config(args.config)
     dry_run = not args.run
 
-    if dry_run:
-        clear_state_file(config, dry_run=True, danger_confirmed=False)
+    def _run() -> int:
+        if dry_run:
+            clear_state_file(config, dry_run=True, danger_confirmed=False)
+            return 0
+
+        # Acquire the existing app lock for real state clearing so sync/prune cannot
+        # update state.json at the same time. This maintenance command deliberately
+        # does not create destination/helper paths; it only touches configured
+        # metadata files. If the lock directory is missing, FileLock raises a clear
+        # error instead of creating backup folders as a side effect.
+        print(f"Acquiring lock: {config.lock_file}")
+        with FileLock(config.lock_file):
+            clear_state_file(
+                config,
+                dry_run=False,
+                danger_confirmed=args.i_understand_this_clears_state,
+            )
         return 0
 
-    # Acquire the existing app lock for real state clearing so sync/prune cannot
-    # update state.json at the same time. This maintenance command deliberately
-    # does not create destination/helper paths; it only touches configured
-    # metadata files. If the lock directory is missing, FileLock raises a clear
-    # error instead of creating backup folders as a side effect.
-    print(f"Acquiring lock: {config.lock_file}")
-    with FileLock(config.lock_file):
-        clear_state_file(
-            config,
-            dry_run=False,
-            danger_confirmed=args.i_understand_this_clears_state,
-        )
-    return 0
+    return _with_logging(config, "clear-state", _run)
 
 
 def cmd_delete_lock(args) -> int:
-    """Guardedly remove the configured lock_file if it is stale."""
+    """Guardedly remove the configured lock_file if it is stale, with logging."""
 
     config = load_config(args.config)
     dry_run = not args.run
-    delete_lock_file(
-        config,
-        dry_run=dry_run,
-        danger_confirmed=args.i_understand_this_deletes_lock,
-    )
-    return 0
+
+    def _run() -> int:
+        delete_lock_file(
+            config,
+            dry_run=dry_run,
+            danger_confirmed=args.i_understand_this_deletes_lock,
+        )
+        return 0
+
+    return _with_logging(config, "delete-lock", _run)
 
 
 def cmd_destroy_leftovers(args) -> int:
-    """Destroy configured leftovers when this app setup is being retired."""
+    """Destroy configured leftovers with normal run logging enabled."""
 
     config = load_config(args.config)
     dry_run = not args.run
-    destroy_leftovers(
-        config,
-        delete_source=args.delete_source or args.delete_both,
-        delete_destination=args.delete_destination or args.delete_both,
-        dry_run=dry_run,
-        danger_confirmed=args.i_understand_this_destroys_data,
-    )
-    return 0
+    delete_source = args.delete_source or args.delete_both
+    delete_destination = args.delete_destination or args.delete_both
+    selected_delete_roots: list[Path] = []
+    if delete_source and config.source.cache_root:
+        selected_delete_roots.append(Path(config.source.cache_root))
+    if delete_destination:
+        selected_delete_roots.append(Path(config.destination.target_root))
+    log_dir = _safe_destroy_log_dir(config, selected_delete_roots)
+
+    def _run() -> int:
+        destroy_leftovers(
+            config,
+            delete_source=delete_source,
+            delete_destination=delete_destination,
+            dry_run=dry_run,
+            danger_confirmed=args.i_understand_this_destroys_data,
+        )
+        return 0
+
+    return _with_logging(config, "destroy-leftovers", _run, log_dir_override=log_dir)
 
 def cmd_show_state(args) -> int:
     config = load_config(args.config)

@@ -1,3 +1,33 @@
+## 0.1.34
+
+- Fixed read-only source-cache reuse before creation. When a writable Timeshift subvolume needs a send-cache snapshot, the app now refreshes and validates the exact `<cache_root>/<snapshot>/<subvolume>` path before attempting `btrfs subvolume snapshot -r`.
+- Existing cache snapshots are reused only when Btrfs proves they are real read-only subvolumes and, when available, their Parent UUID matches the original Timeshift source subvolume UUID.
+- This prevents failed recreate attempts after interrupted runs, state recovery, or switching between SSH and local mode when valid read-only cache snapshots already exist.
+- Updated README.md, COMMENTED_CODE_MAP.md, and the config example comments to document current cache reuse behavior.
+
+## 0.1.33
+
+- Enabled normal split run logging for `destroy-leftovers`, `clear-state`, and `delete-lock` so these guarded maintenance/destructive commands produce `.log`, `.err`, `.btrfs`, `.mbuffer`, and `.succes` files when `log_dir` is configured.
+- Added a survivor log-directory fallback for `destroy-leftovers`: when the configured `log_dir` is inside a selected delete target, the command uses an outside fallback log directory so the cleanup logs are not deleted with the target.
+- Added progress output before each destroy target and during source/destination discovery/deletion so long destination cleanup no longer appears frozen after the source side finishes.
+- Destroy cleanup probe/delete commands are now recorded in the active `.log`/`.err` files for easier SSH and destination cleanup debugging.
+
+## 0.1.32
+
+- Improved `destroy-leftovers` cleanup for nested source send-cache subvolumes.
+- Source send-cache deletion now recursively discovers child Btrfs subvolumes by walking each subvolume with `btrfs subvolume list -o`, so child payload subvolumes such as `send-cache/<snapshot>/@` are deleted before their parent container subvolume.
+- Empty ordinary directory entries left behind by deleted child subvolumes are removed before retrying/deleting the parent subvolume.
+- The source-side cleanup still uses only the configured source user plus passwordless `btrfs`; it does not require sudo access to `rm`, `find`, `chmod`, or `chown`.
+- `source.snapshot_root` remains globally protected and is never deleted, pruned, destroyed, or cleaned.
+
+## 0.1.31
+
+- Added a bulk source snapshot-root Btrfs index so Timeshift discovery can reuse in-memory metadata instead of running one source-side `btrfs subvolume show` per snapshot/subvolume.
+- Changed source cache and snapshot-root indexing to collect UUID/parent/received-UUID data with bulk `btrfs subvolume list -u -q -R -o <root>` and read-only status with bulk `btrfs subvolume list -r -o <root>`.
+- In SSH mode, each source root index is built inside one SSH session, reducing repeated SSH calls while keeping the same UUID safety checks.
+- Send-path selection, parent verification, sync-floor checks, state recovery, and Timeshift discovery now prefer the bulk source snapshot/cache indexes and fall back to targeted `subvolume show` only when needed.
+- Updated README.md and COMMENTED_CODE_MAP.md to describe the current index behavior without adding previous-version explanations there.
+
 ## 0.1.30
 
 - Added a pre-manual sync viability check so automatic Timeshift on-demand snapshot creation happens only after the app proves the current source/destination chain can continue.

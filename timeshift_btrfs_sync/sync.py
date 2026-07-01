@@ -33,7 +33,27 @@ def _local_meta(config: AppConfig, path: str | Path, name: str, required: bool =
     return btrfs.get_subvolume_meta("local", path, name, config.destination.sudo, config.destination.btrfs_command, required=required)
 
 
-def _source_meta(config: AppConfig, source: SourceRunner, path: str | Path, name: str, required: bool = True) -> SubvolumeMeta | None:
+def _source_meta(
+    config: AppConfig,
+    source: SourceRunner,
+    path: str | Path,
+    name: str,
+    required: bool = True,
+    *,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
+    source_cache_index: remote_index.BtrfsIndex | None = None,
+) -> SubvolumeMeta | None:
+    """Return source metadata, preferring bulk indexes over one-off probes."""
+
+    path_text = str(path)
+    if source_cache_index is not None and btrfs.path_is_under_cache(path_text, config.source.cache_root):
+        indexed = source_cache_index.meta(path_text)
+        if indexed is not None:
+            return indexed
+    if source_snapshot_index is not None:
+        indexed = source_snapshot_index.meta(path_text)
+        if indexed is not None:
+            return indexed
     return btrfs.source_get_subvolume_meta(source, path, name, config.source.sudo, config.source.btrfs_command, required=required)
 
 
@@ -148,7 +168,13 @@ def prepare_destination(config: AppConfig) -> None:
         raise SyncError(str(exc)) from exc
 
 
-def list_source_snapshots(config: AppConfig, source: SourceRunner, *, include_btrfs_info: bool = True) -> list[SnapshotMeta]:
+def list_source_snapshots(
+    config: AppConfig,
+    source: SourceRunner,
+    *,
+    include_btrfs_info: bool = True,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
+) -> list[SnapshotMeta]:
     """Discover source Timeshift snapshots."""
 
     return timeshift.list_source_snapshots(
@@ -159,6 +185,7 @@ def list_source_snapshots(config: AppConfig, source: SourceRunner, *, include_bt
         timeshift_command=config.source.timeshift_command,
         btrfs_command=config.source.btrfs_command,
         include_btrfs_info=include_btrfs_info,
+        btrfs_index=source_snapshot_index,
     )
 
 
@@ -173,6 +200,7 @@ def confirm_source_identity_before_manual_snapshot(
     source_by_name: dict[str, SnapshotMeta] | None = None,
     load_source_index=None,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str]:
     """Print and enforce the shared manual-snapshot source identity guard."""
@@ -196,6 +224,7 @@ def confirm_source_identity_before_manual_snapshot(
         state,
         source_by_name,
         source_cache_index=source_cache_index,
+        source_snapshot_index=source_snapshot_index,
         destination_index=destination_index,
     )
     if not confirmed_name:
@@ -265,6 +294,7 @@ def _maybe_create_manual_snapshot(
     dry_run: bool,
     only_snapshot: str | None,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> bool:
     """Optionally create a source Timeshift tag O snapshot before sync.
@@ -311,6 +341,7 @@ def _maybe_create_manual_snapshot(
         state,
         source_by_name,
         source_cache_index=source_cache_index,
+        source_snapshot_index=source_snapshot_index,
         destination_index=destination_index,
     )
     _human_rule("----")
@@ -456,6 +487,7 @@ def _ensure_source_send_path(
     snapshot_name: str,
     subvolume: SubvolumeMeta,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
 ) -> str:
     """Return a real read-only source path, creating cache snapshots if needed.
 
@@ -473,6 +505,7 @@ def _ensure_source_send_path(
         subvolume_name=subvolume.name,
         create_readonly_cache=config.source.create_readonly_cache,
         cache_index=source_cache_index,
+        original_index=source_snapshot_index,
     )
 
 
@@ -578,6 +611,7 @@ def _match_source_path_to_destination_received_uuid(
     expected_uuids: set[str] | None = None,
     require_readonly: bool = False,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[bool, str]:
     """Check whether a source subvolume UUID matches the destination identity."""
@@ -592,11 +626,15 @@ def _match_source_path_to_destination_received_uuid(
             except Exception as exc:
                 return False, f"cannot read destination metadata for {destination_path}: {exc}"
 
-    remote_meta = None
-    if source_cache_index is not None and btrfs.path_is_under_cache(source_path, config.source.cache_root):
-        remote_meta = source_cache_index.meta(source_path)
-    if remote_meta is None:
-        remote_meta = _source_meta(config, source, source_path, subvolume_name, required=False)
+    remote_meta = _source_meta(
+        config,
+        source,
+        source_path,
+        subvolume_name,
+        required=False,
+        source_snapshot_index=source_snapshot_index,
+        source_cache_index=source_cache_index,
+    )
     if not remote_meta or not remote_meta.uuid:
         return False, f"{label} not found or has no UUID: {source_path}"
 
@@ -624,6 +662,7 @@ def _select_verified_parent_send_path(
     subvolume_name: str,
     state_parent: dict | None,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str]:
     """Select a safe source parent path for incremental send without recreating it.
@@ -685,6 +724,7 @@ def _select_verified_parent_send_path(
             label=label,
             require_readonly=True,
             source_cache_index=source_cache_index,
+            source_snapshot_index=source_snapshot_index,
             destination_index=destination_index,
         )
         if ok:
@@ -753,6 +793,7 @@ def _find_confirmed_sync_floor(
     source_by_name: dict[str, SnapshotMeta],
     *,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str]:
     """Return newest state snapshot that still exists on source and matches UUIDs.
@@ -827,6 +868,7 @@ def _find_confirmed_sync_floor(
                     label=path,
                     expected_uuids=_state_uuid_values_for_path(state_subvol, path=path, source_path=source_path),
                     source_cache_index=source_cache_index,
+                    source_snapshot_index=source_snapshot_index,
                     destination_index=destination_index,
                 )
                 sub_reasons.append(reason)
@@ -914,6 +956,7 @@ def _match_existing_destination_to_source(
     subvolume_name: str,
     destination_meta: SubvolumeMeta,
     source_cache_index: remote_index.BtrfsIndex | None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[SnapshotMeta | None, SubvolumeMeta | None, str | None, SubvolumeMeta | None, SubvolumeMeta | None, str]:
     """Match one existing destination subvolume to an exact source/cache UUID.
 
@@ -935,7 +978,15 @@ def _match_existing_destination_to_source(
     original_meta = None
     if source_subvol:
         try:
-            original_meta = _source_meta(config, source, original_path, subvolume_name, required=False)
+            original_meta = _source_meta(
+                config,
+                source,
+                original_path,
+                subvolume_name,
+                required=False,
+                source_snapshot_index=source_snapshot_index,
+                source_cache_index=source_cache_index,
+            )
         except Exception:
             original_meta = None
         if original_meta and original_meta.uuid == destination_meta.received_uuid:
@@ -978,7 +1029,8 @@ def _recover_state_from_existing_destination(
     *,
     dry_run: bool,
     source_cache_index: remote_index.BtrfsIndex | None,
-    destination_index: remote_index.BtrfsIndex | None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
+    destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str]:
     """Rebuild missing/empty state.json from proven source/destination matches.
 
@@ -1033,6 +1085,7 @@ def _recover_state_from_existing_destination(
                 subvolume_name=subvolume_name,
                 destination_meta=dest_meta,
                 source_cache_index=source_cache_index,
+                source_snapshot_index=source_snapshot_index,
             )
             if not send_path or source_snapshot is None or original_subvol is None:
                 snapshot_all_required = False
@@ -1127,6 +1180,7 @@ def _select_parent(
     trusted_parent_send_paths: set[str] | None = None,
     allow_full_seed: bool = False,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> tuple[str | None, str | None]:
     """Choose the newest valid incremental parent.
@@ -1212,6 +1266,7 @@ def _select_parent(
             subvolume_name=subvolume_name,
             state_parent=parent_state,
             source_cache_index=source_cache_index,
+            source_snapshot_index=source_snapshot_index,
             destination_index=destination_index,
         )
         if parent_send_path:
@@ -1258,6 +1313,7 @@ def _verify_sync_viability_before_manual_snapshot(
     only_snapshot: str | None,
     only_missing: bool,
     source_cache_index: remote_index.BtrfsIndex | None = None,
+    source_snapshot_index: remote_index.BtrfsIndex | None = None,
     destination_index: remote_index.BtrfsIndex | None = None,
 ) -> None:
     """Prove sync can start before asking Timeshift to create a snapshot.
@@ -1288,6 +1344,7 @@ def _verify_sync_viability_before_manual_snapshot(
         state,
         source_by_name,
         source_cache_index=source_cache_index,
+        source_snapshot_index=source_snapshot_index,
         destination_index=destination_index,
     )
     if not sync_floor_name:
@@ -1316,6 +1373,7 @@ def _verify_sync_viability_before_manual_snapshot(
                 trusted_parent_send_paths=set(),
                 allow_full_seed=False,
                 source_cache_index=source_cache_index,
+                source_snapshot_index=source_snapshot_index,
                 destination_index=destination_index,
             )
         except SyncError as exc:
@@ -1406,6 +1464,13 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
 
     destination_empty_at_start = not _destination_has_existing_snapshots(config)
 
+    snapshot_root_btrfs_index = remote_index.build_source_btrfs_index(
+        source,
+        config.source.snapshot_root,
+        sudo=config.source.sudo,
+        btrfs_command=config.source.btrfs_command,
+        include_root=False,
+    )
     source_cache_index = (
         remote_index.build_source_btrfs_index(
             source,
@@ -1425,6 +1490,10 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
     )
     _human_blank()
     print("SOURCE INDEX CACHE")
+    if snapshot_root_btrfs_index.root_missing:
+        print(f"  source snapshots: missing or not listable; indexed 0 subvolumes below {snapshot_root_btrfs_index.root}")
+    else:
+        print(f"  source snapshots: indexed {len(snapshot_root_btrfs_index.by_path)} subvolume(s) below {snapshot_root_btrfs_index.root}")
     if source_cache_index is None:
         print("  source cache: disabled; no source.cache_root configured")
     elif source_cache_index.root_missing:
@@ -1447,7 +1516,14 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             else "Discovery verification: fast mode, delaying btrfs checks until send time."
         )
         _human_rule("----")
-        return source_snapshot_index(list_source_snapshots(config, source, include_btrfs_info=config.source.verify_subvolumes_at_discovery))
+        return source_snapshot_index(
+            list_source_snapshots(
+                config,
+                source,
+                include_btrfs_info=config.source.verify_subvolumes_at_discovery,
+                source_snapshot_index=snapshot_root_btrfs_index,
+            )
+        )
 
     source_by_name = discover_source_index("before manual snapshot safety check")
     before_manual_snapshot_names = set(source_by_name)
@@ -1461,6 +1537,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             source_by_name,
             dry_run=dry_run,
             source_cache_index=source_cache_index,
+            source_snapshot_index=snapshot_root_btrfs_index,
             destination_index=destination_index,
         )
 
@@ -1473,6 +1550,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         only_snapshot=only_snapshot,
         only_missing=only_missing,
         source_cache_index=source_cache_index,
+        source_snapshot_index=snapshot_root_btrfs_index,
         destination_index=destination_index,
     )
 
@@ -1484,9 +1562,17 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
         dry_run=dry_run,
         only_snapshot=only_snapshot,
         source_cache_index=source_cache_index,
+        source_snapshot_index=snapshot_root_btrfs_index,
         destination_index=destination_index,
     )
     if created_manual_snapshot:
+        snapshot_root_btrfs_index = remote_index.build_source_btrfs_index(
+            source,
+            config.source.snapshot_root,
+            sudo=config.source.sudo,
+            btrfs_command=config.source.btrfs_command,
+            include_root=False,
+        )
         source_by_name = discover_source_index("after manual snapshot creation")
         created_names = sorted(set(source_by_name) - before_manual_snapshot_names)
         _human_blank()
@@ -1518,6 +1604,7 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 state,
                 source_by_name,
                 source_cache_index=source_cache_index,
+                source_snapshot_index=snapshot_root_btrfs_index,
                 destination_index=destination_index,
             )
             if sync_floor_name:
@@ -1602,12 +1689,20 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                 trusted_parent_send_paths=trusted_parent_send_paths,
                 allow_full_seed=destination_empty_at_start,
                 source_cache_index=source_cache_index,
+                source_snapshot_index=snapshot_root_btrfs_index,
                 destination_index=destination_index,
             )
             current_send_path = (
                 _preview_send_path(config, snapshot.name, subvolume)
                 if dry_run
-                else _ensure_source_send_path(config, source, snapshot.name, subvolume, source_cache_index)
+                else _ensure_source_send_path(
+                    config,
+                    source,
+                    snapshot.name,
+                    subvolume,
+                    source_cache_index,
+                    snapshot_root_btrfs_index,
+                )
             )
             mode = "incremental" if parent_send_path else "full"
 
@@ -1713,7 +1808,15 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
             # metadata lets later runs establish a prune-safe high-watermark without
             # maintaining tombstones for every deleted destination snapshot.
             try:
-                original_meta = _source_meta(config, source, subvolume.path, subvol_name, required=False)
+                original_meta = _source_meta(
+                    config,
+                    source,
+                    subvolume.path,
+                    subvol_name,
+                    required=False,
+                    source_snapshot_index=snapshot_root_btrfs_index,
+                    source_cache_index=source_cache_index,
+                )
             except Exception:
                 original_meta = None
             try:
@@ -1727,7 +1830,15 @@ def sync_once(config: AppConfig, state: dict, *, dry_run: bool, limit: int | Non
                         btrfs_command=config.source.btrfs_command,
                     )
                 else:
-                    send_meta = _source_meta(config, source, current_send_path, subvol_name, required=False)
+                    send_meta = _source_meta(
+                        config,
+                        source,
+                        current_send_path,
+                        subvol_name,
+                        required=False,
+                        source_snapshot_index=snapshot_root_btrfs_index,
+                        source_cache_index=source_cache_index,
+                    )
             except Exception:
                 send_meta = None
 

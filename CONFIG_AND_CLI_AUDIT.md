@@ -412,3 +412,10 @@ Manual snapshot create commands intentionally omit explicit `--tags O`; Timeshif
 ## State recovery safety
 
 When `state.json` is missing or empty and destination snapshots already exist, `sync` may rebuild state from exact Btrfs UUID matches. Destination names alone are not trusted, and existing unadopted destination subvolumes are not deleted automatically.
+
+
+## Maintenance and destructive command logging
+
+- `destroy-leftovers`, `clear-state`, and `delete-lock` use the same `_with_logging()` wrapper as normal app commands when `log_dir` is enabled.
+- `destroy-leftovers` must not write logs into a selected delete target. If the configured `log_dir` is inside a target being destroyed, the CLI chooses a survivor log directory outside that target.
+- `clear-state` and `delete-lock` operate only on exact configured files and still produce logs for dry-run and real execution.
